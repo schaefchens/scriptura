@@ -77,6 +77,9 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   let pageCount = 1;
   let shownPassages = '';
   let layout: Layout = { kind: 'scroll' };
+  let destroyed = false;
+  /** Fonts waited for, once each: until they come, others stand in and are measured instead. */
+  const awaited = new Set<string>();
   const highlightName = `scriptura-word-${id}`;
 
   function render() {
@@ -91,6 +94,11 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     shownPassages = JSON.stringify(passages);
 
     blocks = library.blocks(passages, { fontSize, versePerLine, companions });
+    const loading = [...new Set(blocks.map(familyOf))].filter((family) => !fontsLoaded(family) && !awaited.has(family));
+    if (loading.length > 0) {
+      loading.forEach((family) => awaited.add(family));
+      Promise.all(loading.map((family) => document.fonts.load(`16px ${family}`))).then(() => destroyed || render());
+    }
     const along = new Set(blocks.filter((block) => block.column > 0).map((block) => block.passage));
     const sideBySide = parallel === 'columns' && along.size > 0;
     const sizes = blocks.map((block) => block.letterHeight / letterHeight(block.letter, familyOf(block)));
@@ -121,7 +129,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     root.style.color = colors.text;
     root.dataset.paging = options.paging;
     highlightStyle.textContent = `::highlight(${highlightName}) { background-color: ${colors.highlight}; }`;
-    layout = arrange(sideBySide, rightToLeft);
+    layout = arrange(sectionsOf(along, sideBySide), rightToLeft);
 
     const keys = new Map(words.map((word, index) => [key(word.place), index]));
     const anchor = anchorAt === undefined ? undefined : kept.slice(0, anchorAt + 1).reverse().map((word) => keys.get(key(word.place))).find((index) => index !== undefined);
@@ -178,119 +186,213 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     return [element, blockPieces];
   }
 
-  type Layout = { kind: 'scroll' } | { kind: 'columns'; stride: number; rightToLeft: boolean } | { kind: 'grid pages'; rightToLeft: boolean };
+  type Layout = { kind: 'scroll' } | { kind: 'pages'; rightToLeft: boolean };
 
-  /** Places the paragraphs: flowing, or side by side in rows; in one endless scroll, or in pages. */
-  function arrange(sideBySide: boolean, rightToLeft: boolean): Layout {
+  /** Blocks from `start` to before `end` laid out on their own terms: flowing through a page's columns, or in rows of cells side by side. */
+  type Section = { start: number; end: number; grid: boolean; columns: number };
+
+  /**
+   * The blocks in sections: all of them flowing – or with books side by side, each passage read
+   * along in rows of cells, a column for each book, and passages read alone flowing as they would alone.
+   */
+  function sectionsOf(along: Set<number>, sideBySide: boolean): Section[] {
+    const page = Math.max(options.columns, 1);
+    if (!sideBySide) return [{ start: 0, end: blocks.length, grid: false, columns: page }];
+    const sections: Section[] = [];
+    let start = 0;
+    while (start < blocks.length) {
+      const passage = blocks[start].passage;
+      let end = start;
+      while (end < blocks.length && blocks[end].passage === passage) end++;
+      const last = sections.at(-1);
+      if (!along.has(passage) && last && !last.grid) last.end = end;
+      else if (!along.has(passage)) sections.push({ start, end, grid: false, columns: page });
+      else sections.push({ start, end, grid: true, columns: Math.max(...blocks.slice(start, end).map((block) => block.column)) + 1 });
+      start = end;
+    }
+    return sections;
+  }
+
+  /**
+   * Places the sections: in one endless scroll each under the one before, laid out as they come into
+   * sight; in pages, each on pages of its own, all of them a page's width apart.
+   */
+  function arrange(sections: Section[], rightToLeft: boolean): Layout {
     const { paging, sideMargin: margin } = options;
-    const gap = Math.max(margin, 16);
     content.removeAttribute('style');
     // Pages and columns from the right: the scroll starts there too.
     root.dir = content.dir = rightToLeft ? 'rtl' : 'ltr';
-    content.style.padding = `${INSET}px ${margin}px`;
-    if (sideBySide) {
-      const cells = gridCells();
-      const columns = Math.max(...blocks.map((block) => block.column)) + 1;
-      if (paging !== 'pages') {
-        Object.assign(content.style, grid(columns, gap));
-        content.append(...cells.map(({ element }) => element));
-        pageCount = 1;
-        return { kind: 'scroll' };
-      }
-      return gridPages(cells, columns, gap, rightToLeft);
-    }
-    content.append(...paragraphs);
     if (paging !== 'pages') {
+      content.style.padding = `${INSET}px ${margin}px`;
+      const width = root.clientWidth - 2 * margin;
+      for (const section of sections) {
+        const element = document.createElement('div');
+        if (section.grid) {
+          element.append(...rowsOf(section).map((row) => lazy(row.element, width / section.columns)));
+        } else {
+          element.append(...paragraphs.slice(section.start, section.end).map((paragraph) => lazy(paragraph, width)));
+        }
+        content.append(element);
+      }
       pageCount = 1;
       return { kind: 'scroll' };
     }
-    // The text flows through the columns of a page, and on through the next page's.
-    const width = root.clientWidth - 2 * margin;
-    Object.assign(content.style, {
-      height: `${root.clientHeight}px`,
-      columnCount: String(Math.max(options.columns, 1)),
-      columnGap: `${gap}px`,
+    Object.assign(content.style, { display: 'flex', alignItems: 'flex-start', height: `${root.clientHeight}px` });
+    pageCount = sections.reduce((pages, section) => pages + (section.grid ? gridPages(section) : flowPages(section)), 0);
+    return { kind: 'pages', rightToLeft };
+  }
+
+  /** An element the browser lays out only as it comes near the sight, as tall as it is guessed to be till then, and then as it was. */
+  function lazy(element: HTMLElement, width: number) {
+    const characters = element.textContent?.length ?? 0;
+    const size = parseFloat(element.style.fontSize || element.querySelector('p')?.style.fontSize || '20');
+    const lines = Math.max(1, Math.ceil((characters * size * 0.5) / Math.max(width, 1)));
+    Object.assign(element.style, { contentVisibility: 'auto', containIntrinsicSize: `auto ${Math.round(lines * size * 1.5 * options.lineSpacing)}px` });
+    return element;
+  }
+
+  /**
+   * A section's rows side by side: each a grid of its own, a column for each book, so a row is as
+   * tall as its tallest cell; and whether it is of headings.
+   */
+  function rowsOf(section: Section) {
+    const rows: { element: HTMLElement; heading: boolean }[] = [];
+    let index = section.start;
+    while (index < section.end) {
+      const row = document.createElement('div');
+      Object.assign(row.style, {
+        display: 'grid',
+        gridTemplateColumns: `repeat(${section.columns}, minmax(0, 1fr))`,
+        columnGap: `${Math.max(options.sideMargin, 16)}px`,
+        alignItems: 'start',
+      });
+      const number = blocks[index].row;
+      let heading = true;
+      while (index < section.end && blocks[index].row === number) {
+        const cell = document.createElement('div');
+        const column = blocks[index].column;
+        cell.style.gridColumn = String(column + 1);
+        while (index < section.end && blocks[index].row === number && blocks[index].column === column) {
+          heading &&= blocks[index].kind === 'heading';
+          cell.append(paragraphs[index++]);
+        }
+        row.append(cell);
+      }
+      rows.push({ element: row, heading });
+    }
+    return rows;
+  }
+
+  /** A page of the section's own, as wide as the reader. */
+  function newPage() {
+    const page = document.createElement('div');
+    Object.assign(page.style, { flex: 'none', boxSizing: 'border-box', width: `${root.clientWidth}px`, padding: `${INSET}px ${options.sideMargin}px` });
+    return page;
+  }
+
+  /**
+   * A section that flows, through the columns of its pages. CSS columns run on past the element's
+   * width, a column's width and a gap apart; with gaps of two margins, a page's columns and its
+   * margins come to the reader's width. Its pages counted, it is made as wide as they are.
+   */
+  function flowPages(section: Section) {
+    const { sideMargin: margin } = options;
+    const columns = section.columns;
+    const element = document.createElement('div');
+    Object.assign(element.style, {
+      flex: 'none',
+      boxSizing: 'content-box',
+      width: `${root.clientWidth - 2 * margin}px`,
+      height: `${root.clientHeight - 2 * INSET}px`,
+      padding: `${INSET}px ${margin}px`,
+      columnCount: String(columns),
+      columnGap: `${2 * margin}px`,
       columnFill: 'auto',
     });
-    const stride = width + gap;
-    pageCount = Math.max(1, Math.ceil((content.scrollWidth - 2 * margin + gap) / stride - 0.01));
-    return { kind: 'columns', stride, rightToLeft };
+    element.append(...paragraphs.slice(section.start, section.end));
+    content.append(element);
+    const pages = Math.max(1, Math.ceil(element.scrollWidth / root.clientWidth - 0.01));
+    Object.assign(element.style, { width: `${pages * root.clientWidth - 2 * margin}px`, columnCount: String(pages * columns) });
+    return pages;
   }
 
-  /** The paragraphs side by side: each book's in a row is a cell, in the book's column. */
-  function gridCells() {
-    const cells: { row: number; column: number; element: HTMLElement }[] = [];
-    blocks.forEach((block, index) => {
-      const last = cells.at(-1);
-      if (last && last.row === block.row && last.column === block.column) {
-        last.element.append(paragraphs[index]);
+  /**
+   * A section's rows on pages of their own: as many rows as fit on each, and a row of headings only
+   * with the row after it. A row that doesn't fit on a page, or below the headings it follows, runs
+   * on over pages of its own, each cell through columns a page apart, so each goes on in its column
+   * on the next page – the headings moved into its cells, to start them.
+   */
+  function gridPages(section: Section) {
+    const rows = rowsOf(section);
+    const height = root.clientHeight - 2 * INSET;
+    // Measured on a page first.
+    const measured = newPage();
+    measured.append(...rows.map((row) => row.element));
+    content.append(measured);
+    const heights = rows.map((row) => row.element.offsetHeight);
+    measured.remove();
+    let pages = 0;
+    let page = newPage();
+    let used = 0;
+    // The row of headings on this page that the next row goes on from.
+    let headings: HTMLElement | undefined;
+    const close = () => {
+      content.append(page);
+      pages++;
+      page = newPage();
+      used = 0;
+    };
+    rows.forEach(({ element: row, heading }, index) => {
+      // Headings go on a page only with the row after them, as much of it as a page holds.
+      const next = heading && index + 1 < rows.length ? Math.min(heights[index + 1], height) : 0;
+      if (used > 0 && !headings && used + heights[index] + next > height) close();
+      const above = headings;
+      headings = heading ? row : undefined;
+      if (used + heights[index] <= height) {
+        page.append(row);
+        used += heights[index];
         return;
       }
-      const element = document.createElement('div');
-      element.style.gridColumn = String(block.column + 1);
-      element.append(paragraphs[index]);
-      cells.push({ row: block.row, column: block.column, element });
+      if (above) startWith(row, above, used);
+      headings = undefined;
+      // In the page first, so its cells have their widths; then empty pages for it to run on through.
+      page.append(row);
+      close();
+      const spilled = spill(row, height);
+      for (let more = 1; more < spilled; more++) close();
     });
-    // Rows numbered from 1 on, as the grid counts them.
-    const rows = [...new Set(cells.map(({ row }) => row))];
-    const numbers = new Map(rows.map((row, index) => [row, index + 1]));
-    for (const cell of cells) cell.element.style.gridRow = String(numbers.get(cell.row));
-    return cells;
+    if (used > 0) close();
+    return pages;
   }
 
-  function grid(columns: number, gap: number) {
-    return { display: 'grid', gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`, columnGap: `${gap}px`, alignItems: 'start' };
+  /**
+   * The headings a row goes on from, moved into the start of its cells, each column's as tall as
+   * their row, so the cells go on alike below them.
+   */
+  function startWith(row: HTMLElement, headings: HTMLElement, height: number) {
+    const columns = new Map([...(headings.children as HTMLCollectionOf<HTMLElement>)].map((cell) => [cell.style.gridColumn, cell]));
+    for (const cell of row.children as HTMLCollectionOf<HTMLElement>) {
+      const start = document.createElement('div');
+      Object.assign(start.style, { display: 'flow-root', blockSize: `${height}px` });
+      start.append(...(columns.get(cell.style.gridColumn)?.childNodes ?? []));
+      columns.delete(cell.style.gridColumn);
+      cell.prepend(start);
+    }
+    // Headings with nothing below them.
+    row.append(...columns.values());
+    headings.remove();
   }
 
-  /** Rows side by side in pages: as many rows as fit on each, a row taller than a page on one of its own that scrolls. */
-  function gridPages(cells: { row: number; element: HTMLElement }[], columns: number, gap: number, rightToLeft: boolean): Layout {
-    // Measured in one grid first.
-    Object.assign(content.style, grid(columns, gap));
-    content.append(...cells.map(({ element }) => element));
-    const height = root.clientHeight - 2 * INSET;
-    const rows = new Map<number, { top: number; bottom: number; cells: HTMLElement[] }>();
-    for (const { row, element } of cells) {
-      const style = getComputedStyle(element.lastElementChild ?? element);
-      const bottom = element.offsetTop + element.offsetHeight + parseFloat(style.marginBlockEnd || '0');
-      const known = rows.get(row);
-      if (known) {
-        known.bottom = Math.max(known.bottom, bottom);
-        known.cells.push(element);
-      } else {
-        rows.set(row, { top: element.offsetTop, bottom, cells: [element] });
-      }
+  /** A row taller than a page: each cell in columns as tall as a page and a page apart. How many pages the row takes. */
+  function spill(row: HTMLElement, height: number) {
+    row.style.blockSize = `${height}px`;
+    let pages = 1;
+    for (const cell of row.children as HTMLCollectionOf<HTMLElement>) {
+      const width = cell.getBoundingClientRect().width;
+      Object.assign(cell.style, { blockSize: `${height}px`, columnWidth: `${width}px`, columnGap: `${root.clientWidth - width}px`, columnFill: 'auto' });
+      pages = Math.max(pages, Math.ceil((cell.scrollWidth + root.clientWidth - width) / root.clientWidth - 0.01));
     }
-    const pages: HTMLElement[][] = [[]];
-    let used = 0;
-    for (const { top, bottom, cells: rowCells } of rows.values()) {
-      const rowHeight = bottom - top;
-      if (used > 0 && used + rowHeight > height) {
-        pages.push([]);
-        used = 0;
-      }
-      pages.at(-1)!.push(...rowCells);
-      used += rowHeight;
-    }
-    content.replaceChildren();
-    content.removeAttribute('style');
-    Object.assign(content.style, { display: 'flex', height: `${root.clientHeight}px` });
-    for (const pageCells of pages) {
-      const element = document.createElement('div');
-      Object.assign(element.style, grid(columns, gap), {
-        flex: `0 0 ${root.clientWidth}px`,
-        boxSizing: 'border-box',
-        padding: `${INSET}px ${options.sideMargin}px`,
-        overflowY: 'auto',
-        alignContent: 'start',
-      });
-      // Rows numbered anew on each page.
-      const first = Math.min(...pageCells.map((cell) => Number(cell.style.gridRow)));
-      for (const cell of pageCells) cell.style.gridRow = String(Number(cell.style.gridRow) - first + 1);
-      element.append(...pageCells);
-      content.append(element);
-    }
-    pageCount = pages.length;
-    return { kind: 'grid pages', rightToLeft };
+    return pages;
   }
 
   /** The font a block is set in: its own, the one given for its language, or the system's. */
@@ -392,13 +494,9 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       root.scrollTo({ top: root.scrollTop + rect.top - area.top - offset, behavior: where === 'top' ? 'instant' : 'smooth' });
       return;
     }
-    if (layout.kind === 'columns') {
-      const x = layout.rightToLeft ? area.right - rect.right - Math.abs(root.scrollLeft) : rect.left - area.left + root.scrollLeft;
-      goTo(Math.floor((x - options.sideMargin + 1) / layout.stride));
-      return;
-    }
-    const pageElement = paragraphs[words[index].block].closest<HTMLElement>('.scriptura-content > div');
-    goTo(pageElement ? [...content.children].indexOf(pageElement) : 0);
+    // Every page is as wide as the reader, wherever a section's columns run.
+    const x = layout.rightToLeft ? area.right - rect.right + Math.abs(root.scrollLeft) : rect.left - area.left + root.scrollLeft;
+    goTo(Math.floor(x / root.clientWidth));
   }
 
   function goTo(target: number) {
@@ -407,8 +505,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       if (target === 0) root.scrollTo({ top: 0, behavior: 'instant' });
       return;
     }
-    const stride = layout.kind === 'columns' ? layout.stride : root.clientWidth;
-    root.scrollTo({ left: (layout.rightToLeft ? -1 : 1) * page * stride, behavior: 'instant' });
+    root.scrollTo({ left: (layout.rightToLeft ? -1 : 1) * page * root.clientWidth, behavior: 'instant' });
   }
 
   function turn(forward: boolean) {
@@ -416,7 +513,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       root.scrollBy({ top: (forward ? 1 : -1) * (root.clientHeight - 2 * INSET), behavior: 'smooth' });
       return;
     }
-    goTo(page + (forward ? 1 : -1));
+    // From the page in sight, however it came there.
+    goTo(Math.round(Math.abs(root.scrollLeft) / root.clientWidth) + (forward ? 1 : -1));
   }
 
   function move(step: MoveStep) {
@@ -492,6 +590,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     refresh: render,
     turn,
     destroy() {
+      destroyed = true;
       resizes.disconnect();
       CSS.highlights?.delete(highlightName);
       root.remove();
@@ -521,13 +620,16 @@ function measure(text: string, family: string, size: number) {
   return canvas.measureText(text);
 }
 
+/** Whether the fonts of `family` are loaded – or none need to be – so its letters measure as they show. */
+const fontsLoaded = (family: string) => document.fonts.check(`16px ${family}`);
+
 /** How tall `letter` is drawn in `family`, per pixel of the font's size – in the font the browser takes for it. */
 function letterHeight(letter: string, family: string) {
   const known = heights.get(`${family} ${letter}`);
   if (known) return known;
   const metrics = measure(letter, family, 100);
   const height = (metrics.actualBoundingBoxAscent - Math.max(-metrics.actualBoundingBoxDescent, 0)) / 100 || 0.5;
-  heights.set(`${family} ${letter}`, height);
+  if (fontsLoaded(family)) heights.set(`${family} ${letter}`, height);
   return height;
 }
 
@@ -537,7 +639,7 @@ function lineHeight(family: string) {
   if (known) return known;
   const metrics = measure('x', family, 100);
   const height = (metrics.fontBoundingBoxAscent + metrics.fontBoundingBoxDescent) / 100 || 1.2;
-  lineHeights.set(family, height);
+  if (fontsLoaded(family)) lineHeights.set(family, height);
   return height;
 }
 

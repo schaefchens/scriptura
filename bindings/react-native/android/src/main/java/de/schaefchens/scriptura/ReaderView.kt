@@ -176,8 +176,8 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     val anchor = anchorWord?.let { words[it].start } ?: 0
     pages.readables = namingChapters(readables)
     val rightToLeft = withWords.isNotEmpty() && withWords.all { it.rightToLeft }
-    val cells = if (sideBySide) cellsOf(paragraphs, paragraphRanges) else emptyList()
-    val format = TextFormat(background, columns, rightToLeft, paging != "pages", paint, lineSpacing.toFloat(), pixels(margin), cells)
+    val sections = if (sideBySide) sectionsOf(paragraphs, paragraphRanges, along) else listOf(Section(0, text.length))
+    val format = TextFormat(background, columns, rightToLeft, paging != "pages", paint, lineSpacing.toFloat(), pixels(margin), sections)
     pages.show(text, format, anchor)
     marked?.let(indices::get)?.let {
       current = it
@@ -198,15 +198,39 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     else -> if (paragraph.kind == "verse" && next.kind == "verse") 0.2f else 0.5f
   }
 
+  /**
+   * Books read along side by side, each passage a section of its own: cells in rows, or, for a
+   * passage read alone, text that flows as it would alone.
+   */
+  private fun sectionsOf(paragraphs: List<Paragraph>, ranges: List<Pair<Int, Int>>, along: Set<Int>): List<Section> {
+    val sections = mutableListOf<Section>()
+    var start = 0
+    while (start < paragraphs.size) {
+      val passage = paragraphs[start].passage
+      var end = start
+      while (end < paragraphs.size && paragraphs[end].passage == passage) end++
+      val last = sections.lastOrNull()
+      if (passage !in along && last != null && last.cells.isEmpty()) {
+        // Passages read alone, one after the other, flow on as one.
+        sections[sections.lastIndex] = Section(last.start, ranges[end - 1].second)
+      } else {
+        val cells = if (passage in along) cellsOf(paragraphs.subList(start, end), ranges.subList(start, end)) else emptyList()
+        sections += Section(ranges[start].first, ranges[end - 1].second, cells)
+      }
+      start = end
+    }
+    return sections
+  }
+
   /** The paragraphs side by side, each running from the first offset of its range to the second: each book's in a row is a cell, in the book's column. */
   private fun cellsOf(paragraphs: List<Paragraph>, ranges: List<Pair<Int, Int>>): List<Cell> {
     val cells = mutableListOf<Cell>()
     for ((paragraph, range) in paragraphs.zip(ranges)) {
       val last = cells.lastOrNull()
       if (last != null && last.row == paragraph.row && last.column == paragraph.column) {
-        cells[cells.lastIndex] = Cell(last.start, range.second, last.row, last.column)
+        cells[cells.lastIndex] = Cell(last.start, range.second, last.row, last.column, last.heading && paragraph.kind == "heading")
       } else {
-        cells += Cell(range.first, range.second, paragraph.row, paragraph.column)
+        cells += Cell(range.first, range.second, paragraph.row, paragraph.column, paragraph.kind == "heading")
       }
     }
     return cells

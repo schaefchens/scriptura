@@ -38,17 +38,23 @@ class ReaderView: ExpoView {
   /// How tall a letter is in a font, per point of its size, by font and letter.
   private var letterHeights: [String: Double] = [:]
   private var renderStarted: CFTimeInterval = 0
-  /// Whether this text's layout is yet to be reported: once, as a new size lays it out again.
+  /// When the first pages of this text showed, and whether its layout is yet to be reported: once,
+  /// as a new size lays it out again.
+  private var firstShown: Double?
   private var reportPending = false
 
   required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
     pages.onTap = { [weak self] index in self?.selectWord(atCharacter: index) }
+    pages.onFirstPages = { [weak self] in
+      guard let self, reportPending, firstShown == nil else { return }
+      firstShown = milliseconds(since: renderStarted)
+    }
     pages.onPaginated = { [weak self] count in
       guard let self, reportPending else { return }
       reportPending = false
       let time = milliseconds(since: renderStarted)
-      onLaidOut(["pages": paging == "pages" ? count : 0, "milliseconds": time, "all": time])
+      onLaidOut(["pages": paging == "pages" ? count : 0, "milliseconds": firstShown ?? time, "all": time])
     }
     addSubview(pages)
     booksObserver = NotificationCenter.default.addObserver(forName: Self.booksChanged, object: nil, queue: .main) { [weak self] _ in
@@ -67,6 +73,7 @@ class ReaderView: ExpoView {
 
   func render() {
     renderStarted = CACurrentMediaTime()
+    firstShown = nil
     reportPending = true
     pages.highlightColor = colors.highlight
     let references = passages.map {
@@ -121,9 +128,10 @@ class ReaderView: ExpoView {
     // before it that is still there.
     let anchorWord = anchorAt.flatMap { at in kept[...at].reversed().lazy.compactMap { indices[$0.place] }.first }
     let anchor = anchorWord.map { words[$0].range.location } ?? 0
-    let cells = sideBySide ? Self.cells(of: paragraphs, at: paragraphRanges) : []
-    // Unchangeable, as it is laid out on another thread.
-    pages.show(NSAttributedString(attributedString: text), background: colors.background, columns: columns, cells: cells,
+    let whole = [PagedText.Section(range: NSRange(location: 0, length: text.length), cells: [])]
+    let sections = sideBySide ? Self.sections(of: paragraphs, at: paragraphRanges, along: along) : whole
+    // Unchangeable, as it is laid out on other threads.
+    pages.show(NSAttributedString(attributedString: text), background: colors.background, columns: columns, sections: sections,
                rightToLeft: rightToLeft, continuous: paging != "pages", margin: margin, from: anchor)
     pages.accessibilityElements = Readable.namingChapters(readables).map { ReadableElement(reader: self, pages: pages, readable: $0) }
     if let marked, let index = indices[marked] {
@@ -203,15 +211,36 @@ class ReaderView: ExpoView {
     return paragraph.kind == "verse" && next.kind == "verse" ? 0.2 : 0.5
   }
 
+  /// Books read along side by side, each passage a section of its own: cells in rows, or, for a
+  /// passage read alone, text that flows as it would alone.
+  private static func sections(of paragraphs: [Paragraph], at ranges: [NSRange], along: Set<UInt32>) -> [PagedText.Section] {
+    var sections: [PagedText.Section] = []
+    var start = 0
+    while start < paragraphs.count {
+      let passage = paragraphs[start].passage
+      let end = paragraphs[start...].firstIndex { $0.passage != passage } ?? paragraphs.count
+      let range = NSUnionRange(ranges[start], ranges[end - 1])
+      if !along.contains(passage), let last = sections.last, last.cells.isEmpty {
+        // Passages read alone, one after the other, flow on as one.
+        sections[sections.count - 1] = PagedText.Section(range: NSUnionRange(last.range, range), cells: [])
+      } else {
+        let cells = along.contains(passage) ? Self.cells(of: Array(paragraphs[start..<end]), at: Array(ranges[start..<end])) : []
+        sections.append(PagedText.Section(range: range, cells: cells))
+      }
+      start = end
+    }
+    return sections
+  }
+
   /// The paragraphs side by side: each book's in a row is a cell, in the book's column.
   private static func cells(of paragraphs: [Paragraph], at ranges: [NSRange]) -> [PagedText.Cell] {
     var cells: [PagedText.Cell] = []
     for (paragraph, range) in zip(paragraphs, ranges) {
       let (row, column) = (Int(paragraph.row), Int(paragraph.column))
       if let last = cells.last, last.row == row, last.column == column {
-        cells[cells.count - 1] = PagedText.Cell(range: NSUnionRange(last.range, range), row: row, column: column)
+        cells[cells.count - 1] = PagedText.Cell(range: NSUnionRange(last.range, range), row: row, column: column, heading: last.heading && paragraph.kind == "heading")
       } else {
-        cells.append(PagedText.Cell(range: range, row: row, column: column))
+        cells.append(PagedText.Cell(range: range, row: row, column: column, heading: paragraph.kind == "heading"))
       }
     }
     return cells

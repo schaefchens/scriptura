@@ -1,21 +1,32 @@
 import UIKit
 
 /// The reader's text in pages turned one by one, each in columns the text flows through, or in one
-/// endless scroll. TextKit 2 lays the whole text out once at a column's width, off the main thread –
-/// a long book takes a tenth of a second, where TextKit 1 with a text container per column took
-/// seconds – and the text is cut between lines into parts of a column's height. Each part shows in a
-/// text view of its own, which breaks it into the same lines: as a column on a page, or stacked under
-/// the part before it. A whole surah in a single text view would take seconds, as TextKit 2 lays out
-/// and draws a paragraph as one piece. Only the parts around those in sight have views.
+/// endless scroll. TextKit 2 lays the text out at a column's width, off the main thread, and it is
+/// cut between lines into parts of a column's height. Each part shows in a text view of its own,
+/// which breaks it into the same lines: as a column on a page, or stacked under the part before it.
+/// A whole surah in a single text view would take seconds, as TextKit 2 lays out and draws a
+/// paragraph as one piece. Only the parts around those in sight have views.
 ///
-/// Books read side by side come in cells instead, a column for each book: every cell is a part,
-/// level with the others in its row.
+/// The text comes in sections, each laid out at its own width: text that flows, or books read along
+/// side by side, in cells, a column for each book, each row level. In pages, each section starts a
+/// page. A section is laid out in chunks of whole paragraphs, which TextKit breaks into the same lines
+/// as the whole: the pages up to the reader's place show first, and the rest is laid out on all cores.
 final class PagedText: UIScrollView, UIScrollViewDelegate {
-  /// Paragraphs of the text that stand side by side with others: in a row, in a column of it.
+  /// Paragraphs of the text that stand side by side with others: in a row, in a column of it, and
+  /// whether they are headings, which go on a page only with the row after them.
   struct Cell {
     let range: NSRange
     let row: Int
     let column: Int
+    let heading: Bool
+  }
+
+  /// Paragraphs of the text laid out on their own terms: flowing through a page's columns, or in
+  /// cells side by side.
+  struct Section {
+    let range: NSRange
+    /// None for text that flows.
+    let cells: [Cell]
   }
 
   /// The text as last given; until it is laid out, the one before it stays in sight.
@@ -25,32 +36,40 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   /// it in sight.
   private(set) var anchor = 0
   var highlightColor = UIColor.yellow
+  /// The columns of a page that flowing text runs through.
   private var columns = 1
-  private var cells: [Cell] = []
+  private var sections: [Section] = []
   private var continuous = false
   private var margin: CGFloat = 16
   /// The text's background, which shows with its layout.
   private var background = UIColor.white
   private var layout = Layout()
-  /// The text laid out in lines at a column's width, which a new height only cuts anew; and the
-  /// text and width lines are being laid out for on another thread.
+  /// The text laid out in lines, each section at its width – so far, or all of it – which a new
+  /// height only cuts anew; and the text and widths lines are being laid out for on other threads.
   private var lines = Lines()
-  private var linesUnderWay: (text: NSAttributedString, width: CGFloat)?
+  private var linesUnderWay: (text: NSAttributedString, widths: [CGFloat])?
   /// The size the latest layout was asked for, and a count of the layouts begun, so one that a
   /// newer one replaced is dropped.
   private var requestedSize = CGSize.zero
   private var generation = 0
   private var highlighted: NSRange?
+  /// A character to bring into sight once the text is laid out that far.
+  private var pendingSight: Int?
   /// The views in sight, by page – or in one endless scroll, by part.
   private var views: [Int: [PartView]] = [:]
 
   /// A tapped character, by its index in the text.
   var onTap: ((Int) -> Void)?
+  /// The first pages show, before all of the text is laid out.
+  var onFirstPages: (() -> Void)?
   /// The whole text is laid out, into this many pages, or parts in one endless scroll.
   var onPaginated: ((Int) -> Void)?
 
   /// Above and below the text.
   private static let inset: CGFloat = 12
+  /// How far past the reader's place the text is laid out before it shows, and how much a chunk holds.
+  private static let firstPages = 8000
+  private static let chunkLength = 12000
   private var gap: CGFloat { max(margin, 16) }
 
   override init(frame: CGRect) {
@@ -66,21 +85,21 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
 
   private var pageCount: Int { layout.pages.count }
 
-  /// Shows `text` from the character at `anchor` on: flowing through the columns – or with `cells`,
-  /// in their rows, a column for each. Right-to-left text such as a surah opens on the right and
-  /// runs its pages and columns from the right, as such books do: the view is mirrored, and each
-  /// part mirrored back.
-  func show(_ text: NSAttributedString, background: UIColor, columns: Int, cells: [Cell], rightToLeft: Bool, continuous: Bool, margin: CGFloat, from anchor: Int) {
+  /// Shows `text` from the character at `anchor` on, in its sections. Right-to-left text such as a
+  /// surah opens on the right and runs its pages and columns from the right, as such books do: the
+  /// view is mirrored, and each part mirrored back.
+  func show(_ text: NSAttributedString, background: UIColor, columns: Int, sections: [Section], rightToLeft: Bool, continuous: Bool, margin: CGFloat, from anchor: Int) {
     self.text = text
     self.background = background
     self.anchor = anchor
-    self.cells = cells
-    self.columns = cells.isEmpty ? (continuous ? 1 : max(columns, 1)) : (cells.map(\.column).max() ?? 0) + 1
+    self.sections = sections
+    self.columns = continuous ? 1 : max(columns, 1)
     self.continuous = continuous
     self.margin = margin
     isPagingEnabled = !continuous
     showsVerticalScrollIndicator = continuous
     highlighted = nil
+    pendingSight = nil
     transform = rightToLeft ? CGAffineTransform(scaleX: -1, y: 1) : .identity
     // A layout under way is of the text before.
     generation += 1
@@ -96,46 +115,153 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
       layOut()
     }
     // Until the text is laid out for this size, what is in sight stays as it is.
-    if layout.partSize == partSize {
+    if layout.size == bounds.size {
       showPartsInSight()
     }
   }
 
-  /// Lays the text out in lines at a column's width, on another thread – unless that is done or
+  /// The width of a section's columns: a page's, or a book's side by side.
+  private func width(of section: Section) -> CGFloat {
+    let columns = section.cells.isEmpty ? self.columns : (section.cells.map(\.column).max() ?? 0) + 1
+    let width = (bounds.width - 2 * margin - CGFloat(columns - 1) * gap) / CGFloat(columns)
+    return max(width.rounded(.down), 1)
+  }
+
+  /// A column's height; in one endless scroll, a screen's.
+  private var columnHeight: CGFloat { max(bounds.height - 2 * Self.inset, 1) }
+
+  /// Lays the sections out in lines at their widths, on other threads – unless that is done or
   /// under way: a new height alone, as the view settles into its place, only cuts them anew.
   private func layOut() {
     requestedSize = bounds.size
-    let width = partSize.width
-    if lines.text === text && lines.width == width {
+    let widths = sections.map(width(of:))
+    if lines.text === text && lines.widths == widths {
       return cut()
     }
-    if let underWay = linesUnderWay, underWay.text === text, underWay.width == width {
+    if let underWay = linesUnderWay, underWay.text === text, underWay.widths == widths {
       return
     }
     generation += 1
-    let (run, text, background) = (generation, text, background)
-    linesUnderWay = (text, width)
+    let (run, text, background, sections, first) = (generation, text, background, sections, anchor + Self.firstPages)
+    linesUnderWay = (text, widths)
     DispatchQueue.global(qos: .userInitiated).async {
-      let lines = Self.lines(of: text, width: width, background: background)
-      DispatchQueue.main.async { [weak self] in
-        guard let self, run == generation else { return }
-        linesUnderWay = nil
-        self.lines = lines
-        cut()
+      Self.lines(of: text, sections: sections, widths: widths, background: background, first: first) { lines in
+        DispatchQueue.main.async { [weak self] in
+          guard let self, run == generation else { return }
+          if lines.complete {
+            linesUnderWay = nil
+          }
+          self.lines = lines
+          cut()
+        }
       }
     }
   }
 
-  /// Cuts the lines into parts of the height in sight, or into cells.
+  /// The sections laid out in chunks of whole paragraphs: first those up to `first`, the reader's
+  /// place and a little after, then all the others side by side. Each time, all laid out so far is
+  /// handed over.
+  private static func lines(of text: NSAttributedString, sections: [Section], widths: [CGFloat], background: UIColor, first: Int,
+                            deliver: (Lines) -> Void) {
+    let string = text.string as NSString
+    var chunks: [(section: Int, range: NSRange)] = []
+    for (index, section) in sections.enumerated() {
+      var start = section.range.location
+      while start < NSMaxRange(section.range) {
+        var end = min(start + chunkLength, NSMaxRange(section.range))
+        if end < NSMaxRange(section.range) {
+          // To the end of the paragraph there, without its newline.
+          end = min(NSMaxRange(string.paragraphRange(for: NSRange(location: end, length: 0))) - 1, NSMaxRange(section.range))
+        }
+        chunks.append((index, NSRange(location: start, length: end - start)))
+        start = end + 1
+      }
+    }
+    // Each chunk in a slot of its own, filled on whichever thread lays it out.
+    let laid = UnsafeMutableBufferPointer<Chunk>.allocate(capacity: chunks.count)
+    laid.initialize(repeating: Chunk())
+    defer {
+      laid.baseAddress?.deinitialize(count: chunks.count)
+      laid.deallocate()
+    }
+    let layOut = { (indices: Range<Int>) in
+      DispatchQueue.concurrentPerform(iterations: indices.count) { offset in
+        let (section, range) = chunks[indices.lowerBound + offset]
+        laid[indices.lowerBound + offset] = chunk(of: text, in: range, width: widths[section])
+      }
+    }
+    let lines = { (count: Int) in
+      var lines = Lines(text: text, background: background, widths: widths, complete: count == chunks.count)
+      for index in 0..<count {
+        let (section, range) = chunks[index]
+        if lines.sections.last?.section != section {
+          lines.sections.append(SectionLines(section: section, start: range.location))
+        }
+        let offset = lines.sections[lines.sections.count - 1].height
+        lines.sections[lines.sections.count - 1].lines += laid[index].lines.map { Line(location: $0.location, top: $0.top + offset, bottom: $0.bottom + offset) }
+        lines.sections[lines.sections.count - 1].height += laid[index].height
+        lines.sections[lines.sections.count - 1].end = NSMaxRange(range)
+        lines.end = NSMaxRange(range)
+      }
+      return lines
+    }
+    let shownFirst = (chunks.firstIndex { NSMaxRange($0.range) >= first } ?? chunks.count - 1) + 1
+    layOut(0..<shownFirst)
+    if shownFirst < chunks.count {
+      deliver(lines(shownFirst))
+      layOut(shownFirst..<chunks.count)
+    }
+    deliver(lines(chunks.count))
+  }
+
+  /// Whole paragraphs laid out on their own, which TextKit breaks into the lines it does in the whole
+  /// text: where each line starts and stands, from the chunk's top.
+  private static func chunk(of text: NSAttributedString, in range: NSRange, width: CGFloat) -> Chunk {
+    let content = NSTextContentStorage()
+    let manager = NSTextLayoutManager()
+    content.addTextLayoutManager(manager)
+    let container = NSTextContainer(size: CGSize(width: width, height: 0))
+    container.lineFragmentPadding = 0
+    manager.textContainer = container
+    content.attributedString = text.attributedSubstring(from: range)
+    var lines: [Line] = []
+    manager.enumerateTextLayoutFragments(from: content.documentRange.location, options: [.ensuresLayout]) { fragment in
+      let paragraphStart = range.location + content.offset(from: content.documentRange.location, to: fragment.rangeInElement.location)
+      let fragmentTop = fragment.layoutFragmentFrame.minY
+      for line in fragment.textLineFragments {
+        let bounds = line.typographicBounds
+        lines.append(Line(location: paragraphStart + line.characterRange.location, top: fragmentTop + bounds.minY, bottom: fragmentTop + bounds.maxY))
+      }
+      return true
+    }
+    // The next chunk's first line stands below this one's last as far as its paragraph's spacing asks.
+    let style = range.length > 0 ? text.attribute(.paragraphStyle, at: NSMaxRange(range) - 1, effectiveRange: nil) as? NSParagraphStyle : nil
+    return Chunk(lines: lines, height: (lines.last?.bottom ?? 0) + (style?.paragraphSpacing ?? 0))
+  }
+
+  /// Places the lines laid out so far: each section's on pages of its own – flowing through the
+  /// columns, or in rows of cells side by side – or, in one endless scroll, each under the one before.
   private func cut() {
-    let size = partSize
-    guard lines.width == size.width else { return }
-    let (parts, height) = cells.isEmpty ? flow(lines, size: size) : grid(lines, size: size)
+    let widths = sections.map(width(of:))
+    guard lines.text === text, lines.widths == widths else { return }
+    var parts: [Part] = []
+    var (page, top) = (0, CGFloat(0))
+    for laid in lines.sections {
+      let (width, cells) = (widths[laid.section], sections[laid.section].cells)
+      let placed = cells.isEmpty ? flow(laid, width: width, page: page, top: top) : grid(laid, cells: cells, width: width, page: page, top: top)
+      parts += placed.parts
+      (page, top) = (placed.page, placed.top)
+    }
+    if continuous {
+      // In one endless scroll, each part is a page of its own.
+      parts = parts.enumerated().map { Part(range: $1.range, top: $1.top, page: $0, frame: $1.frame) }
+    }
     var pages = [[Int]](repeating: [], count: (parts.map(\.page).max() ?? -1) + 1)
     for (index, part) in parts.enumerated() {
       pages[part.page].append(index)
     }
-    use(Layout(text: lines.text, background: lines.background, partSize: size, parts: parts, pages: pages, lines: lines.lines, height: height))
+    use(Layout(text: lines.text, background: lines.background, size: bounds.size, parts: parts, pages: pages,
+               lines: lines.sections.flatMap(\.lines), height: top, end: lines.end, complete: lines.complete))
   }
 
   private func use(_ layout: Layout) {
@@ -149,108 +275,108 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     // Not by setting contentOffset, which leaves a scroll under way running on.
     setContentOffset(offset(showing: anchor), animated: false)
     showPartsInSight()
-    onPaginated?(pageCount)
+    if let pending = pendingSight, pending < layout.end || layout.complete {
+      pendingSight = nil
+      show(characterAt: pending)
+    }
+    if layout.complete {
+      onPaginated?(pageCount)
+    } else {
+      onFirstPages?()
+    }
     UIAccessibility.post(notification: .layoutChanged, argument: nil)
   }
 
-  /// The text laid out once at a column's width: where each line starts, and where it stands.
-  private static func lines(of text: NSAttributedString, width: CGFloat, background: UIColor) -> Lines {
-    let content = NSTextContentStorage()
-    let manager = NSTextLayoutManager()
-    content.addTextLayoutManager(manager)
-    let container = NSTextContainer(size: CGSize(width: width, height: 0))
-    container.lineFragmentPadding = 0
-    manager.textContainer = container
-    content.attributedString = text
-    var lines = Lines(text: text, background: background, width: width)
-    manager.enumerateTextLayoutFragments(from: content.documentRange.location, options: [.ensuresLayout]) { fragment in
-      let paragraphStart = content.offset(from: content.documentRange.location, to: fragment.rangeInElement.location)
-      let fragmentTop = fragment.layoutFragmentFrame.minY
-      for line in fragment.textLineFragments {
-        let bounds = line.typographicBounds
-        lines.lines.append(Line(location: paragraphStart + line.characterRange.location, top: fragmentTop + bounds.minY, bottom: fragmentTop + bounds.maxY))
-        lines.height = fragmentTop + bounds.maxY
-      }
-      return true
-    }
-    return lines
-  }
-
-  /// The text flowing through the columns of pages, cut wherever the next line would overflow one;
-  /// in one endless scroll, cut at a screen's height, each part under the one before.
-  private func flow(_ lines: Lines, size: CGSize) -> ([Part], CGFloat) {
-    let pieces = Self.pieces(of: lines.lines[...], from: 0, to: lines.text.length, height: size.height)
+  /// A section that flows, cut wherever the next line would overflow a column: through the columns
+  /// of pages from `page` on, or in one endless scroll, cut at a screen's height, from `top` down.
+  private func flow(_ laid: SectionLines, width: CGFloat, page first: Int, top: CGFloat) -> (parts: [Part], page: Int, top: CGFloat) {
+    let pieces = Self.pieces(of: laid.lines[...], from: laid.start, to: laid.end, height: columnHeight)
     let parts = pieces.enumerated().map { index, piece -> Part in
-      let frame = CGRect(x: margin, y: Self.inset + piece.top, width: size.width, height: piece.height)
-      guard !continuous else { return Part(range: piece.range, top: piece.top, page: index, frame: frame) }
-      let page = index / columns
+      guard !continuous else {
+        return Part(range: piece.range, top: piece.top, page: 0, frame: CGRect(x: margin, y: Self.inset + top + piece.top, width: width, height: piece.height))
+      }
+      let page = first + index / columns
       return Part(range: piece.range, top: piece.top, page: page,
-                  frame: CGRect(x: CGFloat(page) * bounds.width + left(ofColumn: index % columns, size: size), y: Self.inset, width: size.width, height: piece.height))
+                  frame: CGRect(x: CGFloat(page) * bounds.width + left(ofColumn: index % columns, width: width), y: Self.inset, width: width, height: piece.height))
     }
-    return (parts, lines.height)
+    return (parts, first + (pieces.count + columns - 1) / columns, top + laid.height)
   }
 
-  /// The cells in their rows, each row as tall as its tallest cell. On pages, a page holds the rows
-  /// that fit; a row taller than a page is cut between lines, over pages of its own.
-  private func grid(_ lines: Lines, size: CGSize) -> ([Part], CGFloat) {
-    var parts: [Part] = []
-    var (page, top) = (0, CGFloat(0))
+  /// A section's cells in their rows, each row as tall as its tallest cell. On pages from `page` on,
+  /// a page holds the rows that fit, and a row of headings only with the row after it. A row that
+  /// doesn't fit on a page, or below the headings it follows, is cut between lines and runs on over
+  /// the pages after. In one endless scroll, the rows stand under each other from `top` down. Only
+  /// rows laid out to their end show.
+  private func grid(_ laid: SectionLines, cells: [Cell], width: CGFloat, page first: Int, top start: CGFloat) -> (parts: [Part], page: Int, top: CGFloat) {
+    var rows: [(cells: ArraySlice<Cell>, lines: [ArraySlice<Line>], heights: [CGFloat], height: CGFloat, spacing: CGFloat, heading: Bool)] = []
     var (cell, line) = (0, 0)
     while cell < cells.count {
       let row = cells[cell...].prefix { $0.row == cells[cell].row }
+      guard let last = row.last, NSMaxRange(last.range) <= laid.end else { break }
       cell += row.count
       // Each cell's lines, which follow each other as the cells do.
       let rowLines = row.map { cell -> ArraySlice<Line> in
-        while line < lines.lines.count && lines.lines[line].location < cell.range.location { line += 1 }
+        while line < laid.lines.count && laid.lines[line].location < cell.range.location { line += 1 }
         let first = line
-        while line < lines.lines.count && lines.lines[line].location < NSMaxRange(cell.range) { line += 1 }
-        return lines.lines[first..<line]
+        while line < laid.lines.count && laid.lines[line].location < NSMaxRange(cell.range) { line += 1 }
+        return laid.lines[first..<line]
       }
       let heights = rowLines.map { ($0.last?.bottom ?? 0) - ($0.first?.top ?? 0) }
-      let height = heights.max() ?? 0
       // As far apart as the paragraphs at the cells' ends ask.
       let spacing = row.map { cell in
-        (lines.text.attribute(.paragraphStyle, at: NSMaxRange(cell.range) - 1, effectiveRange: nil) as? NSParagraphStyle)?.paragraphSpacing ?? 0
+        (text.attribute(.paragraphStyle, at: NSMaxRange(cell.range) - 1, effectiveRange: nil) as? NSParagraphStyle)?.paragraphSpacing ?? 0
       }.max() ?? 0
-      if !continuous && top > 0 && top + height > size.height {
+      rows.append((row, rowLines, heights, heights.max() ?? 0, spacing, row.allSatisfy(\.heading)))
+    }
+    var parts: [Part] = []
+    var (page, top) = (first, continuous ? start : 0)
+    // Whether the row before is of headings on this page, which this one goes on from.
+    var underHeadings = false
+    for (at, row) in rows.enumerated() {
+      // Headings go on a page only with the row after them, as much of it as a page holds.
+      let next = row.heading && at + 1 < rows.count ? row.spacing + min(rows[at + 1].height, columnHeight) : 0
+      if !continuous && top > 0 && !underHeadings && top + row.height + next > columnHeight {
         (page, top) = (page + 1, 0)
       }
-      if continuous || height <= size.height {
-        for ((cell, cellLines), cellHeight) in zip(zip(row, rowLines), heights) {
-          // In one endless scroll, each part is a page of its own.
-          parts.append(Part(range: cell.range, top: cellLines.first?.top ?? 0, page: continuous ? parts.count : page,
-                            frame: CGRect(x: CGFloat(page) * bounds.width + left(ofColumn: cell.column, size: size), y: Self.inset + top,
-                                          width: size.width, height: cellHeight)))
+      underHeadings = row.heading
+      if continuous || top + row.height <= columnHeight {
+        for ((cell, cellLines), cellHeight) in zip(zip(row.cells, row.lines), row.heights) {
+          let x = (continuous ? 0 : CGFloat(page) * bounds.width) + left(ofColumn: cell.column, width: width)
+          parts.append(Part(range: cell.range, top: cellLines.first?.top ?? 0, page: page,
+                            frame: CGRect(x: x, y: Self.inset + top, width: width, height: cellHeight)))
         }
-        top += height + spacing
+        top += row.height + row.spacing
         continue
       }
+      // Cut between lines: on this page below what stands on it, then on pages of its own.
       var pages = 1
-      for (cell, cellLines) in zip(row, rowLines) {
-        let pieces = Self.pieces(of: cellLines, from: cell.range.location, to: NSMaxRange(cell.range), height: size.height)
+      for (cell, cellLines) in zip(row.cells, row.lines) {
+        let pieces = Self.pieces(of: cellLines, from: cell.range.location, to: NSMaxRange(cell.range), height: columnHeight, first: columnHeight - top)
         for (index, piece) in pieces.enumerated() {
           parts.append(Part(range: piece.range, top: piece.top, page: page + index,
-                            frame: CGRect(x: CGFloat(page + index) * bounds.width + left(ofColumn: cell.column, size: size), y: Self.inset,
-                                          width: size.width, height: piece.height)))
+                            frame: CGRect(x: CGFloat(page + index) * bounds.width + left(ofColumn: cell.column, width: width), y: Self.inset + (index == 0 ? top : 0),
+                                          width: width, height: piece.height)))
         }
         pages = max(pages, pieces.count)
       }
       // The next row starts on a page of its own.
       (page, top) = (page + pages, 0)
+      underHeadings = false
     }
-    return (parts, top)
+    // In pages, the next section starts on a page of its own.
+    return (parts, continuous || top == 0 ? page : page + 1, top)
   }
 
-  /// Lines cut wherever the next would overflow `height`: where each piece starts and ends, from
-  /// `start` to `end`, how far down it is laid out, and how tall it is.
-  private static func pieces(of lines: ArraySlice<Line>, from start: Int, to end: Int, height: CGFloat) -> [Piece] {
+  /// Lines cut wherever the next would overflow `height` – the first piece's, `first`: where each
+  /// piece starts and ends, from `start` to `end`, how far down it is laid out, and how tall it is.
+  private static func pieces(of lines: ArraySlice<Line>, from start: Int, to end: Int, height: CGFloat, first: CGFloat? = nil) -> [Piece] {
     var pieces: [Piece] = []
     var (start, top) = (start, lines.first?.top ?? 0)
-    var bottom = top
+    var (bottom, limit) = (top, first ?? height)
     for line in lines {
-      if line.bottom - top > height && line.location > start {
+      if line.bottom - top > limit && line.location > start {
         pieces.append(Piece(range: NSRange(location: start, length: line.location - start), top: top, height: bottom - top))
-        (start, top) = (line.location, line.top)
+        (start, top, limit) = (line.location, line.top, height)
       }
       bottom = line.bottom
     }
@@ -258,15 +384,9 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     return pieces
   }
 
-  /// How far from a page's left a column starts.
-  private func left(ofColumn column: Int, size: CGSize) -> CGFloat {
-    margin + CGFloat(column) * (size.width + gap)
-  }
-
-  /// A column's size; in one endless scroll a part fills the width and a screen's height.
-  private var partSize: CGSize {
-    let width = (bounds.width - 2 * margin - CGFloat(columns - 1) * gap) / CGFloat(columns)
-    return CGSize(width: max(width.rounded(.down), 1), height: max(bounds.height - 2 * Self.inset, 1))
+  /// How far from a page's left a column of `width` starts.
+  private func left(ofColumn column: Int, width: CGFloat) -> CGFloat {
+    margin + CGFloat(column) * (width + gap)
   }
 
   /// The pages in sight and next to it, or in one endless scroll the parts a screen around it.
@@ -340,8 +460,14 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   /// Brings the character at `index` into sight: turns to its page, or in one endless scroll moves
   /// it a third of the way down, if it is out of sight.
   func show(characterAt index: Int) {
-    guard layout.text === text, let part = layout.parts.lastIndex(atOrBefore: index, \.range.location) else { return }
+    guard layout.text === text else { return }
     anchor = index
+    // Until the text is laid out that far, it comes into sight once it is.
+    guard index < layout.end || layout.complete else {
+      pendingSight = index
+      return
+    }
+    guard let part = layout.parts.lastIndex(atOrBefore: index, \.range.location) else { return }
     guard continuous else {
       setContentOffset(CGPoint(x: CGFloat(layout.parts[part].page) * bounds.width, y: 0), animated: true)
       return
@@ -355,7 +481,7 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   /// Where the text in `range` shows in this view's content, the whole width of its column: from
   /// its first line to its last in the part it starts in.
   func contentRect(for range: NSRange) -> CGRect {
-    guard layout.text === text,
+    guard layout.text === text, range.location < layout.end || layout.complete,
           let index = layout.parts.lastIndex(atOrBefore: range.location, \.range.location),
           let first = layout.lines.lastIndex(atOrBefore: range.location, \.location)
     else { return .zero }
@@ -376,7 +502,7 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
 
   private func firstCharacter(onPage page: Int) -> Int {
     let page = min(max(page, 0), max(pageCount - 1, 0))
-    return layout.pages.indices.contains(page) ? layout.parts[layout.pages[page][0]].range.location : 0
+    return layout.pages.indices.contains(page) ? layout.pages[page].first.map { layout.parts[$0].range.location } ?? 0 : 0
   }
 
   /// The first character, in the text's order, of a line that shows below `top` in this view's content.
@@ -455,30 +581,49 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   }
 }
 
-/// The text laid out at a column's width: its lines, and how tall it is.
+/// The text laid out in lines, section by section at their widths, so far or all of it: up to `end`.
 private struct Lines {
   var text = NSAttributedString()
   var background = UIColor.white
-  var width: CGFloat = 0
+  var widths: [CGFloat] = []
+  var sections: [SectionLines] = []
+  var end = 0
+  var complete = false
+}
+
+/// A section's lines so far, from its top, up to `end`, and how tall they are, the spacing after the
+/// last included.
+private struct SectionLines {
+  let section: Int
+  let start: Int
+  var lines: [Line] = []
+  var height: CGFloat = 0
+  var end = 0
+}
+
+/// Whole paragraphs laid out on their own: their lines from the top, and how far down the next start.
+private struct Chunk {
   var lines: [Line] = []
   var height: CGFloat = 0
 }
 
 /// The text cut into parts, and the parts on each page – in one endless scroll, a part is a page –
-/// the lines it was laid out in, how tall it is in one endless scroll, and the size of a part it
-/// was cut for.
+/// the lines it was laid out in, how tall it is in one endless scroll, how far it is laid out, and
+/// the size of the view it was cut for.
 private struct Layout {
   var text = NSAttributedString()
   var background = UIColor.white
-  var partSize = CGSize.zero
+  var size = CGSize.zero
   var parts: [Part] = []
   var pages: [[Int]] = []
   var lines: [Line] = []
   var height: CGFloat = 0
+  var end = 0
+  var complete = true
 }
 
-/// A part of the text: where it starts and ends, how far down its first line is laid out in the
-/// whole text, and where it shows: on which page, and where its lines are in this view's content.
+/// A part of the text: where it starts and ends, how far down its first line is laid out in its
+/// section, and where it shows: on which page, and where its lines are in this view's content.
 private struct Part {
   let range: NSRange
   let top: CGFloat
