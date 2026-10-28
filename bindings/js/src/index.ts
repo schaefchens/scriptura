@@ -1,4 +1,4 @@
-import fonts from '../fonts.json';
+import fonts from './fonts.json';
 
 export { CONTRASTS, type Palette, palette, ROLE_COLORS, type Theme } from './palette';
 

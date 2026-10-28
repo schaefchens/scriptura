@@ -9,6 +9,9 @@
     "examples/react-native",
     "examples/web"
   ],
+  "scripts": {
+    "build": "npm run build -w bindings/js -w bindings/web -w bindings/react"
+  },
   "overrides": {
     "react": "19.3.0",
     "react-dom": "19.3.0",

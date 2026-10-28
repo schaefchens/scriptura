@@ -3,12 +3,24 @@
   "version": "0.0.0",
   "description": "Scriptura's reader as a React component for the web",
   "license": "Apache-2.0",
-  "private": true,
   "type": "module",
-  "repository": { "type": "git", "url": "https://github.com/schaefchens/scriptura.git" },
-  "main": "src/index.tsx",
-  "types": "src/index.tsx",
-  "exports": { ".": "./src/index.tsx" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/schaefchens/scriptura.git"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "react-native": "./src/index.tsx",
+      "source": "./src/index.tsx",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc"
+  },
   "dependencies": {
     "@schaefchens/scriptura-web": "*"
   },
@@ -16,6 +28,10 @@
     "react": "*"
   },
   "files": [
-    "src"
-  ]
+    "src",
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

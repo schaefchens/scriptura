@@ -29,7 +29,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
-import scriptFonts from './fonts.json' with { type: 'json' };
+import scriptFonts from './src/fonts.json' with { type: 'json' };
 
 const TANZIL_METADATA = 'https://tanzil.net/res/text/metadata/quran-data.js';
 // Tanzil's Uthmani text as of April 2017: quran-tajweed's rules count code points in this copy.

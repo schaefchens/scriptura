@@ -1,0 +1,4 @@
+# What apps' builds leave here. The core and its bindings, which git ignores, ship.
+build/
+.gradle/
+.cxx/

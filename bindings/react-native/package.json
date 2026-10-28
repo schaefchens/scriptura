@@ -5,8 +5,10 @@
   "license": "Apache-2.0",
   "author": "schaefchens",
   "homepage": "https://github.com/schaefchens/scriptura",
-  "private": true,
-  "repository": { "type": "git", "url": "https://github.com/schaefchens/scriptura.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/schaefchens/scriptura.git"
+  },
   "main": "src/index.tsx",
   "types": "src/index.tsx",
   "react-native": "src/index.tsx",
@@ -18,7 +20,7 @@
     "expo-module.config.json"
   ],
   "scripts": {
-    "build": "sh build.sh",
+    "build:native": "sh build.sh",
     "build:ios": "sh build.sh ios",
     "build:android": "sh build.sh android"
   },
@@ -29,5 +31,8 @@
     "expo": "*",
     "react": "*",
     "react-native": "*"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
