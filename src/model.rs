@@ -1,0 +1,66 @@
+//! The books a host gives the library, as JSON: an array of books in the shape below, with
+//! camelCase names. The import tool, `bindings/js/import.mjs`, writes them from USFM, OSIS and
+//! Tanzil's text.
+
+use serde::Deserialize;
+
+/// A book of a scripture in one edition: a book of the Bible in one translation, or a surah.
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Book {
+    /// Unique among the books of a library.
+    pub id: String,
+    /// The book's USFM code, such as JON, which all its editions share and by which they are read
+    /// along; none for a book without editions to read along, such as a surah.
+    pub code: Option<String>,
+    /// The book's and its edition's names, in the book's own language.
+    pub title: String,
+    pub work: String,
+    /// "ltr" or "rtl".
+    pub direction: String,
+    /// A BCP 47 tag, so screen readers pick the right voice. Biblical Hebrew and Koine Greek go by
+    /// the modern languages' tags, he and el: there are no voices for hbo or grc.
+    pub language: String,
+    /// The font family the book asks to be set in, as a surah does for the marks of its script.
+    pub font: Option<String>,
+    #[serde(default)]
+    pub verse_numbers: VerseNumbers,
+    /// What comes before a number written after its verse, such as the end-of-ayah sign U+06DD that
+    /// a font draws around the digits after it.
+    #[serde(default)]
+    pub verse_number_prefix: String,
+    pub chapters: Vec<Chapter>,
+}
+
+/// Where a verse's number stands: before the verse, as in Bibles, or after it, as in a mushaf.
+#[derive(Deserialize, Debug, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum VerseNumbers {
+    #[default]
+    Start,
+    End,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Chapter {
+    pub number: u32,
+    /// The number as the book writes it, such as ٢ in Arabic-Indic digits.
+    pub label: String,
+    pub verses: Vec<Verse>,
+}
+
+/// A verse. Number 0 holds unnumbered text before verse 1, such as the basmala opening a surah.
+#[derive(Deserialize, Debug)]
+pub struct Verse {
+    pub number: u32,
+    /// The number as the book writes it; empty for none, as for verse 0.
+    pub label: String,
+    /// Its chapter and number as the KJV counts them, where they differ, so editions that number
+    /// otherwise can be read along: Jonah 2:1 in the Hebrew is 1:17 in the KJV. 0 is for what the
+    /// KJV leaves unnumbered, such as a psalm's title.
+    #[serde(default)]
+    pub kjv: Option<(u32, u32)>,
+    /// The text in runs, each with its role, if it has one: "ketiv" for a word as written where
+    /// another is read, or a tajweed rule. The reader colors a run by its role.
+    pub runs: Vec<(String, Option<String>)>,
+}

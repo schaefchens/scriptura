@@ -1,0 +1,50 @@
+[
+  {
+    "family": "EzraSIL",
+    "url": "https://software.sil.org/downloads/r/ezra/EzraSIL-2.51.zip",
+    "file": "EzraSIL2.51/SILEOT.ttf",
+    "license": "SIL Open Font License 1.1",
+    "languages": [
+      "he"
+    ]
+  },
+  {
+    "family": "GentiumPlus",
+    "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/gentiumplus/GentiumPlus-Regular.ttf",
+    "license": "SIL Open Font License 1.1",
+    "languages": [
+      "el",
+      "en",
+      "de",
+      "fr",
+      "es",
+      "it",
+      "nl",
+      "pt",
+      "tr"
+    ]
+  },
+  {
+    "family": "Amiri-Regular",
+    "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf",
+    "license": "SIL Open Font License 1.1",
+    "languages": [
+      "ar"
+    ]
+  },
+  {
+    "family": "Vazirmatn-Regular",
+    "url": "https://raw.githubusercontent.com/rastikerdar/vazirmatn/master/fonts/ttf/Vazirmatn-Regular.ttf",
+    "license": "SIL Open Font License 1.1",
+    "languages": [
+      "fa"
+    ]
+  },
+  {
+    "family": "AmiriQuran-Regular",
+    "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/amiriquran/AmiriQuran-Regular.ttf",
+    "license": "SIL Open Font License 1.1",
+    "quran": true,
+    "verseNumberPrefix": "\u06dd"
+  }
+]

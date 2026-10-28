@@ -1,0 +1,15 @@
+[workspace]
+members = [".", "bindings/ffi", "bindings/uniffi-bindgen", "bindings/wasm"]
+resolver = "3"
+
+[package]
+name = "scriptura"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Scripture as paragraphs to read: headings, verses and words in any script, and editions read along verse by verse"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
