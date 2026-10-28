@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- The reader's accessibility actions -->
+  <item name="scriptura_next_word" type="id" />
+  <item name="scriptura_previous_word" type="id" />
+  <item name="scriptura_next_verse" type="id" />
+  <item name="scriptura_previous_verse" type="id" />
+</resources>

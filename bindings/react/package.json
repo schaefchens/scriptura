@@ -1,0 +1,21 @@
+{
+  "name": "@schaefchens/scriptura-react",
+  "version": "0.0.0",
+  "description": "Scriptura's reader as a React component for the web",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "repository": { "type": "git", "url": "https://github.com/schaefchens/scriptura.git" },
+  "main": "src/index.tsx",
+  "types": "src/index.tsx",
+  "exports": { ".": "./src/index.tsx" },
+  "dependencies": {
+    "@schaefchens/scriptura-web": "*"
+  },
+  "peerDependencies": {
+    "react": "*"
+  },
+  "files": [
+    "src"
+  ]
+}

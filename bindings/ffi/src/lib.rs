@@ -8,11 +8,13 @@ uniffi::setup_scaffolding!();
 
 static LIBRARY: LazyLock<RwLock<scriptura::Library>> = LazyLock::new(Default::default);
 
-/// Books that couldn't be read, with why: they aren't a JSON array of books.
+/// Books that couldn't be read, with why: they aren't a JSON array of books. Its message becomes the
+/// Swift error's and the Kotlin exception's.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
+#[uniffi(flat_error)]
 pub enum BooksError {
-    #[error("{message}")]
-    Invalid { message: String },
+    #[error("{0}")]
+    Invalid(String),
 }
 
 /// A book as JS may see it: what it is, not what it says. Editions of the same book share its code.
@@ -79,7 +81,7 @@ pub struct Word {
 /// Adds the books of a JSON array, each replacing one of the same id, and returns their ids.
 #[uniffi::export]
 pub fn add_books(json: Vec<u8>) -> Result<Vec<String>, BooksError> {
-    LIBRARY.write().unwrap().add(&json).map_err(|error| BooksError::Invalid { message: error.to_string() })
+    LIBRARY.write().unwrap().add(&json).map_err(|error| BooksError::Invalid(error.to_string()))
 }
 
 #[uniffi::export]

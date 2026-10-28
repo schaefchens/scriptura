@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scriptura on the web</title>
+    <style>
+      html, body, #root { margin: 0; height: 100%; font: 14px system-ui, sans-serif; }
+      main { display: flex; flex-direction: column; height: 100%; }
+      header { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px; }
+      .reader { flex: 1; min-height: 0; }
+      footer { padding: 6px 8px; font-size: 11px; opacity: 0.7; }
+      footer a { color: inherit; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

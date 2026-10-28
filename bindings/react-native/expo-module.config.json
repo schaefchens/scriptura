@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["ScripturaModule"]
+  },
+  "android": {
+    "modules": ["de.schaefchens.scriptura.ScripturaModule"]
+  }
+}
