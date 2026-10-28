@@ -1,0 +1,87 @@
+{
+  "books": "texts/books.json",
+  "fonts": "fonts",
+  "bibles": [
+    {
+      "usfm": "https://ebible.org/Scriptures/eng-web_usfm.zip",
+      "work": "World English Bible",
+      "language": "en",
+      "direction": "ltr",
+      "books": [
+        {
+          "id": "jonah",
+          "code": "JON"
+        },
+        {
+          "id": "matthew",
+          "code": "MAT"
+        },
+        {
+          "id": "psalms",
+          "code": "PSA"
+        }
+      ]
+    },
+    {
+      "usfm": "https://ebible.org/Scriptures/deu1912_usfm.zip",
+      "work": "Luther 1912",
+      "language": "de",
+      "direction": "ltr",
+      "books": [
+        {
+          "id": "jonah-de",
+          "code": "JON"
+        },
+        {
+          "id": "matthew-de",
+          "code": "MAT"
+        }
+      ]
+    },
+    {
+      "osis": "https://raw.githubusercontent.com/openscriptures/morphhb/master/wlc/",
+      "work": "כתב יד לנינגרד",
+      "language": "he",
+      "direction": "rtl",
+      "books": [
+        {
+          "id": "jonah-he",
+          "code": "JON",
+          "file": "Jonah",
+          "title": "יונה"
+        }
+      ]
+    },
+    {
+      "usfm": "https://ebible.org/Scriptures/grcsbl_usfm.zip",
+      "work": "SBLGNT",
+      "language": "el",
+      "direction": "ltr",
+      "books": [
+        {
+          "id": "matthew-el",
+          "code": "MAT"
+        }
+      ]
+    },
+    {
+      "usfm": "https://ebible.org/Scriptures/arb-vd_usfm.zip",
+      "work": "ترجمة فاندايك",
+      "language": "ar",
+      "direction": "rtl",
+      "digits": 1632,
+      "books": [
+        {
+          "id": "jonah-ar",
+          "code": "JON"
+        }
+      ]
+    }
+  ],
+  "quran": {
+    "surahs": [
+      1,
+      112
+    ]
+  }
+}

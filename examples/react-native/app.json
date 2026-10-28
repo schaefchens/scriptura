@@ -1,0 +1,14 @@
+{
+  "expo": {
+    "name": "Scriptura",
+    "slug": "scriptura-example",
+    "version": "0.0.0",
+    "orientation": "default",
+    "ios": { "bundleIdentifier": "de.schaefchens.scriptura.example", "supportsTablet": true },
+    "android": { "package": "de.schaefchens.scriptura.example" },
+    "plugins": [
+      ["expo-font", { "fonts": ["./fonts"] }],
+      ["@schaefchens/scriptura-react-native", { "books": ["./texts/books.json"] }]
+    ]
+  }
+}

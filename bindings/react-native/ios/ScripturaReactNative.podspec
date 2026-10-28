@@ -1,5 +1,6 @@
 Pod::Spec.new do |s|
-  s.name           = 'Scriptura'
+  # Not Scriptura, which an app may well be called: its module would then hide this one.
+  s.name           = 'ScripturaReactNative'
   s.version        = '0.0.0'
   s.summary        = "Scriptura's reader for React Native on iOS"
   s.description    = 'Scripture in pages or one endless scroll, laid out with TextKit 2 from the core in Rust'

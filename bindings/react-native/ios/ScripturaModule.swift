@@ -115,7 +115,7 @@ public class ScripturaModule: Module {
       return Data(json.utf8)
     }
     if let asset = source.asset {
-      guard let url = Bundle.main.url(forResource: asset, withExtension: nil, subdirectory: "scriptura") else {
+      guard let url = Bundle.main.url(forResource: asset, withExtension: nil, subdirectory: "scriptura-books") else {
         throw Exception(name: "ERR_SCRIPTURA_BOOKS", description: "The app bundles no books named \(asset)")
       }
       return try Data(contentsOf: url)

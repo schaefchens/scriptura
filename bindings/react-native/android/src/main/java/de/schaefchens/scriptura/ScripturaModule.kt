@@ -128,7 +128,7 @@ class ScripturaModule : Module() {
     source.json?.let { return it.toByteArray() }
     val context = appContext.reactContext ?: throw CodedException("ERR_SCRIPTURA_BOOKS", "No context to read books in", null)
     source.asset?.let { asset ->
-      return runCatching { context.assets.open("scriptura/$asset").use { it.readBytes() } }
+      return runCatching { context.assets.open("scriptura-books/$asset").use { it.readBytes() } }
         .getOrElse { throw CodedException("ERR_SCRIPTURA_BOOKS", "The app bundles no books named $asset", it) }
     }
     val uri = source.uri?.let(Uri::parse) ?: throw CodedException("ERR_SCRIPTURA_BOOKS", "Books need a uri, an asset or json", null)
