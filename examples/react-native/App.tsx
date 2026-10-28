@@ -7,10 +7,11 @@ import {
   Reader,
   type ReaderHandle,
   SCRIPT_FONTS,
+  type SpeechChange,
   type WordPosition,
 } from '@schaefchens/scriptura-react-native';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 const MOVES: [MoveStep, string][] = [
@@ -30,6 +31,9 @@ export default function App() {
   const [companions, setCompanions] = useState<string[]>([]);
   const [parallel, setParallel] = useState<'inline' | 'columns'>('inline');
   const [position, setPosition] = useState<WordPosition>();
+  const [speech, setSpeech] = useState<SpeechChange>({ state: 'stopped' });
+  const [speakAlong, setSpeakAlong] = useState(false);
+  const [goTo, setGoTo] = useState('2:1');
   const reader = useRef<ReaderHandle>(null);
 
   // The books the app bundles, read natively: their text never passes through JS.
@@ -48,6 +52,13 @@ export default function App() {
   const passages = useMemo(() => [{ book }], [book]);
   const title = (id: string) => library.find((candidate) => candidate.id === id)?.title;
   const toggle = (id: string) => setCompanions(along.includes(id) ? along.filter((other) => other !== id) : [...along, id]);
+  // A chapter and verse of the book, such as 2:1, to jump to: its first word.
+  const jump = () => {
+    const [chapter, verse] = goTo.split(':').map(Number);
+    reader.current?.jump({ passage: 0, book, chapter, verse, word: 0 });
+  };
+  const onSpeechChange = (change: SpeechChange) =>
+    setSpeech((last) => ({ ...change, firstSound: change.firstSound ?? (change.state === 'speaking' ? last.firstSound : undefined) }));
 
   const button = (label: string, onPress: () => void, selectedButton = false) => (
     <Pressable key={label} onPress={onPress} style={[styles.button, { borderColor: colors.border }, selectedButton && { backgroundColor: colors.text }]}>
@@ -69,10 +80,17 @@ export default function App() {
           {button(versePerLine ? 'Running text' : 'Verse per line', () => setVersePerLine(!versePerLine))}
           {editions.map(({ id, work }) => button(work, () => toggle(id), along.includes(id)))}
           {along.length > 0 && button(parallel === 'inline' ? 'Side by side' : 'Inline', () => setParallel(parallel === 'inline' ? 'columns' : 'inline'))}
+          {along.length > 0 && button('Speak along', () => setSpeakAlong(!speakAlong), speakAlong)}
           {MOVES.map(([step, label]) => button(label, () => reader.current?.move(step)))}
+          <TextInput value={goTo} onChangeText={setGoTo} onSubmitEditing={jump} style={[styles.input, { color: colors.text, borderColor: colors.border }]} />
+          {button('Go', jump)}
+          {speech.state === 'speaking' ? button('Pause', () => reader.current?.pause()) : button('Read aloud', () => reader.current?.play())}
+          {speech.state !== 'stopped' && button('Stop', () => reader.current?.stop())}
         </View>
         <Text style={[styles.position, { color: colors.text }]}>
           {position ? `‎${title(position.book)}‎ ${position.chapter}:${position.verse} · word ${position.word + 1}` : 'Tap a word'}
+          {speech.firstSound !== undefined && ` · first sound after ${Math.round(speech.firstSound)} ms`}
+          {speech.unvoiced?.length ? ` · no voice for ${speech.unvoiced.join(', ')}` : ''}
         </Text>
         <Reader
           ref={reader}
@@ -86,7 +104,9 @@ export default function App() {
           versePerLine={versePerLine}
           companions={along}
           parallel={parallel}
+          speakAlong={speakAlong}
           onWordChange={setPosition}
+          onSpeechChange={onSpeechChange}
         />
         <Text style={[styles.sources, { color: colors.secondary }]}>
           World English Bible, Luther 1912 and Smith & Van Dyck, public domain; the Westminster Leningrad Codex from the Open
@@ -103,6 +123,7 @@ const styles = StyleSheet.create({
   bar: { flexGrow: 0 },
   row: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, padding: 6, alignItems: 'center' },
   button: { borderWidth: 1, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 5 },
+  input: { borderWidth: 1, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, minWidth: 56 },
   position: { paddingHorizontal: 8, fontWeight: '600' },
   reader: { flex: 1 },
   sources: { fontSize: 10, padding: 6 },

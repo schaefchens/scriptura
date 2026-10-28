@@ -2,15 +2,17 @@
 //! surah – and passages of them as paragraphs to lay out. A paragraph is a chapter's heading, its
 //! running text or a verse on a line of its own, in its book's language, direction and script,
 //! with each verse and word where it stands. Other editions of a book can be read along with it,
-//! verse by verse, matched by the KJV's numbers.
+//! verse by verse, matched by the KJV's numbers. Passages can be read aloud: see [`Speech`].
 //!
 //! The library holds no texts of its own: a host adds books as JSON (see [`Book`]).
 
 mod model;
 mod reader;
+mod speech;
 
 pub use model::{Book, Chapter, Verse, VerseNumbers};
 pub use reader::{Block, Segment, VerseRange, Word};
+pub use speech::{Place, Speech, Utterance};
 
 /// A whole book, one chapter of it, or a verse range in that chapter.
 #[derive(Clone, Debug, PartialEq)]
@@ -84,6 +86,13 @@ impl Library {
             blocks.extend(reader::blocks(self, reference, passage, size, verse_per_line, &companions, &mut rows));
         }
         blocks
+    }
+
+    /// What a voice says of the passages, read along with `companions` – only the passages' own
+    /// books, or `along`, each verse in every book – from the word at `from`, or else from the
+    /// start: see [`Speech`].
+    pub fn speech(&self, references: &[Reference], companions: &[String], along: bool, from: Option<&Place>) -> Speech {
+        Speech::new(self, references, companions, along, from)
     }
 }
 

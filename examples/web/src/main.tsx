@@ -8,6 +8,7 @@ import {
   Reader,
   type ReaderHandle,
   SCRIPT_FONTS,
+  type SpeechChange,
   type WordPosition,
 } from '@schaefchens/scriptura-react';
 import { StrictMode, useMemo, useRef, useState } from 'react';
@@ -43,6 +44,9 @@ function App() {
   const [companions, setCompanions] = useState<string[]>([]);
   const [parallel, setParallel] = useState<'inline' | 'columns'>('inline');
   const [position, setPosition] = useState<WordPosition>();
+  const [speech, setSpeech] = useState<SpeechChange>({ state: 'stopped' });
+  const [speakAlong, setSpeakAlong] = useState(false);
+  const [goTo, setGoTo] = useState('2:1');
   const reader = useRef<ReaderHandle>(null);
 
   const passages = useMemo(() => (book === 'sign' ? SIGN_OF_JONAH : [{ book }]), [book]);
@@ -53,6 +57,13 @@ function App() {
   const colors = useMemo(() => palette(dark ? 'dark' : 'light', 21), [dark]);
   const title = (id: string) => books.find((candidate) => candidate.id === id)?.title;
   const toggle = (id: string) => setCompanions(along.includes(id) ? along.filter((other) => other !== id) : [...along, id]);
+  // A chapter and verse of the first passage's book, such as 2:1, to jump to: its first word.
+  const jump = () => {
+    const [chapter, verse] = goTo.split(':').map(Number);
+    reader.current?.jump({ passage: 0, book: passages[0].book, chapter, verse, word: 0 });
+  };
+  const onSpeechChange = (change: SpeechChange) =>
+    setSpeech((last) => ({ ...change, firstSound: change.firstSound ?? (change.state === 'speaking' ? last.firstSound : undefined) }));
 
   return (
     <main style={{ background: colors.background, color: colors.text }}>
@@ -76,10 +87,28 @@ function App() {
         {along.length > 0 && (
           <button onClick={() => setParallel(parallel === 'inline' ? 'columns' : 'inline')}>{parallel === 'inline' ? 'Side by side' : 'Inline'}</button>
         )}
+        {along.length > 0 && (
+          <label>
+            <input type="checkbox" checked={speakAlong} onChange={() => setSpeakAlong(!speakAlong)} /> Speak along
+          </label>
+        )}
         {MOVES.map(([step, label]) => (
           <button key={step} onClick={() => reader.current?.move(step)}>{label}</button>
         ))}
-        <output dir="auto">{position ? `${title(position.book)}‎ ${position.chapter}:${position.verse} · word ${position.word + 1}` : 'Tap a word'}</output>
+        <form onSubmit={(event) => { event.preventDefault(); jump(); }}>
+          <input value={goTo} onChange={(event) => setGoTo(event.target.value)} size={5} /> <button>Go</button>
+        </form>
+        {speech.state === 'speaking' ? (
+          <button onClick={() => reader.current?.pause()}>Pause</button>
+        ) : (
+          <button onClick={() => reader.current?.play()}>Read aloud</button>
+        )}
+        {speech.state !== 'stopped' && <button onClick={() => reader.current?.stop()}>Stop</button>}
+        <output dir="auto">
+          {position ? `${title(position.book)}‎ ${position.chapter}:${position.verse} · word ${position.word + 1}` : 'Tap a word'}
+          {speech.firstSound !== undefined && ` · first sound after ${Math.round(speech.firstSound)} ms`}
+          {speech.unvoiced?.length ? ` · no voice for ${speech.unvoiced.join(', ')}` : ''}
+        </output>
       </header>
       <Reader
         ref={reader}
@@ -94,7 +123,9 @@ function App() {
         versePerLine={versePerLine}
         companions={along}
         parallel={parallel}
+        speakAlong={speakAlong}
         onWordChange={setPosition}
+        onSpeechChange={onSpeechChange}
       />
       <footer>
         World English Bible, Luther 1912 and Smith &amp; Van Dyck, public domain; the Westminster Leningrad Codex from the{' '}

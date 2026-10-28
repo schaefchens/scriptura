@@ -28,14 +28,16 @@ import de.schaefchens.scriptura.core.Block
 import de.schaefchens.scriptura.core.Reference
 import de.schaefchens.scriptura.core.VerseRange
 import de.schaefchens.scriptura.core.Word
+import de.schaefchens.scriptura.core.WordPosition
 import de.schaefchens.scriptura.core.readerBlocks
 import java.util.WeakHashMap
 
 /**
  * The reader: passages as paragraphs, each with its own direction, language and font, laid out as
  * one spanned string, in pages or one endless scroll. It fetches them from the core itself, from the
- * books the host added, so their text never passes through JS. A word can be tapped or reached word
- * by word; JS learns only where the current word stands, never its text.
+ * books the host added, so their text never passes through JS. A word can be tapped, reached word by
+ * word or jumped to; JS learns only where the current word stands, never its text. It reads aloud
+ * with the device's voices, from the word it is at, and marks each word as it is said.
  */
 class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
   // Without it, React Native ignores the pages' requests for a new layout.
@@ -56,8 +58,15 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   var companions: List<String> = emptyList()
   var parallel = "inline"
 
+  /** A voice per language for reading aloud, by name; otherwise the engine's best for it. */
+  var voices: Map<String, String> = emptyMap()
+
+  /** Read aloud, each verse is followed by the same verse in each book read along; otherwise only the passages' own books are. */
+  var speakAlong = false
+
   private val onWordChange by EventDispatcher()
   private val onLaidOut by EventDispatcher()
+  private val onSpeechChange by EventDispatcher()
   private var renderStarted = 0L
   private var firstShown = 0.0
 
@@ -72,7 +81,14 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   /** How tall a letter is drawn in a typeface, per pixel of the text size, by typeface and letter. */
   private val letterHeights = mutableMapOf<Pair<Typeface, String>, Double>()
   private var words: List<ReaderWord> = emptyList()
+
+  /** Each word's index in [words], by where it stands. */
+  private var indices: Map<WordPlace, Int> = emptyMap()
   private var current: Int? = null
+  private val readAloud = ReadAloud(context)
+
+  /** What is read aloud along with the passages. */
+  private var spokenAlong: Pair<List<String>, Boolean> = emptyList<String>() to false
 
   private val pages = PagedText(context)
 
@@ -86,6 +102,8 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
         onLaidOut(mapOf("pages" to count, "milliseconds" to firstShown, "all" to millisecondsSinceRender()))
       }
     }
+    readAloud.onWord = { utterance, word -> follow(WordPlace(utterance.passage.toInt(), utterance.book, word.chapter.toInt(), word.verse.toInt(), word.index.toInt())) }
+    readAloud.onChange = { change -> onSpeechChange(change) }
     addView(pages, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
   }
 
@@ -97,6 +115,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   override fun onDetachedFromWindow() {
     super.onDetachedFromWindow()
     shown.remove(this)
+    readAloud.release()
   }
 
   fun render() {
@@ -116,6 +135,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     // At the very start, before the first word, it stays there, its heading in sight.
     val anchorAt = if (pages.anchor > 0) kept.indexOfFirst { it.end > pages.anchor } else -1
     val marked = if (staying) current?.let { words[it].place } else null
+    if (!staying) readAloud.stop()
     shownReferences = references
     val roleColors = colors.roles.mapValues { ColorCompat.toArgb(it.value) }
     val paragraphs = readerBlocks(references, fontSize, versePerLine, companions).map { Paragraph(it, roleColors, fontSize(it)) }
@@ -170,6 +190,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
       textSize = pixels(fontSize)
     }
     val indices = HashMap<WordPlace, Int>().apply { words.forEachIndexed { index, word -> putIfAbsent(word.place, index) } }
+    this.indices = indices
     // The word the reader was at – or if it is gone, as a book is no longer read along, the last
     // before it that is still there.
     val anchorWord = if (anchorAt >= 0) (anchorAt downTo 0).firstNotNullOfOrNull { indices[kept[it].place] } else null
@@ -183,6 +204,11 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
       current = it
       pages.highlight(words[it].start, words[it].end)
     }
+    // Other books read along change what is said: the voice goes on from the word it is at.
+    if (companions to speakAlong != spokenAlong && readAloud.state != "stopped") {
+      if (readAloud.state == "speaking") play() else readAloud.stop()
+    }
+    spokenAlong = companions to speakAlong
   }
 
   private val baseTypeface get() = if (font == "serif") Typeface.SERIF else Typeface.DEFAULT
@@ -307,6 +333,34 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     if (current != null && words[current].isInVerseOf(words[from])) move(step) else select(from)
   }
 
+  /** Brings the reader to a word by where it stands and marks it, as a tap would – or if its verse has no such word, the verse's first. False if the reader shows no such verse. */
+  fun jump(place: WordPlace): Boolean {
+    val inVerse = { word: ReaderWord -> word.place.copy(index = place.index) == place }
+    val index = indices[place] ?: words.indexOfFirst(inVerse).takeIf { it >= 0 } ?: return false
+    select(index)
+    return true
+  }
+
+  /** Reads aloud from the word marked – or, with none, the first in sight – on to the end. */
+  fun play() {
+    readAloud.voices = voices
+    readAloud.play(shownReferences, companions, speakAlong, readingStart()?.let(::position))
+  }
+
+  fun pause() = readAloud.pause()
+
+  fun stop() = readAloud.stop()
+
+  /** The word reading starts at: the one marked, or the first in sight – none at the very start, where reading starts with the first heading. */
+  private fun readingStart(): WordPlace? {
+    current?.let { return words[it].place }
+    if (pages.anchor <= 0) return null
+    return words.firstOrNull { it.end > pages.anchor }?.place
+  }
+
+  private fun position(place: WordPlace) =
+    WordPosition(place.passage.toUInt(), place.book, place.chapter.toUInt(), place.verse.toUInt(), place.index.toUInt())
+
   /** Selects the word at a point in this view's pixels, as a tap there would. */
   fun tap(x: Float, y: Float) {
     pages.offsetAt(x - pages.left, y - pages.top)?.let(::selectWord)
@@ -319,12 +373,23 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     words.indexOfFirst { offset in it.start..it.end }.takeIf { it >= 0 }?.let(::select)
   }
 
+  /** Marks a word reached by a tap, a move or a jump. While reading aloud, the voice goes on from it. */
   private fun select(index: Int) {
+    mark(index)
+    pages.speak(words[index].start, words[index].end)
+    if (readAloud.state == "speaking") play()
+  }
+
+  /** Marks the word the voice comes to. Voices report some punctuation apart, as a word of its own: it is still the word it belongs to. */
+  private fun follow(place: WordPlace) {
+    indices[place]?.takeIf { it != current }?.let(::mark)
+  }
+
+  private fun mark(index: Int) {
     current = index
     val word = words[index]
     pages.highlight(word.start, word.end)
     pages.show(characterAt = word.start)
-    pages.speak(word.start, word.end)
     val place = word.place
     onWordChange(mapOf("passage" to place.passage, "book" to place.book, "chapter" to place.chapter, "verse" to place.verse, "word" to place.index))
   }
@@ -352,7 +417,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   }
 
   /** Where a word stands: in which passage, in which book – the passage's, or one read along with it – and where in the scripture. */
-  private data class WordPlace(val passage: Int, val book: String, val chapter: Int, val verse: Int, val index: Int)
+  data class WordPlace(val passage: Int, val book: String, val chapter: Int, val verse: Int, val index: Int)
 
   /** A paragraph as the core made it, sized and colored for the reader. Colors are ARGB. */
   private class Paragraph(
@@ -476,8 +541,11 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     /** The readers in sight, which show what the library holds as the host adds or removes books. */
     private val shown = java.util.Collections.newSetFromMap(WeakHashMap<ReaderView, Boolean>())
 
-    /** On the main thread, after the host added or removed books. */
-    fun booksChanged() = shown.toList().forEach(ReaderView::render)
+    /** On the main thread, after the host added or removed books: what is still to be said goes with them. */
+    fun booksChanged() = shown.toList().forEach {
+      it.readAloud.stop()
+      it.render()
+    }
 
     private const val LEFT_TO_RIGHT_MARK = "\u200E"
     private const val RIGHT_TO_LEFT_MARK = "\u200F"

@@ -17,6 +17,15 @@ struct PassageRecord: Record {
   @Field var to: Int?
 }
 
+/// Where a word stands, as JS passes it to jump to.
+struct WordPositionRecord: Record {
+  @Field var passage: Int = 0
+  @Field var book: String = ""
+  @Field var chapter: Int = 0
+  @Field var verse: Int = 0
+  @Field var word: Int = 0
+}
+
 /// The reader's colors. Text takes the color of its role, if it has one: a verse number, a heading,
 /// a tajweed rule.
 struct ReaderColors: Record {
@@ -53,8 +62,13 @@ public class ScripturaModule: Module {
       Self.booksChanged()
     }
 
+    // The voices that can read aloud: their identifiers, names and languages.
+    AsyncFunction("speechVoices") {
+      ReadAloud.voiceList()
+    }
+
     View(ReaderView.self) {
-      Events("onWordChange", "onLaidOut")
+      Events("onWordChange", "onLaidOut", "onSpeechChange")
 
       Prop("passages") { (view: ReaderView, passages: [PassageRecord]?) in
         view.passages = passages ?? []
@@ -92,12 +106,31 @@ public class ScripturaModule: Module {
       Prop("parallel", "inline") { (view: ReaderView, parallel: String) in
         view.parallel = parallel
       }
+      Prop("voices") { (view: ReaderView, voices: [String: String]?) in
+        view.voices = voices ?? [:]
+      }
+      Prop("speakAlong", false) { (view: ReaderView, speakAlong: Bool) in
+        view.speakAlong = speakAlong
+      }
       OnViewDidUpdateProps { (view: ReaderView) in
         view.render()
       }
 
       AsyncFunction("move") { (view: ReaderView, step: String) in
         view.move(step)
+      }
+      AsyncFunction("jump") { (view: ReaderView, position: WordPositionRecord) -> Bool in
+        view.jump(to: WordPlace(passage: UInt32(position.passage), book: position.book, chapter: UInt32(position.chapter),
+                                verse: UInt32(position.verse), index: UInt32(position.word)))
+      }
+      AsyncFunction("play") { (view: ReaderView) in
+        view.play()
+      }
+      AsyncFunction("pause") { (view: ReaderView) in
+        view.pause()
+      }
+      AsyncFunction("stop") { (view: ReaderView) in
+        view.stop()
       }
       // The same as a tap at that point, so the hit test can be tried without a finger.
       AsyncFunction("tapAt") { (view: ReaderView, x: Double, y: Double) in

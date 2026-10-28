@@ -3,6 +3,7 @@ import {
   type MoveStep,
   type WebReader,
   type WebReaderOptions,
+  type WordPosition,
 } from '@schaefchens/scriptura-web';
 import { type CSSProperties, type Ref, useEffect, useImperativeHandle, useRef } from 'react';
 
@@ -10,6 +11,12 @@ export * from '@schaefchens/scriptura-web';
 
 export type ReaderHandle = {
   move(step: MoveStep): void;
+  /** Brings the reader to a word by where it stands, as a tap would. False if the reader shows no such verse. */
+  jump(position: WordPosition): boolean;
+  /** Reads aloud from the word marked, or the first in sight, marking each word as it is said. */
+  play(): void;
+  pause(): void;
+  stop(): void;
   /** Turns to the next or previous page, or a screen down or up. */
   turn(forward: boolean): void;
   /** Shows what the library now holds, after books were added or removed. */
@@ -33,12 +40,13 @@ export function Reader({ ref, className, style, ...options }: ReaderProps) {
   const made = useRef(false);
   const latest = useRef(options);
   latest.current = options;
-  const { library, onWordChange: _word, onLaidOut: _laidOut, ...shown } = options;
+  const { library, onWordChange: _word, onLaidOut: _laidOut, onSpeechChange: _speech, ...shown } = options;
   const shownKey = JSON.stringify(shown);
   const withCallbacks = (): WebReaderOptions => ({
     ...latest.current,
     onWordChange: (position) => latest.current.onWordChange?.(position),
     onLaidOut: (time) => latest.current.onLaidOut?.(time),
+    onSpeechChange: (change) => latest.current.onSpeechChange?.(change),
   });
 
   useEffect(() => {
@@ -57,6 +65,10 @@ export function Reader({ ref, className, style, ...options }: ReaderProps) {
 
   useImperativeHandle(ref, () => ({
     move: (step) => reader.current?.move(step),
+    jump: (position) => reader.current?.jump(position) ?? false,
+    play: () => reader.current?.play(),
+    pause: () => reader.current?.pause(),
+    stop: () => reader.current?.stop(),
     turn: (forward) => reader.current?.turn(forward),
     refresh: () => reader.current?.refresh(),
   }), []);

@@ -4,8 +4,9 @@ import UIKit
 
 /// The reader: passages as paragraphs, each with its own direction, language and font, laid out as
 /// one attributed string, in pages or one endless scroll. It fetches them from the core itself, from
-/// the books the host added, so their text never passes through JS. A word can be tapped or reached
-/// word by word; JS learns only where the current word stands, never its text.
+/// the books the host added, so their text never passes through JS. A word can be tapped, reached
+/// word by word or jumped to; JS learns only where the current word stands, never its text. It
+/// reads aloud with the device's voices, from the word it is at, and marks each word as it is said.
 class ReaderView: ExpoView {
   /// Posted as the host adds or removes books: every reader shows what the library now holds.
   static let booksChanged = Notification.Name("ScripturaBooksChanged")
@@ -25,15 +26,26 @@ class ReaderView: ExpoView {
   /// in each, or "columns", side by side.
   var companions: [String] = []
   var parallel = "inline"
+  /// A voice per language for reading aloud, by identifier; otherwise the device's for it.
+  var voices: [String: String] = [:]
+  /// Read aloud, each verse is followed by the same verse in each book read along; otherwise only
+  /// the passages' own books are.
+  var speakAlong = false
 
   let onWordChange = EventDispatcher()
   let onLaidOut = EventDispatcher()
+  let onSpeechChange = EventDispatcher()
 
   private let pages = PagedText()
   private var words: [ReaderWord] = []
+  /// Each word's index in `words`, by where it stands.
+  private var indices: [WordPlace: Int] = [:]
   private var current: Int?
+  private let readAloud = ReadAloud()
   /// The passages the text is of: given them again, in another layout, the reader stays where it is.
   private var shownReferences: [Reference] = []
+  /// What is read aloud along with them.
+  private var spokenAlong: ([String], Bool) = ([], false)
   private var booksObserver: NSObjectProtocol?
   /// How tall a letter is in a font, per point of its size, by font and letter.
   private var letterHeights: [String: Double] = [:]
@@ -56,14 +68,28 @@ class ReaderView: ExpoView {
       let time = milliseconds(since: renderStarted)
       onLaidOut(["pages": paging == "pages" ? count : 0, "milliseconds": firstShown ?? time, "all": time])
     }
+    readAloud.onWord = { [weak self] utterance, word in
+      self?.follow(WordPlace(passage: utterance.passage, book: utterance.book, chapter: word.chapter, verse: word.verse, index: word.index))
+    }
+    readAloud.onChange = { [weak self] change in self?.onSpeechChange(change) }
     addSubview(pages)
     booksObserver = NotificationCenter.default.addObserver(forName: Self.booksChanged, object: nil, queue: .main) { [weak self] _ in
+      // What is still to be said goes with the books.
+      self?.readAloud.stop()
       self?.render()
     }
   }
 
   deinit {
     booksObserver.map(NotificationCenter.default.removeObserver)
+    readAloud.stop()
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window == nil {
+      readAloud.stop()
+    }
   }
 
   override func layoutSubviews() {
@@ -87,6 +113,9 @@ class ReaderView: ExpoView {
     // At the very start, before the first word, it stays there, its heading in sight.
     let anchorAt = pages.anchor > 0 ? kept.firstIndex { NSMaxRange($0.range) > pages.anchor } : nil
     let marked = staying ? current.map { words[$0].place } : nil
+    if !staying {
+      readAloud.stop()
+    }
     shownReferences = references
     let paragraphs = readerBlocks(references: references, fontSize: fontSize, versePerLine: versePerLine, companions: companions).map {
       Paragraph($0, colors: colors, fontSize: fontSize(for: $0))
@@ -124,6 +153,7 @@ class ReaderView: ExpoView {
     let withWords = paragraphs.filter { !$0.words.isEmpty }
     let rightToLeft = !withWords.isEmpty && withWords.allSatisfy(\.rightToLeft)
     let indices = Dictionary(words.indices.map { (words[$0].place, $0) }, uniquingKeysWith: min)
+    self.indices = indices
     // The word the reader was at – or if it is gone, as a book is no longer read along, the last
     // before it that is still there.
     let anchorWord = anchorAt.flatMap { at in kept[...at].reversed().lazy.compactMap { indices[$0.place] }.first }
@@ -138,6 +168,11 @@ class ReaderView: ExpoView {
       current = index
       pages.highlight(words[index].range)
     }
+    // Other books read along change what is said: the voice goes on from the word it is at.
+    if (companions, speakAlong) != spokenAlong, readAloud.state != "stopped" {
+      readAloud.state == "speaking" ? play() : readAloud.stop()
+    }
+    spokenAlong = (companions, speakAlong)
   }
 
   /// A paragraph's font: its own, or the one the app brings for its language, or the system's.
@@ -317,6 +352,46 @@ class ReaderView: ExpoView {
     }
   }
 
+  /// Brings the reader to a word by where it stands and marks it, as a tap would – or if its verse
+  /// has no such word, the verse's first. False if the reader shows no such verse.
+  func jump(to place: WordPlace) -> Bool {
+    let inVerse = { (word: ReaderWord) in
+      word.place.passage == place.passage && word.place.book == place.book && word.place.chapter == place.chapter && word.place.verse == place.verse
+    }
+    guard let index = indices[place] ?? words.firstIndex(where: inVerse) else { return false }
+    select(index)
+    return true
+  }
+
+  /// Reads aloud from the word marked – or, with none, the first in sight – on to the end; a voice
+  /// paused at that word goes on.
+  func play() {
+    readAloud.voices = voices
+    readAloud.play(shownReferences, companions: companions, along: speakAlong, from: readingStart().map(position(of:)))
+  }
+
+  func pause() {
+    readAloud.pause(at: current.map { position(of: words[$0].place) })
+  }
+
+  func stop() {
+    readAloud.stop()
+  }
+
+  /// The word reading starts at: the one marked, or the first in sight – none at the very start,
+  /// where reading starts with the first heading.
+  private func readingStart() -> WordPlace? {
+    if let current {
+      return words[current].place
+    }
+    guard pages.anchor > 0 else { return nil }
+    return words.first { NSMaxRange($0.range) > pages.anchor }?.place
+  }
+
+  private func position(of place: WordPlace) -> WordPosition {
+    WordPosition(passage: place.passage, book: place.book, chapter: place.chapter, verse: place.verse, word: place.index)
+  }
+
   /// Selects the word at a point in this view's coordinates, as a tap there would.
   func tap(at point: CGPoint) {
     pages.characterIndex(at: pages.convert(point, from: self)).map(selectWord(atCharacter:))
@@ -328,16 +403,31 @@ class ReaderView: ExpoView {
     }
   }
 
+  /// Marks a word reached by a tap, a move or a jump. While reading aloud, the voice goes on from it.
   private func select(_ index: Int) {
+    mark(index)
+    if UIAccessibility.isVoiceOverRunning {
+      UIAccessibility.post(notification: .announcement, argument: (pages.text.string as NSString).substring(with: words[index].range))
+    }
+    if readAloud.state == "speaking" {
+      play()
+    }
+  }
+
+  /// Marks the word the voice comes to. Voices report some punctuation apart, as a word of its own:
+  /// it is still the word it belongs to.
+  private func follow(_ place: WordPlace) {
+    guard let index = indices[place], index != current else { return }
+    mark(index)
+  }
+
+  private func mark(_ index: Int) {
     let word = words[index]
     pages.highlight(word.range)
     pages.show(characterAt: word.range.location)
     current = index
     let place = word.place
     onWordChange(["passage": place.passage, "book": place.book, "chapter": place.chapter, "verse": place.verse, "word": place.index])
-    if UIAccessibility.isVoiceOverRunning {
-      UIAccessibility.post(notification: .announcement, argument: (pages.text.string as NSString).substring(with: word.range))
-    }
   }
 
   private func verseStart(_ index: Int) -> Int {
@@ -367,7 +457,7 @@ private struct ReaderWord {
 
 /// Where a word stands: in which passage, in which book – the passage's, or one read along with it –
 /// and where in the scripture.
-private struct WordPlace: Hashable {
+struct WordPlace: Hashable {
   let passage: UInt32
   let book: String
   let chapter: UInt32

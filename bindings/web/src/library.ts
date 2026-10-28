@@ -1,6 +1,6 @@
-import type { BookInfo, Passage } from '@schaefchens/scriptura';
+import type { BookInfo, Passage, WordPosition } from '@schaefchens/scriptura';
 
-import init, { Library as Core } from './generated/scriptura_wasm.js';
+import init, { Library as Core, type Speech as CoreSpeech } from './generated/scriptura_wasm.js';
 
 /** A paragraph to lay out: a chapter's heading, its running text, or a verse on a line of its own. See the core's Block. */
 export type Block = {
@@ -22,6 +22,32 @@ export type Block = {
   verses: { chapter: number; verse: number; start: number; end: number }[];
   words: { chapter: number; verse: number; index: number; start: number; end: number }[];
 };
+
+/** Text for a voice, in one language: a chapter's heading, or verses of a passage's book without their numbers. See the core's Utterance. */
+export type Utterance = {
+  passage: number;
+  book: string;
+  language: string;
+  heading: boolean;
+  text: string;
+  /** Each word where it stands, and its range in `text` in UTF-16 code units, as voices report the words they speak. */
+  words: { chapter: number; verse: number; index: number; start: number; end: number }[];
+};
+
+/** What a voice says of passages, utterance by utterance: see the core's Speech. */
+export class Speech {
+  constructor(private core: CoreSpeech) {}
+
+  /** The next utterance, at most `limit` UTF-16 code units long, cut at a sentence end; none after the last. */
+  next(limit: number): Utterance | undefined {
+    const json = this.core.nextJson(limit);
+    return json === undefined ? undefined : JSON.parse(json);
+  }
+
+  free() {
+    this.core.free();
+  }
+}
 
 let loading: Promise<unknown> | undefined;
 
@@ -64,5 +90,13 @@ export class Library {
   /** The passages as paragraphs, read along with `companions`. */
   blocks(passages: Passage[], options: { fontSize: number; versePerLine?: boolean; companions?: string[] }): Block[] {
     return JSON.parse(this.core.blocksJson(JSON.stringify(passages), JSON.stringify(options)));
+  }
+
+  /**
+   * What a voice says of the passages, read along with `companions` – only their own books, or
+   * `along`, each verse in every book – from the word at `from`, or else from the start.
+   */
+  speech(passages: Passage[], options: { companions?: string[]; along?: boolean }, from?: WordPosition): Speech {
+    return new Speech(this.core.speech(JSON.stringify(passages), JSON.stringify(options), from ? JSON.stringify(from) : ''));
   }
 }

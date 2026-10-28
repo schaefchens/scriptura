@@ -24,6 +24,21 @@ export type WordPosition = { passage: number; book: string; chapter: number; ver
 /** One step through the words. */
 export type MoveStep = 'word+1' | 'word-1' | 'word+10' | 'word-10' | 'verse+1' | 'verse-1';
 
+/** What the reader's voice does: it speaks, it paused, or it stopped – at the end, by stop(), or as the passages changed. */
+export type SpeechChange = {
+  state: 'speaking' | 'paused' | 'stopped';
+  /** After a start – by play(), or by a tap, a move or a jump while it speaks – how long until the voice sounded, in milliseconds. */
+  firstSound?: number;
+  /** The languages skipped so far, as the device has no voice for them. */
+  unvoiced?: string[];
+};
+
+/**
+ * A voice on the device that can read aloud: its id, for the reader's `voices`, its name and its
+ * language as a BCP 47 tag. Voices that would send the text to a server are left out.
+ */
+export type Voice = { id: string; name: string; language: string; quality?: string };
+
 /**
  * The reader's colors. Text takes the color of its role, where it has one: "number" (a verse
  * number), "heading", "ketiv" (a word as written where another is read) or a tajweed rule.
@@ -55,6 +70,10 @@ export type ReaderOptions = {
   companions?: string[];
   /** Read along inline (a verse, then the same verse in each companion) or side by side, a column each. */
   parallel?: 'inline' | 'columns';
+  /** For reading aloud, a voice per language, by id; otherwise the device's for each. */
+  voices?: Record<string, string>;
+  /** Read aloud, each verse is followed by the same verse in each companion; otherwise only the passages' own books are spoken. */
+  speakAlong?: boolean;
 };
 
 /** How long a text took until its first pages showed, and until all of it was laid out, in milliseconds; and its pages, 0 in one endless scroll. */

@@ -7,6 +7,7 @@ import de.schaefchens.scriptura.core.addBooks
 import de.schaefchens.scriptura.core.books
 import de.schaefchens.scriptura.core.clearBooks
 import de.schaefchens.scriptura.core.removeBooks
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
@@ -27,6 +28,15 @@ class PassageRecord : Record {
   @Field val chapter: Int? = null
   @Field val from: Int? = null
   @Field val to: Int? = null
+}
+
+/** Where a word stands, as JS passes it to jump to. */
+class WordPositionRecord : Record {
+  @Field val passage: Int = 0
+  @Field val book: String = ""
+  @Field val chapter: Int = 0
+  @Field val verse: Int = 0
+  @Field val word: Int = 0
 }
 
 /** The reader's colors. Text takes the color of its role, if it has one: a verse number, a heading, a tajweed rule. */
@@ -66,8 +76,14 @@ class ScripturaModule : Module() {
       ReaderView.booksChanged()
     }.runOnQueue(Queues.MAIN)
 
+    // The voices that can read aloud: their names and languages.
+    AsyncFunction("speechVoices") { promise: Promise ->
+      val context = appContext.reactContext ?: return@AsyncFunction promise.resolve(emptyList<Any>())
+      ReadAloud.voiceList(context, promise::resolve)
+    }
+
     View(ReaderView::class) {
-      Events("onWordChange", "onLaidOut")
+      Events("onWordChange", "onLaidOut", "onSpeechChange")
 
       Prop("passages") { view: ReaderView, passages: List<PassageRecord>? ->
         view.passages = passages ?: emptyList()
@@ -105,6 +121,12 @@ class ScripturaModule : Module() {
       Prop("parallel", "inline") { view: ReaderView, parallel: String ->
         view.parallel = parallel
       }
+      Prop("voices") { view: ReaderView, voices: Map<String, String>? ->
+        view.voices = voices ?: emptyMap()
+      }
+      Prop("speakAlong", false) { view: ReaderView, speakAlong: Boolean ->
+        view.speakAlong = speakAlong
+      }
       OnViewDidUpdateProps { view: ReaderView ->
         view.render()
       }
@@ -112,6 +134,18 @@ class ScripturaModule : Module() {
       AsyncFunction("move") { view: ReaderView, step: String ->
         view.move(step)
       }
+      AsyncFunction("jump") { view: ReaderView, position: WordPositionRecord ->
+        view.jump(ReaderView.WordPlace(position.passage, position.book, position.chapter, position.verse, position.word))
+      }.runOnQueue(Queues.MAIN)
+      AsyncFunction("play") { view: ReaderView ->
+        view.play()
+      }.runOnQueue(Queues.MAIN)
+      AsyncFunction("pause") { view: ReaderView ->
+        view.pause()
+      }.runOnQueue(Queues.MAIN)
+      AsyncFunction("stop") { view: ReaderView ->
+        view.stop()
+      }.runOnQueue(Queues.MAIN)
       // The same as a tap at that point (in dp), so the hit test can be tried without a finger.
       AsyncFunction("tapAt") { view: ReaderView, x: Double, y: Double ->
         val density = view.resources.displayMetrics.density

@@ -1,19 +1,32 @@
-import type { LaidOut, MoveStep, ReaderColors, ReaderOptions, WordPosition } from '@schaefchens/scriptura';
+import type { LaidOut, MoveStep, ReaderColors, ReaderOptions, SpeechChange, WordPosition } from '@schaefchens/scriptura';
 import { palette } from '@schaefchens/scriptura';
 
 import type { Block, Library } from './library';
+import { ReadAloud } from './readAloud';
 
 export type WebReaderOptions = ReaderOptions & {
   library: Library;
-  /** The word reached, by a tap or a move: where it stands. */
+  /** The word reached, by a tap, a move or a jump, or by the voice reading aloud: where it stands. */
   onWordChange?: (position: WordPosition) => void;
   onLaidOut?: (time: LaidOut) => void;
+  onSpeechChange?: (change: SpeechChange) => void;
 };
 
 export type WebReader = {
   /** Shows other passages, or the same in another layout: the reader stays at the word it was at. */
   update(options: Partial<WebReaderOptions>): void;
   move(step: MoveStep): void;
+  /** Brings the reader to a word by where it stands, as a tap would; to its verse's first word if the verse has no such word. False if the reader shows no such verse. */
+  jump(position: WordPosition): boolean;
+  /**
+   * Reads aloud with the browser's voices, from the word marked – or, with none, the first in sight –
+   * on to the end, marking each word as it is said. A tap, a move or a jump while it speaks goes on
+   * from there.
+   */
+  play(): void;
+  /** Pauses; play() goes on from the word reached. */
+  pause(): void;
+  stop(): void;
   /** Shows what the library now holds, after books were added or removed. */
   refresh(): void;
   /** Turns to the next or previous page, or a screen down or up. */
@@ -42,6 +55,8 @@ const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors'>> = {
   versePerLine: false,
   companions: [],
   parallel: 'inline',
+  voices: {},
+  speakAlong: false,
 };
 
 let readers = 0;
@@ -72,7 +87,15 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   let paragraphs: HTMLElement[] = [];
   let pieces: Piece[][] = [];
   let words: Word[] = [];
+  /** Each word's index in `words`, by where it stands. */
+  let indices = new Map<string, number>();
   let current: number | undefined;
+  const readAloud = new ReadAloud(
+    (utterance, word) => follow({ passage: utterance.passage, book: utterance.book, chapter: word.chapter, verse: word.verse, index: word.index }),
+    (change) => options.onSpeechChange?.(change),
+  );
+  /** What is read aloud along with the passages. */
+  let spokenAlong = '';
   let page = 0;
   let pageCount = 1;
   let shownPassages = '';
@@ -91,6 +114,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     const kept = staying ? words : [];
     const anchorAt = staying ? wordInSight() : undefined;
     const marked = staying && current !== undefined ? words[current].place : undefined;
+    if (!staying) readAloud.stop();
     shownPassages = JSON.stringify(passages);
 
     blocks = library.blocks(passages, { fontSize, versePerLine, companions });
@@ -131,12 +155,19 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     highlightStyle.textContent = `::highlight(${highlightName}) { background-color: ${colors.highlight}; }`;
     layout = arrange(sectionsOf(along, sideBySide), rightToLeft);
 
-    const keys = new Map(words.map((word, index) => [key(word.place), index]));
-    const anchor = anchorAt === undefined ? undefined : kept.slice(0, anchorAt + 1).reverse().map((word) => keys.get(key(word.place))).find((index) => index !== undefined);
+    indices = new Map(words.map((word, index) => [key(word.place), index]));
+    const anchor = anchorAt === undefined ? undefined : kept.slice(0, anchorAt + 1).reverse().map((word) => indices.get(key(word.place))).find((index) => index !== undefined);
     if (marked) {
-      current = keys.get(key(marked));
+      current = indices.get(key(marked));
       highlight();
     }
+    // Other books read along change what is said: the voice goes on from the word it is at.
+    const spoken = JSON.stringify([companions, options.speakAlong]);
+    if (spoken !== spokenAlong && readAloud.state !== 'stopped') {
+      if (readAloud.state === 'speaking') play();
+      else readAloud.stop();
+    }
+    spokenAlong = spoken;
     if (anchor !== undefined) showWord(anchor, 'top');
     else goTo(0);
     const time = performance.now() - started;
@@ -469,13 +500,49 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     return undefined;
   }
 
+  /** Marks a word reached by a tap, a move or a jump. While reading aloud, the voice goes on from it. */
   function select(index: number) {
+    mark(index);
+    live.textContent = rangeOf(words[index]).toString();
+    if (readAloud.state === 'speaking') play();
+  }
+
+  /** Marks the word the voice comes to. Voices report some punctuation apart, as a word of its own: it is still the word it belongs to. */
+  function follow(place: Place) {
+    const index = indices.get(key(place));
+    if (index !== undefined && index !== current) mark(index);
+  }
+
+  function mark(index: number) {
     current = index;
     highlight();
     showWord(index, 'third');
     const { place } = words[index];
     options.onWordChange?.({ passage: place.passage, book: place.book, chapter: place.chapter, verse: place.verse, word: place.index });
-    live.textContent = rangeOf(words[index]).toString();
+  }
+
+  function jump({ passage, book, chapter, verse, word }: WordPosition) {
+    const place = { passage, book, chapter, verse, index: word };
+    const inVerse = (other: Place) => other.passage === passage && other.book === book && other.chapter === chapter && other.verse === verse;
+    const index = indices.get(key(place)) ?? words.findIndex((candidate) => inVerse(candidate.place));
+    if (index < 0) return false;
+    select(index);
+    return true;
+  }
+
+  function play() {
+    readAloud.voices = options.voices;
+    const { library, passages, companions, speakAlong } = options;
+    readAloud.play(library, passages, companions, speakAlong, readingStart());
+  }
+
+  /** The word reading starts at: the one marked, or the first in sight – none at the very start, where reading starts with the first heading. */
+  function readingStart(): WordPosition | undefined {
+    const atStart = layout.kind === 'scroll' ? root.scrollTop <= 0 : page === 0 && Math.abs(root.scrollLeft) < 1;
+    const index = current ?? (atStart ? undefined : wordInSight());
+    if (index === undefined) return undefined;
+    const { place } = words[index];
+    return { passage: place.passage, book: place.book, chapter: place.chapter, verse: place.verse, word: place.index };
   }
 
   function highlight() {
@@ -587,10 +654,19 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       render();
     },
     move,
-    refresh: render,
+    jump,
+    play,
+    pause: () => readAloud.pause(),
+    stop: () => readAloud.stop(),
+    refresh() {
+      // What is still to be said goes with the books.
+      readAloud.stop();
+      render();
+    },
     turn,
     destroy() {
       destroyed = true;
+      readAloud.stop();
       resizes.disconnect();
       CSS.highlights?.delete(highlightName);
       root.remove();

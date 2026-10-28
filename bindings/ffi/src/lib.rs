@@ -2,7 +2,7 @@
 //! fills and every reader view reads from. Only native code binds it, so a passage's text never has
 //! to pass through JavaScript: React Native's module gives JS the books' names, not their text.
 
-use std::sync::{LazyLock, RwLock};
+use std::sync::{LazyLock, Mutex, RwLock};
 
 uniffi::setup_scaffolding!();
 
@@ -78,6 +78,58 @@ pub struct Word {
     pub end: u32,
 }
 
+/// Where a word stands: see `scriptura::Place`.
+#[derive(uniffi::Record)]
+pub struct WordPosition {
+    pub passage: u32,
+    pub book: String,
+    pub chapter: u32,
+    pub verse: u32,
+    pub word: u32,
+}
+
+/// Text for a voice: see `scriptura::Utterance`.
+#[derive(uniffi::Record)]
+pub struct Utterance {
+    pub passage: u32,
+    pub book: String,
+    pub language: String,
+    pub heading: bool,
+    pub text: String,
+    pub words: Vec<Word>,
+}
+
+/// What a voice says of passages, utterance by utterance: see `scriptura::Speech`. It holds what
+/// is still to be said, so a reader drops it as the host removes books.
+#[derive(uniffi::Object)]
+pub struct Speech(Mutex<scriptura::Speech>);
+
+#[uniffi::export]
+impl Speech {
+    /// The passages read along with `companions` – only their own books, or `along`, each verse in
+    /// every book – from the word at `from`, or else from the start.
+    #[uniffi::constructor]
+    pub fn new(references: Vec<Reference>, companions: Vec<String>, along: bool, from: Option<WordPosition>) -> Self {
+        let from = from.map(|WordPosition { passage, book, chapter, verse, word }| scriptura::Place {
+            passage,
+            book,
+            chapter,
+            verse,
+            word,
+        });
+        let speech = LIBRARY.read().unwrap().speech(&core_references(references), &companions, along, from.as_ref());
+        Speech(Mutex::new(speech))
+    }
+
+    /// The next utterance, at most `limit` UTF-16 code units long, cut at a sentence end; none after
+    /// the last.
+    pub fn next(&self, limit: u32) -> Option<Utterance> {
+        let utterance = self.0.lock().unwrap().next(limit as usize)?;
+        let scriptura::Utterance { passage, book, language, heading, text, words } = utterance;
+        Some(Utterance { passage, book, language, heading, text, words: words.into_iter().map(Word::from).collect() })
+    }
+}
+
 /// Adds the books of a JSON array, each replacing one of the same id, and returns their ids.
 #[uniffi::export]
 pub fn add_books(json: Vec<u8>) -> Result<Vec<String>, BooksError> {
@@ -116,12 +168,15 @@ pub fn reader_blocks(
     verse_per_line: bool,
     companions: Vec<String>,
 ) -> Vec<Block> {
-    let references: Vec<_> = references
+    let options = scriptura::Options { font_size, verse_per_line, companions };
+    LIBRARY.read().unwrap().blocks(&core_references(references), &options).into_iter().map(Block::from).collect()
+}
+
+fn core_references(references: Vec<Reference>) -> Vec<scriptura::Reference> {
+    references
         .into_iter()
         .map(|Reference { book, chapter, from, to }| scriptura::Reference { book, chapter, from, to })
-        .collect();
-    let options = scriptura::Options { font_size, verse_per_line, companions };
-    LIBRARY.read().unwrap().blocks(&references, &options).into_iter().map(Block::from).collect()
+        .collect()
 }
 
 impl From<scriptura::Block> for Block {
@@ -147,11 +202,13 @@ impl From<scriptura::Block> for Block {
                 .into_iter()
                 .map(|scriptura::VerseRange { chapter, verse, start, end }| VerseRange { chapter, verse, start, end })
                 .collect(),
-            words: block
-                .words
-                .into_iter()
-                .map(|scriptura::Word { chapter, verse, index, start, end }| Word { chapter, verse, index, start, end })
-                .collect(),
+            words: block.words.into_iter().map(Word::from).collect(),
         }
+    }
+}
+
+impl From<scriptura::Word> for Word {
+    fn from(scriptura::Word { chapter, verse, index, start, end }: scriptura::Word) -> Self {
+        Word { chapter, verse, index, start, end }
     }
 }
