@@ -26,6 +26,12 @@ struct WordPositionRecord: Record {
   @Field var word: Int = 0
 }
 
+/// What the system's media controls show of the reader reading aloud.
+struct NowPlayingRecord: Record {
+  @Field var title: String = ""
+  @Field var subtitle: String?
+}
+
 /// The reader's colors. Text takes the color of its role, if it has one: a verse number, a heading,
 /// a tajweed rule.
 struct ReaderColors: Record {
@@ -70,7 +76,9 @@ public class ScripturaModule: Module {
     }
 
     Function("recordings") {
-      recordings().map { ["id": $0.id, "voice": $0.voice, "book": $0.book, "chapter": $0.chapter] }
+      recordings().map {
+        ["id": $0.id, "voice": $0.voice, "name": $0.name, "book": $0.book, "chapter": $0.chapter, "misfit": $0.misfit]
+      }
     }
 
     AsyncFunction("removeRecordings") { (ids: [String]) in
@@ -138,6 +146,9 @@ public class ScripturaModule: Module {
       }
       Prop("recordedVoices") { (view: ReaderView, voices: [String]?) in
         view.recordedVoices = voices
+      }
+      Prop("nowPlaying") { (view: ReaderView, nowPlaying: NowPlayingRecord?) in
+        view.nowPlaying = nowPlaying
       }
       OnViewDidUpdateProps { (view: ReaderView) in
         view.render()

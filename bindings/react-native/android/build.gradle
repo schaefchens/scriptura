@@ -25,4 +25,6 @@ dependencies {
   implementation "androidx.customview:customview:1.1.0"
   // Recordings play with Media3's player: it seeks to the sample, and keeps the voice's pitch at every rate.
   implementation "androidx.media3:media3-exoplayer:1.11.1"
+  // The media controls and the service that keeps reading aloud going in the background.
+  implementation "androidx.media3:media3-session:1.11.1"
 }

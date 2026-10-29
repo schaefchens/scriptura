@@ -44,6 +44,12 @@ class WordPositionRecord : Record {
   @Field val word: Int = 0
 }
 
+/** What the system's media controls show of the reader reading aloud. */
+class NowPlayingRecord : Record {
+  @Field val title: String = ""
+  @Field val subtitle: String? = null
+}
+
 /** The reader's colors. Text takes the color of its role, if it has one: a verse number, a heading, a tajweed rule. */
 class ReaderColors : Record {
   @Field val background: Color? = null
@@ -93,7 +99,9 @@ class ScripturaModule : Module() {
     }.runOnQueue(Queues.MAIN)
 
     Function("recordings") {
-      recordings().map { mapOf("id" to it.id, "voice" to it.voice, "book" to it.book, "chapter" to it.chapter.toInt()) }
+      recordings().map {
+        mapOf("id" to it.id, "voice" to it.voice, "name" to it.name, "book" to it.book, "chapter" to it.chapter.toInt(), "misfit" to it.misfit)
+      }
     }
 
     AsyncFunction("removeRecordings") { ids: List<String> ->
@@ -162,6 +170,9 @@ class ScripturaModule : Module() {
       }
       Prop("recordedVoices") { view: ReaderView, voices: List<String>? ->
         view.recordedVoices = voices
+      }
+      Prop("nowPlaying") { view: ReaderView, nowPlaying: NowPlayingRecord? ->
+        view.nowPlaying = nowPlaying
       }
       OnViewDidUpdateProps { view: ReaderView ->
         view.render()

@@ -40,6 +40,10 @@ const MOVES: [MoveStep, string][] = [
 
 function App() {
   const books = useMemo(() => library.books(), []);
+  // Who reads a recording, by the name its voice has.
+  const voiceNames = useMemo(() => new Map(library.recordings().map(({ voice, name }) => [voice, name ?? voice])), []);
+  // Chapters with a recording of this voice are played from it; the rest, or all with none, the browser's voices read.
+  const [recited, setRecited] = useState(() => [...voiceNames.keys()][0] ?? '');
   const [book, setBook] = useState(books[0]?.id ?? '');
   const [size, setSize] = useState(24);
   const [paging, setPaging] = useState<'scroll' | 'pages'>('scroll');
@@ -51,8 +55,6 @@ function App() {
   const [speech, setSpeech] = useState<SpeechChange>({ state: 'stopped' });
   const [speakAlong, setSpeakAlong] = useState(false);
   const [rate, setRate] = useState(1);
-  // Chapters with a recording are played from it, or else read by the browser's voices too.
-  const [recited, setRecited] = useState(true);
   const [goTo, setGoTo] = useState('2:1');
   const reader = useRef<ReaderHandle>(null);
 
@@ -112,13 +114,16 @@ function App() {
         )}
         {speech.state !== 'stopped' && <button onClick={() => reader.current?.stop()}>Stop</button>}
         <button onClick={() => setRate(RATES[(RATES.indexOf(rate) + 1) % RATES.length])}>{rate}×</button>
-        <label>
-          <input type="checkbox" checked={recited} onChange={() => setRecited(!recited)} /> Recordings
-        </label>
+        <select value={recited} onChange={(event) => setRecited(event.target.value)}>
+          <option value="">Voices of the browser</option>
+          {[...voiceNames].map(([voice, name]) => (
+            <option key={voice} value={voice}>{name}</option>
+          ))}
+        </select>
         {speech.state === 'speaking' && speech.following === false && <button onClick={() => reader.current?.follow()}>Back to the voice</button>}
         <output dir="auto">
           {position ? `${title(position.book)}‎ ${position.chapter}:${position.verse} · word ${position.word + 1}` : 'Tap a word'}
-          {speech.state === 'speaking' && speech.recording && ` · ${speech.recording}`}
+          {speech.state === 'speaking' && speech.recording && ` · ${voiceNames.get(speech.recording)}`}
           {speech.firstSound !== undefined && ` · first sound after ${Math.round(speech.firstSound)} ms`}
           {speech.unvoiced?.length ? ` · no voice for ${speech.unvoiced.join(', ')}` : ''}
         </output>
@@ -138,7 +143,7 @@ function App() {
         parallel={parallel}
         speakAlong={speakAlong}
         speechRate={rate}
-        recordedVoices={recited ? undefined : []}
+        recordedVoices={recited ? [recited] : []}
         onWordChange={setPosition}
         onSpeechChange={onSpeechChange}
       />
@@ -146,9 +151,9 @@ function App() {
         World English Bible, Luther 1912 and Smith &amp; Van Dyck, public domain; the Westminster Leningrad Codex from the{' '}
         <a href="https://github.com/openscriptures/morphhb">Open Scriptures Hebrew Bible</a>; the SBLGNT, © 2010 Society of Biblical
         Literature and Logos Bible Software, CC BY 4.0; the Quran from <a href="https://tanzil.net">Tanzil</a> (CC BY 3.0) with{' '}
-        <a href="https://github.com/cpfair/quran-tajweed">quran-tajweed</a>'s rules (CC BY 4.0). Recited by Mishary Rashid Alafasy, from{' '}
-        <a href="https://everyayah.com">EveryAyah</a>; its words timed by <a href="https://github.com/cpfair/quran-align">quran-align</a>, ©
-        2016 Collin Fair, CC BY 4.0.
+        <a href="https://github.com/cpfair/quran-tajweed">quran-tajweed</a>'s rules (CC BY 4.0). Recited by Mishary Rashid Alafasy and Maher Al-Muaiqly, from{' '}
+        <a href="https://everyayah.com">EveryAyah</a>; their words timed by <a href="https://github.com/cpfair/quran-align">quran-align</a>, ©
+        2016 Collin Fair, and <a href="https://huggingface.co/datasets/quranlab/quran-audio">QuranLab</a>, CC BY 4.0.
       </footer>
     </main>
   );

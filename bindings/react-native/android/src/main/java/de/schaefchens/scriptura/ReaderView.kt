@@ -71,6 +71,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   /** The voices whose recordings are played, the first that has one for a chapter; with none named, any. */
   var recordedVoices: List<String>? = null
 
+  /** What the system's media controls show while it reads aloud – which then goes on in the background; without it, they show nothing, and it pauses as the app goes to the background. */
+  var nowPlaying: NowPlayingRecord? = null
+
   private val onWordChange by EventDispatcher()
   private val onLaidOut by EventDispatcher()
   private val onSpeechChange by EventDispatcher()
@@ -122,6 +125,13 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   override fun onAttachedToWindow() {
     super.onAttachedToWindow()
     shown.add(this)
+  }
+
+  /** Reading aloud pauses as the app goes to the background, unless the media controls may show it – and the app declares their service. */
+  override fun onWindowVisibilityChanged(visibility: Int) {
+    super.onWindowVisibilityChanged(visibility)
+    val onAway = nowPlaying != null && ReadingService.declared(context)
+    if (visibility != VISIBLE && !onAway && readAloud.state == "speaking") pause()
   }
 
   override fun onDetachedFromWindow() {
@@ -225,6 +235,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     }
     readAs = read
     rateAs = speechRate
+    ReadingService.show(context, this, nowPlaying, readAloud.state)
   }
 
   private val baseTypeface get() = if (font == "serif") Typeface.SERIF else Typeface.DEFAULT
@@ -431,9 +442,10 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     if (readAloud.state == "speaking") onSpeechChange(mapOf("state" to "speaking", "following" to following))
   }
 
-  /** The voice's news for JS; while it speaks, with whether the reader follows it. */
+  /** The voice's news for JS; while it speaks, with whether the reader follows it. The media controls show it too. */
   private fun speechChanged(change: Map<String, Any>) {
     onSpeechChange(if (change["state"] == "speaking") change + ("following" to following) else change)
+    ReadingService.show(context, this, nowPlaying, change["state"] as? String ?: "stopped")
   }
 
   private fun mark(index: Int, show: Boolean = true) {

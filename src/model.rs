@@ -74,8 +74,10 @@ pub struct Verse {
 pub struct Recording {
     /// Unique among the recordings of a library.
     pub id: String,
-    /// Who reads it, as the host names them: a reciter, a narrator, a voice it was rendered in.
+    /// Who reads it – a reciter, a narrator, a voice it was rendered in – by an id the host gives
+    /// them, as a reader's recorded voices name them; and by the name to show, if it has one.
     pub voice: String,
+    pub name: Option<String>,
     /// The book, by id, and the chapter of it that it reads.
     pub book: String,
     pub chapter: u32,

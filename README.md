@@ -32,22 +32,25 @@ Status: built October 2026 from the reader spikes of the Hosana app, its first u
   - `speechRate` is a multiple of the voice's own rate, from 0.5 to 2. Where an engine's scale is no multiple – Apple's, and Google's below 1 – the reader maps it as measured; browsers get it as it is.
   - The reader keeps the word the voice is at in sight. Scrolled or turned away by hand, it stays where the hand put it while the voice reads on, until the word is in sight again or `follow()` brings it back; `onSpeechChange` says which (`following`).
 - **Recordings:**
-  - A recording is a chapter's audio, in one file, and where each verse and each word starts in it, in milliseconds; a word ends where the next starts. It names the version of the core's word definition its timings count by: the core refuses another, and plays a recording only for a chapter whose verses and words it matches, so the marked word can't slip.
-  - Reading aloud plays each chapter that has a recording from it – of the voices `recordedVoices` names, the first that has one, or with none named, any – and the device's voices read the rest. No heading is spoken before recorded verses.
+  - A recording is a chapter's audio, in one file, and where each verse and each word starts in it, in milliseconds; a word ends where the next starts. It names the version of the core's word definition its timings count by: the core refuses another, and plays a recording only for a chapter whose verses and words it matches, so the marked word can't slip. `recordings()` says why one doesn't fit, if it doesn't.
+  - Reading aloud plays each chapter that has a recording from it – of the voices `recordedVoices` names by their ids, the first that has one, or with none named, any – and the device's voices read the rest. No heading is spoken before recorded verses.
   - As with voices, a tap, a move or a jump goes on from that word: the audio seeks there. A verse range plays from its first verse's start to where the next verse starts. A pause pauses in place, and a new rate applies at once, the voice's pitch kept.
   - The readers play with AVPlayer, Media3's ExoPlayer and an audio element, and mark the word the player's clock is at, every frame. Between the Android player's reports – the emulator's come every quarter second – the clock moves on at the rate.
   - A recording that follows a device's voice is loaded and sought while the voice still speaks.
   - An app adds recordings as it adds books: from a file, one it bundles or JSON. Their audio, named relative to them, never passes through JS. On iOS they play in the app's audio session, as spoken audio, so the silent switch doesn't mute them; on Android they take the audio focus, and pause when another app takes it or the headphones come off.
+  - **Audio from a source:** audio an app keeps where no file is – in encrypted storage, say – it gives the players through an `AudioSource` of its own, registered natively for a URI scheme (`AudioSources.register`), which they read piece by piece as they play: through AVPlayer's resource loader on iOS, a Media3 data source on Android. So the audio is never written out whole.
+- **In the background:** with `nowPlaying` – a title and a subtitle the app chooses – the system's media controls show the reader while it reads aloud, play and pause it and move it by a verse, and it reads on with the screen off or in another app: on Android in a media service in the foreground. Without it, they show nothing of it, and reading aloud pauses as the app goes to the background. The reading stays with the reader: it stops as the reader goes away. Takes end where they end without frames to watch, too.
+- **Changes:** on every platform, readers follow their library's changes: new books lay them out anew, and what they had still to read goes with the books or recordings that change.
 
 ## Use
 
 ```tsx
-// React Native, with ["@schaefchens/scriptura-react-native", { "books": ["./texts/books.json"], "recordings": ["./recordings"] }] in app.json's plugins
+// React Native, with ["@schaefchens/scriptura-react-native", { "books": ["./texts/books.json"], "recordings": ["./recordings"], "backgroundAudio": true }] in app.json's plugins
 import { addBooks, addRecordings, Reader, SCRIPT_FONTS } from '@schaefchens/scriptura-react-native';
 
 await addBooks({ asset: 'books.json' });
 await addRecordings({ asset: 'recordings.json' });
-<Reader ref={reader} passages={[{ book: 'jonah' }]} fonts={SCRIPT_FONTS} recordedVoices={['Mishary Rashid Alafasy']} onWordChange={(position) => …} onSpeechChange={(speech) => …} />;
+<Reader ref={reader} passages={[{ book: 'jonah' }]} fonts={SCRIPT_FONTS} recordedVoices={['alafasy']} nowPlaying={{ title: 'Jonah' }} onWordChange={(position) => …} onSpeechChange={(speech) => …} />;
 await reader.current.jump({ passage: 0, book: 'jonah', chapter: 2, verse: 1, word: 0 });
 await reader.current.play(); // pause(), stop(), follow() after a scroll away
 
@@ -63,11 +66,21 @@ const reader = createReader(element, { library, passages: [{ book: 'jonah' }], f
 reader.play();
 ```
 
+Audio from a source, in the app's native code – Swift here, Kotlin alike – for recordings whose audio is `vault:///17.m4a`, say:
+
+```swift
+final class VaultAudio: AudioSource {
+  func length(of uri: URL) -> Int64? { … }                       // the audio's length in bytes
+  func read(_ uri: URL, range: Range<Int64>) -> Data? { … }     // a piece of it, decrypted
+}
+AudioSources.register(VaultAudio(), scheme: "vault")
+```
+
 ## Texts, recordings and fonts
 
 `scriptura-import <config.json>` takes Bibles as USFM, as eBible.org has them, or as OSIS, as the Open Scriptures Hebrew Bible has them, and surahs from Tanzil's text with quran-tajweed's rules; and it fetches the reader's fonts per script, all under the SIL Open Font License. Each text has a license of its own: check it before passing it on, with the notice it asks for. The examples take public-domain and openly licensed editions; [tests/fixtures](tests/fixtures) holds 46 verses and their sources.
 
-It also makes recordings of surahs: EveryAyah's recitations, a file per verse, joined into one file per surah and encoded once with ffmpeg – AAC in M4A, or Opus or MP3 – and timed by [quran-align](https://github.com/cpfair/quran-align)'s word timings (© 2016 Collin Fair, CC BY 4.0), which count words as the core does. Some of EveryAyah's files changed since they were timed: where a verse's timings outlast its audio, as in Alafasy's 37:152, its words are spread over it by their letters. No recitation is known to be under an open license, so the examples fetch them for trying out only, and keep them out of git.
+It also makes recordings of surahs: EveryAyah's recitations, a file per verse, joined into one file per surah and encoded once with ffmpeg – AAC in M4A, or Opus or MP3 – and timed by [quran-align](https://github.com/cpfair/quran-align)'s word timings (© 2016 Collin Fair, CC BY 4.0) for 12 recitations, or [QuranLab](https://huggingface.co/datasets/quranlab/quran-audio)'s (CC BY 4.0) for 33 more, read from its rows a hundred at a time. Both count words as the core does. Some of EveryAyah's files changed since they were timed: where a verse's timings outlast its audio, as in Alafasy's 37:152, its words are spread over it by their letters. No recitation is known to be under an open license, so the examples fetch them for trying out only, and keep them out of git.
 
 ## Building
 
@@ -99,11 +112,13 @@ It also makes recordings of surahs: EveryAyah's recitations, a file per verse, j
   - A reading list that mixes the device's voice and recordings goes from one to the other: the recitation's first word comes 0.7 s after the voice's last on iOS, 1.4 s on Android, where Google's engine reports an utterance done 1.2 s after its last word began.
   - Without a speech engine, as on Android's default emulator image, recordings still play.
   - AAC, MP3 and Opus, in Ogg or MP4, play on all three; Opus in WebM not on iOS, in CAF only there.
+  - From a source – an encrypted vault ([Temple](https://github.com/schaefchens/temple-vault)), read a piece at a time – they play as from a file: the first sound after 0.26–0.34 s on iOS and Android, 0.07–0.2 s after a jump, each word within 13 ms.
+  - In the background, on Android: the media service runs in the foreground, its notification shows the title, and media keys pause, play and move it by a verse. On iOS the system takes the app as the one playing and it plays on with the screen locked; the simulator draws no media controls to look at.
 
 ## Open
 
 - Reading aloud: the voices by ear on phones and their better versions; switching voices on an iPhone; reading on with the screen off; the rate in other engines and browsers; a finger's scroll on iOS, so far tried by `turn()` only.
-- Recordings: playing from storage that isn't a plain file, such as an encrypted one – a data source for AVPlayer and Media3; media controls and the lock screen; calls and other apps interrupting on a phone; QuranLab's timings of 33 more recitations, which come as Parquet.
+- Recordings: the media controls on an iPhone's lock screen, and in a browser; calls and other apps interrupting on a phone. Audio sources on the web: there, an app can hand the reader a blob's URL.
 - Android lays out all after its first pages on one thread; iOS shares that out among the cores.
 - In pages, the web reader lays out the whole text at once, to count them; in a scroll it holds the whole text, but lays out only what is in sight.
 - Side by side in pages, the row after one cut over pages starts on a page of its own.

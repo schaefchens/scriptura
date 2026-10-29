@@ -30,7 +30,7 @@ export type WebReader = {
   stop(): void;
   /** Brings the word the voice is at – or, not reading aloud, the word marked – into sight, and keeps the words the voice comes to there. */
   follow(): void;
-  /** Shows what the library now holds, after books or recordings were added or removed. */
+  /** Lays the text out anew, as the reader does by itself as its library's books change, and stops reading aloud. */
   refresh(): void;
   /** Turns to the next or previous page, or a screen down or up. */
   turn(forward: boolean): void;
@@ -50,7 +50,7 @@ const INSET = 12;
 /** How long after the last scroll by hand, in milliseconds, the reader follows the voice again when its word is in sight. */
 const HAND_SETTLES = 700;
 const SCROLL_KEYS = new Set(['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' ']);
-const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVoices'>> = {
+const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVoices' | 'nowPlaying'>> = {
   fontSize: 28,
   paging: 'scroll',
   columns: 1,
@@ -67,6 +67,8 @@ const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVo
 };
 
 let readers = 0;
+/** The reader the browser's media controls show, by its number. */
+let shownInControls: number | undefined;
 
 /**
  * The reader on the web: passages from a library as paragraphs in the page, each in its language,
@@ -99,8 +101,11 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   let current: number | undefined;
   const readAloud = new ReadAloud(
     (part, word) => reached({ passage: part.passage, book: part.book, chapter: word.chapter, verse: word.verse, index: word.index }),
-    // While it speaks, with whether the reader follows it.
-    (change) => options.onSpeechChange?.(change.state === 'speaking' ? { ...change, following } : change),
+    // While it speaks, with whether the reader follows it. The browser's media controls show it too.
+    (change) => {
+      options.onSpeechChange?.(change.state === 'speaking' ? { ...change, following } : change);
+      showInControls(change.state);
+    },
   );
   /** Whether the word the voice comes to is brought into sight: not after a scroll by hand away from it, until it is in sight again. */
   let following = true;
@@ -184,6 +189,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     }
     readAs = read;
     rateAs = options.speechRate;
+    showInControls(readAloud.state);
     if (anchor !== undefined) showWord(anchor, 'top');
     else goTo(0);
     const time = performance.now() - started;
@@ -702,6 +708,44 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     turn((Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY) > 0);
   }, { passive: false });
 
+  /**
+   * The browser's media controls show the reader while it reads aloud, playing or paused, if it has something to show there; their
+   * buttons play, pause and move it by a verse. Browsers show them while an audio element plays: for recordings, not voices.
+   */
+  function showInControls(state: SpeechChange['state']) {
+    if (!('mediaSession' in navigator)) return;
+    const session = navigator.mediaSession;
+    const shown = options.nowPlaying;
+    if (shown && state !== 'stopped') {
+      shownInControls = id;
+      session.metadata = new MediaMetadata({ title: shown.title, artist: shown.subtitle ?? '' });
+      session.playbackState = state === 'speaking' ? 'playing' : 'paused';
+      session.setActionHandler('play', () => play());
+      session.setActionHandler('pause', () => readAloud.pause(readingStart()));
+      session.setActionHandler('nexttrack', () => move('verse+1'));
+      session.setActionHandler('previoustrack', () => move('verse-1'));
+    } else if (shownInControls === id) {
+      shownInControls = undefined;
+      session.metadata = null;
+      session.playbackState = 'none';
+      for (const action of ['play', 'pause', 'nexttrack', 'previoustrack'] as const) session.setActionHandler(action, null);
+    }
+  }
+
+  // Reading aloud pauses as the page is hidden, unless the media controls may show it.
+  const hidden = () => {
+    if (document.visibilityState === 'hidden' && !options.nowPlaying && readAloud.state === 'speaking') readAloud.pause(readingStart());
+  };
+  document.addEventListener('visibilitychange', hidden);
+
+  // New books lay the text out anew; what was still to be read goes with the books or recordings that change.
+  let library = options.library;
+  const followed = (change: 'books' | 'recordings') => {
+    readAloud.stop();
+    if (change === 'books') render();
+  };
+  let unfollow = library.onChange(followed);
+
   // A new size lays the text out anew, at the word it was at.
   let size = '';
   const resizes = new ResizeObserver(() => {
@@ -715,6 +759,11 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   return {
     update(changes) {
       options = { ...options, ...changes };
+      if (options.library !== library) {
+        unfollow();
+        library = options.library;
+        unfollow = library.onChange(followed);
+      }
       render();
     },
     move,
@@ -724,13 +773,14 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     stop: () => readAloud.stop(),
     follow,
     refresh() {
-      // What is still to be said goes with the books.
       readAloud.stop();
       render();
     },
     turn,
     destroy() {
       destroyed = true;
+      unfollow();
+      document.removeEventListener('visibilitychange', hidden);
       readAloud.stop();
       resizes.disconnect();
       CSS.highlights?.delete(highlightName);

@@ -90,10 +90,20 @@
     "quran": [
       {
         "everyayah": "Alafasy_128kbps",
-        "voice": "Mishary Rashid Alafasy",
+        "voice": "alafasy",
+        "name": "Mishary Rashid Alafasy",
         "surahs": [
           1,
           37,
+          112
+        ]
+      },
+      {
+        "quranlab": "maher-al-muaiqly",
+        "voice": "maher-al-muaiqly",
+        "name": "Maher Al-Muaiqly",
+        "surahs": [
+          1,
           112
         ]
       }

@@ -1,6 +1,7 @@
 package de.schaefchens.scriptura
 
 import android.content.Context
+import android.os.Looper
 import android.os.SystemClock
 import android.view.Choreographer
 import androidx.media3.common.AudioAttributes
@@ -9,16 +10,20 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.PlayerMessage
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import de.schaefchens.scriptura.core.Take
 import de.schaefchens.scriptura.core.TimedWord
 
 /**
  * Plays takes of recordings, with Media3's player: from a take's start to its end, telling the word the audio comes to, as the take's
  * timings have it, at every frame of the screen. A take of the audio already loaded seeks in it, to the very sample. The voice keeps its
- * pitch at every rate. It plays as spoken media, taking the audio focus while it plays, and pauses when another app takes it for good
+ * pitch at every rate. Audio under a scheme an app registered a source for comes from that source, piece by piece (see [AudioSources]). It plays as spoken media, taking the audio focus while it plays, and pauses when another app takes it for good
  * or the headphones come off.
  */
+@androidx.annotation.OptIn(UnstableApi::class)
 class PlayRecording(context: Context) {
   /** The audio comes to a word of a take. */
   var onWord: ((Take, TimedWord) -> Unit)? = null
@@ -39,6 +44,7 @@ class PlayRecording(context: Context) {
     }
 
   private val player: ExoPlayer = ExoPlayer.Builder(context.applicationContext)
+    .setMediaSourceFactory(DefaultMediaSourceFactory(SourcedDataSource.Factory(context)))
     .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_SPEECH).build(), true)
     .setHandleAudioBecomingNoisy(true)
     .build()
@@ -53,6 +59,9 @@ class PlayRecording(context: Context) {
 
   /** Where the audio was as it was started, until it moves on from there: then it sounds. */
   private var startedAt: Long? = null
+
+  /** Ends the take as the player reaches its end – with the screen off too, when no frames come. */
+  private var ending: PlayerMessage? = null
 
   /**
    * Where the player last said the audio is, and when; and where it was taken to be since. Some devices report it only every quarter
@@ -89,6 +98,10 @@ class PlayRecording(context: Context) {
     prepare(take)
     this.take = take
     word = -1
+    ending?.cancel()
+    ending = take.end?.let { at ->
+      player.createMessage { _, _ -> end() }.setLooper(Looper.getMainLooper()).setPosition(at.toLong()).setDeleteAfterDelivery(true).send()
+    }
     resume(take.start.toLong())
   }
 
@@ -122,6 +135,8 @@ class PlayRecording(context: Context) {
 
   fun stop() {
     pause()
+    ending?.cancel()
+    ending = null
     take = null
   }
 
@@ -176,6 +191,7 @@ class PlayRecording(context: Context) {
   }
 
   private fun end() {
+    if (take == null) return
     stop()
     onEnd?.invoke()
   }

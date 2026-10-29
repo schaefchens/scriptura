@@ -3,6 +3,7 @@ import {
   addRecordings,
   type BookInfo,
   books,
+  recordings,
   type MoveStep,
   palette,
   Reader,
@@ -27,6 +28,8 @@ const MOVES: [MoveStep, string][] = [
 
 export default function App() {
   const [library, setLibrary] = useState<BookInfo[]>([]);
+  // Who reads a recording, by the name its voice has.
+  const [voiceNames, setVoiceNames] = useState(new Map<string, string>());
   const [book, setBook] = useState('');
   const [size, setSize] = useState(24);
   const [paging, setPaging] = useState<'scroll' | 'pages'>('scroll');
@@ -38,8 +41,8 @@ export default function App() {
   const [speech, setSpeech] = useState<SpeechChange>({ state: 'stopped' });
   const [speakAlong, setSpeakAlong] = useState(false);
   const [rate, setRate] = useState(1);
-  // Chapters with a recording are played from it, or else read by the device's voices too.
-  const [recited, setRecited] = useState(true);
+  // Chapters with a recording of this voice are played from it; the rest, or all with none, the device's voices read.
+  const [recited, setRecited] = useState<string>();
   const [goTo, setGoTo] = useState('2:1');
   const reader = useRef<ReaderHandle>(null);
 
@@ -49,7 +52,11 @@ export default function App() {
       setLibrary(books());
       setBook((current) => current || books()[0]?.id || '');
     });
-    addRecordings({ asset: 'recordings.json' });
+    addRecordings({ asset: 'recordings.json' }).then(() => {
+      const names = new Map(recordings().map(({ voice, name }) => [voice, name ?? voice]));
+      setVoiceNames(names);
+      setRecited([...names.keys()][0]);
+    });
   }, []);
 
   const selected = library.find(({ id }) => id === book);
@@ -95,12 +102,16 @@ export default function App() {
           {speech.state === 'speaking' ? button('Pause', () => reader.current?.pause()) : button('Read aloud', () => reader.current?.play())}
           {speech.state !== 'stopped' && button('Stop', () => reader.current?.stop())}
           {button(`${rate}×`, () => setRate(RATES[(RATES.indexOf(rate) + 1) % RATES.length]))}
-          {button('Recordings', () => setRecited(!recited), recited)}
+          {button(recited ? (voiceNames.get(recited) ?? recited) : 'Device voices', () => {
+            // On to the next voice, and after the last to the device's.
+            const voices = [...voiceNames.keys()];
+            setRecited(voices[recited ? voices.indexOf(recited) + 1 : 0]);
+          })}
           {speech.state === 'speaking' && speech.following === false && button('Back to the voice', () => reader.current?.follow())}
         </View>
         <Text style={[styles.position, { color: colors.text }]}>
           {position ? `‎${title(position.book)}‎ ${position.chapter}:${position.verse} · word ${position.word + 1}` : 'Tap a word'}
-          {speech.state === 'speaking' && speech.recording ? ` · ${speech.recording}` : ''}
+          {speech.state === 'speaking' && speech.recording ? ` · ${voiceNames.get(speech.recording)}` : ''}
           {speech.firstSound !== undefined && ` · first sound after ${Math.round(speech.firstSound)} ms`}
           {speech.unvoiced?.length ? ` · no voice for ${speech.unvoiced.join(', ')}` : ''}
         </Text>
@@ -118,15 +129,15 @@ export default function App() {
           parallel={parallel}
           speakAlong={speakAlong}
           speechRate={rate}
-          recordedVoices={recited ? undefined : []}
+          recordedVoices={recited ? [recited] : []}
           onWordChange={setPosition}
           onSpeechChange={onSpeechChange}
         />
         <Text style={[styles.sources, { color: colors.secondary }]}>
           World English Bible, Luther 1912 and Smith & Van Dyck, public domain; the Westminster Leningrad Codex from the Open
           Scriptures Hebrew Bible; the SBLGNT, © 2010 Society of Biblical Literature and Logos Bible Software, CC BY 4.0; the Quran
-          from Tanzil (tanzil.net, CC BY 3.0) with quran-tajweed's rules (CC BY 4.0). Recited by Mishary Rashid Alafasy, from EveryAyah
-          (everyayah.com); its words timed by quran-align, © 2016 Collin Fair, CC BY 4.0.
+          from Tanzil (tanzil.net, CC BY 3.0) with quran-tajweed's rules (CC BY 4.0). Recited by Mishary Rashid Alafasy and Maher Al-Muaiqly, from
+          EveryAyah (everyayah.com); their words timed by quran-align, © 2016 Collin Fair, and QuranLab, CC BY 4.0.
         </Text>
       </SafeAreaView>
     </SafeAreaProvider>

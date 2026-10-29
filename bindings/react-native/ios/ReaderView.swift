@@ -40,6 +40,9 @@ class ReaderView: ExpoView {
   /// The voices whose recordings are played, the first that has one for a chapter; with none named,
   /// any.
   var recordedVoices: [String]?
+  /// What the system's media controls show while it reads aloud – which then goes on in the
+  /// background; without it, they show nothing, and it pauses as the app goes to the background.
+  var nowPlaying: NowPlayingRecord?
 
   let onWordChange = EventDispatcher()
   let onLaidOut = EventDispatcher()
@@ -94,6 +97,10 @@ class ReaderView: ExpoView {
       },
       center.addObserver(forName: Self.recordingsChanged, object: nil, queue: .main) { [weak self] _ in
         self?.readAloud.stop()
+      },
+      center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+        guard let self, nowPlaying == nil, readAloud.state == "speaking" else { return }
+        pause()
       },
     ]
   }
@@ -194,6 +201,8 @@ class ReaderView: ExpoView {
     }
     readAs = (companions, speakAlong, recordedVoices)
     rateAs = speechRate
+    readAloud.inAppSession = nowPlaying != nil
+    showNowPlaying(readAloud.state)
   }
 
   /// A paragraph's font: its own, or the one the app brings for its language, or the system's.
@@ -402,6 +411,11 @@ class ReaderView: ExpoView {
     }
   }
 
+  /// Plays if it doesn't, or pauses: as the media controls' one button does.
+  func playOrPause() {
+    readAloud.state == "speaking" ? pause() : play()
+  }
+
   /// Turns to the next or previous page, or a screen down or up, as a hand would.
   func turn(forward: Bool) {
     pages.turn(forward: forward)
@@ -485,6 +499,17 @@ class ReaderView: ExpoView {
       change["following"] = following
     }
     onSpeechChange(change)
+    showNowPlaying(change["state"] as? String ?? "stopped")
+  }
+
+  /// The system's media controls show the reader while it reads aloud, playing or paused, if it has
+  /// something to show there.
+  private func showNowPlaying(_ state: String) {
+    if let nowPlaying, state != "stopped" {
+      NowPlaying.shared.show(nowPlaying, playing: state == "speaking", for: self)
+    } else {
+      NowPlaying.shared.hide(for: self)
+    }
   }
 
   private func mark(_ index: Int, show: Bool = true) {

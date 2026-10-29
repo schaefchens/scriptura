@@ -112,6 +112,12 @@ impl Library {
         &self.recordings
     }
 
+    /// Why a recording isn't played for the book it reads, if it isn't: the library holds no such
+    /// book, or the book's verses or their words aren't the recording's.
+    pub fn misfit(&self, recording: &Recording) -> Option<String> {
+        speech::misfit(recording, self.book(&recording.book))
+    }
+
     /// The passages as paragraphs: per chapter a heading, then the chapter as running text, or a
     /// verse per line. With companions, other editions of a passage's book are read along with it:
     /// see [`Block::row`]. Passages of books the library doesn't hold give nothing.

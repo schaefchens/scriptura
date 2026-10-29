@@ -15,8 +15,12 @@ export type BookInfo = {
   direction: 'ltr' | 'rtl';
 };
 
-/** A recording of a chapter, as a list shows it: whose voice it is, and which chapter of which book it reads. */
-export type RecordingInfo = { id: string; voice: string; book: string; chapter: number };
+/**
+ * A recording of a chapter, as a list shows it: whose voice it is – by the id recordedVoices names, and the name to show – which chapter
+ * of which book it reads, and why it isn't played for it, if it isn't: the library holds no such book, or the book's verses or words
+ * aren't the recording's.
+ */
+export type RecordingInfo = { id: string; voice: string; name?: string | null; book: string; chapter: number; misfit?: string | null };
 
 /**
  * Where the reader's current word stands: the passage it belongs to, its book (the passage's, or
@@ -39,7 +43,7 @@ export type SpeechChange = {
    * scrolled or turned away from it by hand, until the word is in sight again, or after follow().
    */
   following?: boolean;
-  /** While it reads: the voice of the recording it plays – empty while a voice on the device speaks. */
+  /** While it reads: the voice of the recording it plays, by its id – empty while a voice on the device speaks. */
   recording?: string;
 };
 
@@ -87,12 +91,22 @@ export type ReaderOptions = {
   /** How fast the voice reads, as a multiple of its own rate: from 0.5 to 2. iOS's voices read no slower than 0.56. */
   speechRate?: number;
   /**
-   * The voices whose recordings are played, by the name the recordings give them: a chapter is
+   * The voices whose recordings are played, by the ids the recordings give them: a chapter is
    * played from a recording of the first that has one, and a voice on the device reads the rest.
    * Without it, from a recording of any voice; with none, from none.
    */
   recordedVoices?: string[];
+  /**
+   * While it reads aloud, the system's media controls – the lock screen, the control center or a notification – show this, and play,
+   * pause and move it verse by verse, and reading aloud goes on in the background: with the screen off or in another app. Without it,
+   * they show nothing of it, and reading aloud pauses as the app goes to the background. In the background, iOS needs the app's audio
+   * background mode and Android a service: the config plugin's backgroundAudio adds them.
+   */
+  nowPlaying?: NowPlaying;
 };
+
+/** What the system's media controls show of the reader reading aloud: the app chooses, a passage's title or none in particular. */
+export type NowPlaying = { title: string; subtitle?: string };
 
 /** How long a text took until its first pages showed, and until all of it was laid out, in milliseconds; and its pages, 0 in one endless scroll. */
 export type LaidOut = { pages: number; milliseconds: number; all: number };

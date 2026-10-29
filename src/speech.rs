@@ -323,8 +323,9 @@ impl Recordings<'_> {
             return found;
         }
         let all = self.library.recordings();
-        let fitting =
-            |recording: &&Recording| recording.book == book.id && recording.chapter == chapter && fits(recording, book);
+        let fitting = |recording: &&Recording| {
+            recording.book == book.id && recording.chapter == chapter && misfit(recording, Some(book)).is_none()
+        };
         let found = match self.voices {
             None => all.iter().find(fitting),
             Some(voices) => {
@@ -340,15 +341,25 @@ impl Recordings<'_> {
     }
 }
 
-/// Whether a recording has every verse of its chapter, each with as many words as the core counts.
-fn fits(recording: &Recording, book: &Book) -> bool {
-    let Some(chapter) = book.chapters.iter().find(|chapter| chapter.number == recording.chapter) else { return false };
-    chapter.verses.len() == recording.verses.len()
-        && chapter
-            .verses
-            .iter()
-            .zip(&recording.verses)
-            .all(|(verse, recorded)| verse.number == recorded.number && words_of(verse).len() == recorded.words.len())
+/// Why a recording can't be played for the book it reads, if it can't: it must have every verse of
+/// its chapter, each with as many words as the core counts.
+pub(crate) fn misfit(recording: &Recording, book: Option<&Book>) -> Option<String> {
+    let Some(book) = book else { return Some(format!("there is no book {}", recording.book)) };
+    let Some(chapter) = book.chapters.iter().find(|chapter| chapter.number == recording.chapter) else {
+        return Some(format!("{} has no chapter {}", book.id, recording.chapter));
+    };
+    let mut recorded = recording.verses.iter();
+    for verse in &chapter.verses {
+        let Some(other) = recorded.next() else { return Some(format!("it has no verse {}", verse.number)) };
+        if other.number != verse.number {
+            return Some(format!("it has verse {} where the book has verse {}", other.number, verse.number));
+        }
+        let words = words_of(verse).len();
+        if other.words.len() != words {
+            return Some(format!("its verse {} has {} words, the book's {words}", verse.number, other.words.len()));
+        }
+    }
+    recorded.next().map(|other| format!("the book has no verse {}", other.number))
 }
 
 impl Block {
@@ -652,6 +663,13 @@ mod tests {
         // Its verse 255 has three words, not fifty.
         let baqarah = recorded(&[reference("quran-2", None, None, None)], None, None);
         assert!(baqarah.iter().all(|part| matches!(part, Part::Speak(_))), "{baqarah:?}");
+        let misfits: Vec<Option<String>> =
+            RECORDED.recordings().iter().map(|recording| RECORDED.misfit(recording)).collect();
+        assert_eq!(misfits, [None, None, Some("its verse 255 has 3 words, the book's 50".into())]);
+        assert_eq!(LIBRARY.misfit(&RECORDED.recordings()[0]), None);
+        let mut lonely = Library::new();
+        lonely.add_recordings(include_bytes!("../tests/fixtures/recordings.json"), None).unwrap();
+        assert_eq!(lonely.misfit(&lonely.recordings()[0]).as_deref(), Some("there is no book quran-1"));
     }
 
     #[test]

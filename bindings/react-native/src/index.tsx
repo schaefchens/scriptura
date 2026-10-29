@@ -113,7 +113,7 @@ export const clearBooks = () => scriptura.clearBooks();
  */
 export const addRecordings = (source: BooksSource) => scriptura.addRecordings(source);
 
-/** The recordings added: whose voice, and which chapter. */
+/** The recordings added: whose voice, which chapter, and why one isn't played, if it isn't. */
 export const recordings = () => scriptura.recordings();
 
 export const removeRecordings = (ids: string[]) => scriptura.removeRecordings(ids);

@@ -38,13 +38,16 @@ pub struct BookInfo {
     pub direction: String,
 }
 
-/// A recording as JS may see it: whose it is, and which chapter it reads.
+/// A recording as JS may see it: whose it is, which chapter it reads, and why it isn't played for
+/// it, if it isn't.
 #[derive(uniffi::Record)]
 pub struct RecordingInfo {
     pub id: String,
     pub voice: String,
+    pub name: Option<String>,
     pub book: String,
     pub chapter: u32,
+    pub misfit: Option<String>,
 }
 
 /// A whole book, one chapter of it, or a verse range in that chapter.
@@ -254,8 +257,10 @@ pub fn recordings() -> Vec<RecordingInfo> {
     let info = |recording: &scriptura::Recording| RecordingInfo {
         id: recording.id.clone(),
         voice: recording.voice.clone(),
+        name: recording.name.clone(),
         book: recording.book.clone(),
         chapter: recording.chapter,
+        misfit: library.misfit(recording),
     };
     library.recordings().iter().map(info).collect()
 }

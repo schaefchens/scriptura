@@ -76,6 +76,10 @@ export class PlayRecording {
     const audio = new Audio();
     audio.preload = 'auto';
     audio.addEventListener('ended', () => this.take && this.end());
+    // A hidden page gets no frames: its take still ends where it ends, a quarter second later at most.
+    audio.addEventListener('timeupdate', () => {
+      if (this.take?.end != null && audio.currentTime * 1000 >= this.take.end) this.end();
+    });
     audio.addEventListener('error', () => this.take && this.onError());
     return audio;
   }
@@ -99,6 +103,7 @@ export class PlayRecording {
   };
 
   private end() {
+    if (!this.take) return;
     this.stop();
     this.onEnd();
   }

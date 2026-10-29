@@ -3,9 +3,10 @@ import UIKit
 
 /// Plays takes of recordings: from a take's start to its end, telling the word the audio comes to,
 /// as the take's timings have it, at every frame of the screen. A take of the audio already loaded
-/// seeks in it. The voice keeps its pitch at every rate. It plays in the app's audio session, set to
-/// spoken audio for playback while it plays, so the silent switch doesn't mute it; reading on in the
-/// background needs the app's audio background mode.
+/// seeks in it. Audio under a scheme an app registered a source for comes from that source, piece
+/// by piece (see ``AudioSources``). The voice keeps its pitch at every rate. It plays in the app's audio session, set to
+/// spoken audio for playback, so the silent switch doesn't mute it; reading on in the background
+/// needs the app's audio background mode.
 final class PlayRecording: NSObject {
   /// The audio comes to a word of a take.
   var onWord: ((Take, TimedWord) -> Void)?
@@ -29,6 +30,8 @@ final class PlayRecording: NSObject {
   private var startedAt: Double?
   private var observers: [NSObjectProtocol] = []
   private var status: NSKeyValueObservation?
+  /// What answers the player for audio from a source: the asset holds it only weakly.
+  private var loader: SourceLoader?
 
   override init() {
     super.init()
@@ -70,7 +73,10 @@ final class PlayRecording: NSObject {
     // Audio that failed to load is loaded anew.
     if audio != take.audio || player.currentItem?.status == .failed {
       guard let url = URL(string: take.audio), url.scheme != nil else { return false }
-      let item = AVPlayerItem(url: url)
+      let asset = AVURLAsset(url: url)
+      loader = AudioSources.source(for: url).map(SourceLoader.init)
+      asset.resourceLoader.setDelegate(loader, queue: SourceLoader.queue)
+      let item = AVPlayerItem(asset: asset)
       // Made for speech: it keeps a voice's pitch and clarity as the rate changes.
       item.audioTimePitchAlgorithm = .timeDomain
       status = item.observe(\.status) { [weak self] item, _ in
@@ -104,12 +110,8 @@ final class PlayRecording: NSObject {
   }
 
   func stop() {
-    let playing = take != nil
     pause()
     take = nil
-    if playing {
-      try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-    }
   }
 
   /// A new rate, at once.
@@ -153,6 +155,7 @@ final class PlayRecording: NSObject {
   }
 
   private func end() {
+    guard take != nil else { return }
     stop()
     onEnd?()
   }

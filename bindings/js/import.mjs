@@ -13,7 +13,7 @@
 //                  "direction": "ltr", "books": [{ "id": "jonah", "code": "JON" }] }],
 //     "quran": { "surahs": [1, 112] },
 //     "recordings": { "folder": "recordings", "quran": [{ "everyayah": "Alafasy_128kbps",
-//                     "voice": "Mishary Rashid Alafasy", "surahs": [1, 112] }] }
+//                     "voice": "alafasy", "name": "Mishary Rashid Alafasy", "surahs": [1, 112] }] }
 //   }
 //
 // Bibles come as USFM in a zip, as eBible.org has them, or as OSIS (`"osis": "<base URL>"`, a book
@@ -24,10 +24,11 @@
 // `extraFonts` ({ family, url, file? }), named after their PostScript names, so one family name
 // works on iOS, Android and the web.
 //
-// Recordings of surahs come from EveryAyah's recitations, a file per verse, whose words
-// quran-align timed: each surah's verses are joined into one file, in `format` (m4a, opus or mp3),
-// and its timings written to recordings.json in `folder`. Some files changed since they were
-// timed: a verse whose timings outlast its audio has its words spread over it by their letters. A surah but the first and the ninth opens
+// Recordings of surahs come from EveryAyah's recitations, a file per verse, whose words quran-align
+// (`everyayah`: its folder there) or QuranLab (`quranlab`: its recording's id) timed: each surah's
+// verses are joined into one file, in `format` (m4a, opus or mp3), and its timings written to
+// recordings.json in `folder`. Some files changed since they were timed: a verse whose timings
+// outlast its audio has its words spread over it by their letters. A surah but the first and the ninth opens
 // with the basmala, as its verse 0, from the recitation of Al-Fatiha's first verse. Joining and
 // encoding needs ffmpeg.
 //
@@ -50,6 +51,8 @@ const ARABIC_INDIC = 0x660;
 // Word timings for recitations on EveryAyah, CC BY 4.0, a file per recitation: <folder>.json.
 const QURAN_ALIGN = 'https://github.com/cpfair/quran-align/releases/download/release-2016-11-24/quran-align-data-2016-11-24.zip';
 const EVERYAYAH = 'https://everyayah.com/data/';
+// Word timings for 33 more of EveryAyah's recitations, CC BY 4.0: rows of verses, a hundred at a time.
+const QURANLAB = 'https://datasets-server.huggingface.co/rows?dataset=quranlab/quran-audio&split=train';
 // What a word is to the core's src/reader.rs, in the version recordings name.
 const WORD_DEFINITION = 1;
 // How recordings are encoded, by format: mono, as recitations are, at rates that keep them clear.
@@ -385,17 +388,60 @@ async function joinAudio(files, out, format) {
   return { starts, duration: (samples * 1000) / SAMPLE_RATE };
 }
 
+/** JSON from a server that may be busy: asked again, later and later. */
+async function fetchJson(url) {
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(url);
+    if (response.ok) return response.json();
+    if (attempt === 6 || ![429, 500, 502, 503].includes(response.status)) throw new Error(`${response.status} for ${url}`);
+    await new Promise((resolve) => setTimeout(resolve, 2000 * 2 ** attempt));
+  }
+}
+
+/** A verse's file name on EveryAyah: surah and verse in three digits each. */
+const fileOf = (key) => key.split(':').map((number) => number.padStart(3, '0')).join('');
+
+/**
+ * Where each verse of `surahs` – and Al-Fatiha's first, the basmala – is recited, and its words' segments: [first word, the word after
+ * the last, start, end], as quran-align has them, by surah:verse.
+ */
+async function timedVerses({ everyayah, quranlab }, surahs, quran) {
+  const verses = new Map();
+  if (everyayah) {
+    const timings = await downloadZip(QURAN_ALIGN, 'quran-align.zip');
+    for (const verse of JSON.parse(execFileSync('unzip', ['-p', timings, `*${everyayah}.json`], { maxBuffer: 1 << 28 }))) {
+      const key = `${verse.surah}:${verse.ayah}`;
+      verses.set(key, { segments: verse.segments, url: `${EVERYAYAH}${everyayah}/${fileOf(key)}.mp3` });
+    }
+    return verses;
+  }
+  // QuranLab's rows come in the mushaf's order, one a verse.
+  const keys = [...quran.keys()];
+  for (const surah of surahs.includes(1) ? surahs : [1, ...surahs]) {
+    const first = keys.indexOf(`${surah}:1`);
+    // Of Al-Fatiha at least its first verse, the basmala that opens the others.
+    const count = surah === 1 && !surahs.includes(1) ? 1 : keys.filter((key) => key.startsWith(`${surah}:`)).length;
+    for (let offset = first; offset < first + count; offset += 100) {
+      const { rows } = await fetchJson(`${QURANLAB}&config=${quranlab}&offset=${offset}&length=${Math.min(100, first + count - offset)}`);
+      for (const { row } of rows) {
+        const segments = (row.segments ?? []).map((segment) => [segment.word_start, segment.word_end, segment.start_ms, segment.end_ms]);
+        verses.set(`${row.surah}:${row.ayah}`, { segments, url: row.audio_url });
+      }
+    }
+  }
+  return verses;
+}
+
 if (config.recordings) {
   const folder = relative(config.recordings.folder);
   const recordingsFile = join(folder, 'recordings.json');
   const quran = await tanzilText();
-  const timings = await downloadZip(QURAN_ALIGN, 'quran-align.zip');
   const recordings = [];
-  for (const { everyayah, voice, surahs, format = 'm4a' } of config.recordings.quran ?? []) {
-    const aligned = new Map(
-      JSON.parse(execFileSync('unzip', ['-p', timings, `*${everyayah}.json`], { maxBuffer: 1 << 28 })).map((verse) => [`${verse.surah}:${verse.ayah}`, verse]),
-    );
-    await mkdir(join(folder, everyayah), { recursive: true });
+  for (const recording of config.recordings.quran ?? []) {
+    const { voice, name, surahs, format = 'm4a' } = recording;
+    const source = recording.everyayah ?? recording.quranlab;
+    const timed = await timedVerses(recording, surahs, quran);
+    await mkdir(join(folder, source), { recursive: true });
     for (const surah of surahs) {
       // The verses as the books have them: the basmala as verse 0, read as Al-Fatiha's first verse.
       const verses = [];
@@ -404,14 +450,14 @@ if (config.recordings) {
         const words = wordsOf(quran.get(`${surah}:${verse}`));
         verses.push({ number: verse, key: `${surah}:${verse}`, words: verse === 1 && opensWithBasmala(surah) ? words.slice(4) : words });
       }
-      const name = (key) => key.split(':').map((number) => number.padStart(3, '0')).join('');
-      const directory = await mkdtemp(join(downloads, `${everyayah}-${surah}-`));
-      const files = await downloadAll(verses.map(({ key }) => `${EVERYAYAH}${everyayah}/${name(key)}.mp3`), directory);
-      const audio = `${everyayah}/quran-${surah}.${format}`;
+      const directory = await mkdtemp(join(downloads, `${source}-${surah}-`));
+      const files = await downloadAll(verses.map(({ key }) => timed.get(key).url), directory);
+      const audio = `${source}/quran-${surah}.${format}`;
       const { starts, duration } = await joinAudio(files, join(folder, audio), format);
       recordings.push({
-        id: `${everyayah}/quran-${surah}`,
+        id: `${source}/quran-${surah}`,
         voice,
+        ...(name && { name }),
         book: `quran-${surah}`,
         chapter: surah,
         audio,
@@ -419,9 +465,10 @@ if (config.recordings) {
         verses: verses.map(({ number, key, words }, index) => {
           const start = Math.round(starts[index]);
           const length = (starts[index + 1] ?? duration) - starts[index];
-          let { segments } = aligned.get(key);
+          let { segments } = timed.get(key);
+          if (segments.length === 0) console.warn(`${source} ${surah}:${number}: untimed, its words are spread over its audio by their letters.`);
           if (segments.some(([, , , end]) => end > length + 100)) {
-            console.warn(`${everyayah} ${surah}:${number}: its timings outlast its audio, so its words are spread over it by their letters.`);
+            console.warn(`${source} ${surah}:${number}: its timings outlast its audio, so its words are spread over it by their letters.`);
             segments = [];
           }
           return { number, start, words: wordStarts(segments, words, length).map((time) => start + time) };

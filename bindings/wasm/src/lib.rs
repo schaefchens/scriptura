@@ -13,13 +13,16 @@ pub struct Library(scriptura::Library);
 #[wasm_bindgen]
 pub struct Speech(scriptura::Speech);
 
-/// A recording as a list shows it: whose it is, and which chapter it reads.
+/// A recording as a list shows it: whose it is, which chapter it reads, and why it isn't played for
+/// it, if it isn't.
 #[derive(Serialize)]
 struct RecordingInfo<'a> {
     id: &'a str,
     voice: &'a str,
+    name: Option<&'a str>,
     book: &'a str,
     chapter: u32,
+    misfit: Option<String>,
 }
 
 /// A book as a list of books shows it: what it is, not what it says.
@@ -97,15 +100,18 @@ impl Library {
         self.0.clear_recordings();
     }
 
-    /// The recordings as JSON: id, voice, book and chapter of each.
+    /// The recordings as JSON: id, voice and name, book and chapter of each, and why it isn't played,
+    /// if it isn't.
     #[wasm_bindgen(js_name = recordingsJson)]
     pub fn recordings_json(&self) -> String {
         let recordings: Vec<_> = (self.0.recordings().iter())
             .map(|recording| RecordingInfo {
                 id: &recording.id,
                 voice: &recording.voice,
+                name: recording.name.as_deref(),
                 book: &recording.book,
                 chapter: recording.chapter,
+                misfit: self.0.misfit(recording),
             })
             .collect();
         serde_json::to_string(&recordings).expect("recordings serialize")

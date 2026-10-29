@@ -78,13 +78,29 @@ export async function loadScriptura(url?: string | URL) {
 const bytesOf = (json: string | ArrayBuffer | Uint8Array) =>
   typeof json === 'string' ? new TextEncoder().encode(json) : json instanceof Uint8Array ? json : new Uint8Array(json);
 
-/** The books a page has added, the recordings of their chapters, and passages of them as paragraphs. On the web, their text is the page's anyway. */
+/** What changed in a library: its books, or its recordings. */
+export type LibraryChange = 'books' | 'recordings';
+
+/**
+ * The books a page has added, the recordings of their chapters, and passages of them as paragraphs. On the web, their text is the
+ * page's anyway. Its readers follow its changes: new books lay them out anew, and what they still had to read goes with the books or
+ * recordings that change.
+ */
 export class Library {
   private core = new Core();
+  private listeners = new Set<(change: LibraryChange) => void>();
+
+  /** Tells `listener` of each change, until the function it returns is called. */
+  onChange(listener: (change: LibraryChange) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
 
   /** Adds the books of a JSON array, each replacing one of the same id, and returns their ids. */
   add(json: string | ArrayBuffer | Uint8Array): string[] {
-    return this.core.add(bytesOf(json));
+    const ids = this.core.add(bytesOf(json));
+    this.changed('books');
+    return ids;
   }
 
   /** Fetches books and adds them. */
@@ -96,6 +112,7 @@ export class Library {
 
   remove(ids: string[]) {
     this.core.remove(ids);
+    this.changed('books');
   }
 
   /**
@@ -103,7 +120,9 @@ export class Library {
    * relative to `base`, where they came from. Recordings that count words otherwise than the core does are refused.
    */
   addRecordings(json: string | ArrayBuffer | Uint8Array, base?: string | URL): string[] {
-    return this.core.addRecordings(bytesOf(json), base === undefined ? undefined : new URL(base, location.href).href);
+    const ids = this.core.addRecordings(bytesOf(json), base === undefined ? undefined : new URL(base, location.href).href);
+    this.changed('recordings');
+    return ids;
   }
 
   /** Fetches recordings and adds them: their audio is found next to them. */
@@ -115,19 +134,26 @@ export class Library {
 
   removeRecordings(ids: string[]) {
     this.core.removeRecordings(ids);
+    this.changed('recordings');
   }
 
   clearRecordings() {
     this.core.clearRecordings();
+    this.changed('recordings');
   }
 
-  /** What the recordings are: id, voice, book and chapter. */
+  /** What the recordings are: id, voice and its name, book and chapter, and why one isn't played, if it isn't. */
   recordings(): RecordingInfo[] {
     return JSON.parse(this.core.recordingsJson());
   }
 
   clear() {
     this.core.clear();
+    this.changed('books');
+  }
+
+  private changed(change: LibraryChange) {
+    for (const listener of this.listeners) listener(change);
   }
 
   /** What the books are: id, code, title, work, language and direction. */

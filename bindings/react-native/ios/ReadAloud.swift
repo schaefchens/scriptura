@@ -17,6 +17,10 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
   var voices: [String: String] = [:]
   /// How fast the voices read, as a multiple of their own rate: from 0.5 to 2.
   var rate = 1.0
+  /// Whether the voice speaks in the app's audio session, set to spoken audio for playback – so that
+  /// it goes on in the background, and the system's media controls show it – or in one of its own,
+  /// which the system manages. Recordings always play in the app's.
+  var inAppSession = false
 
   private(set) var state = "stopped"
   /// Where the voice paused, to go on from there; elsewhere, it starts anew.
@@ -27,6 +31,8 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
   /// The take of a recording that plays, or that waits for the voice to say what it was given.
   private var take: Take?
   private var takeWaits = false
+  /// Whether reading aloud set the app's audio session going, to let it go once it stops.
+  private var sessionActive = false
   /// The utterances given to the synthesizer and not yet done, as the core made them, and whether
   /// they sounded yet.
   private var queued: [(spoken: AVSpeechUtterance, utterance: Utterance, sounded: Bool)] = []
@@ -81,6 +87,10 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
       return change("speaking")
     }
     silence()
+    synthesizer.usesApplicationAudioSession = inAppSession
+    if inAppSession {
+      activateSession()
+    }
     speech = Speech(references: references, companions: companions, along: along, from: from, recorded: recorded)
     started = CACurrentMediaTime()
     change("speaking")
@@ -119,6 +129,10 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
     let wasStopped = state == "stopped" && speech == nil
     let skipped = unvoiced
     silence()
+    if sessionActive {
+      sessionActive = false
+      try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
     if !wasStopped {
       change("stopped", skipped.isEmpty ? [:] : ["unvoiced": skipped.sorted()])
     }
@@ -279,9 +293,16 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
     }
   }
 
+  private func activateSession() {
+    try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
+    try? AVAudioSession.sharedInstance().setActive(true)
+    sessionActive = true
+  }
+
   private func playTake() {
     guard let take else { return }
     takeWaits = false
+    sessionActive = true
     recording.rate = rate
     recording.play(take)
     change("speaking")
