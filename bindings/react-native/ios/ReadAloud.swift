@@ -2,8 +2,10 @@ import AVFoundation
 
 /// Reads passages aloud with the device's voices, a voice for each language: utterances from the
 /// core, one after the other, so their text never passes through JS. The first is short, so the
-/// voice starts at once; the rest are long, so few sentences are cut apart. It tells the reader the
-/// word the voice comes to, as the voice reports it.
+/// voice starts at once; each after it twice as long as the one before, so few sentences are cut
+/// apart – as long as the voice starts them at once. Each is given as the one before it sounds,
+/// so the voice can prepare it. It tells the reader the word the voice comes to, as the voice
+/// reports it.
 final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
   /// The voice comes to a word of an utterance.
   var onWord: ((Utterance, Word) -> Void)?
@@ -12,21 +14,34 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
   var onChange: (([String: Any]) -> Void)?
   /// A voice per language, by identifier; otherwise the device's for it.
   var voices: [String: String] = [:]
+  /// How fast the voices read, as a multiple of their own rate: from 0.5 to 2.
+  var rate = 1.0
 
   private(set) var state = "stopped"
   /// Where the voice paused, to go on from there; elsewhere, it starts anew.
   private(set) var pausedAt: WordPosition?
   private let synthesizer = AVSpeechSynthesizer()
   private var speech: Speech?
-  /// The utterances given to the synthesizer and not yet done, as the core made them.
-  private var queued: [(spoken: AVSpeechUtterance, utterance: Utterance)] = []
+  /// The utterances given to the synthesizer and not yet done, as the core made them, and whether
+  /// they sounded yet.
+  private var queued: [(spoken: AVSpeechUtterance, utterance: Utterance, sounded: Bool)] = []
   private var started: CFTimeInterval?
   private var unvoiced: Set<String> = []
+  /// How long the next utterance may be.
+  private var nextLength = firstLength
+  /// When the last utterance ended, and in which voice: the next one in it sounds at once.
+  private var ended: (time: CFTimeInterval, voice: String)?
 
-  /// The first utterance's length, and the others', in UTF-16 code units. AVSpeechSynthesizer
+  /// The first utterance's length, and the longest, in UTF-16 code units. AVSpeechSynthesizer
   /// names no limit.
   private static let firstLength: UInt32 = 200
   private static let length: UInt32 = 20000
+  /// The longest utterance each voice starts at once, by identifier, where that is shorter: a voice
+  /// that prepares all of an utterance before it speaks takes the longer to start, the longer it is.
+  private static var promptLengths: [String: UInt32] = [:]
+  /// An utterance that sounds this late after the one before, in seconds, started late – a voice
+  /// that prepares as it speaks takes 0.1 – and the voice's next take as long as it starts in that.
+  private static let late = 0.3
 
   override init() {
     super.init()
@@ -45,8 +60,8 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
     speech = Speech(references: references, companions: companions, along: along, from: from)
     started = CACurrentMediaTime()
     change("speaking")
-    enqueue(Self.firstLength)
-    enqueue(Self.length)
+    enqueue()
+    enqueue()
     if queued.isEmpty {
       stop()
     }
@@ -56,6 +71,8 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
   func pause(at word: WordPosition?) {
     guard state == "speaking" else { return }
     pausedAt = word
+    // The pause isn't the voice's wait.
+    ended = nil
     synthesizer.pauseSpeaking(at: .word)
     change("paused")
   }
@@ -89,6 +106,8 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
     pausedAt = nil
     started = nil
     unvoiced = []
+    nextLength = Self.firstLength
+    ended = nil
     synthesizer.stopSpeaking(at: .immediate)
     state = "stopped"
   }
@@ -98,9 +117,9 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
     onChange?(details.merging(["state": state]) { _, new in new })
   }
 
-  /// Gives the synthesizer the next utterance with a voice, at most `length` long.
-  private func enqueue(_ length: UInt32) {
-    while let utterance = speech?.next(limit: length) {
+  /// Gives the synthesizer the next utterance with a voice.
+  private func enqueue() {
+    while let utterance = speech?.next(limit: nextLength) {
       guard let voice = voice(for: utterance.language) else {
         if unvoiced.insert(utterance.language).inserted {
           change(state, ["unvoiced": Array(unvoiced).sorted()])
@@ -109,10 +128,21 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
       }
       let spoken = AVSpeechUtterance(string: utterance.text)
       spoken.voice = voice
-      queued.append((spoken, utterance))
+      spoken.rate = Self.synthesizerRate(rate)
+      queued.append((spoken, utterance, false))
       synthesizer.speak(spoken)
+      nextLength = min(nextLength * 2, Self.promptLengths[voice.identifier] ?? Self.length)
       return
     }
+  }
+
+  /// AVSpeechSynthesizer's rate for a multiple of its voices' speed. Its scale is no multiple: on a
+  /// Mac (2026-10-29), 0.5, its default, read at the voice's speed, 0.68 twice as fast, 1 four times,
+  /// and 0, its slowest, at 0.56 times.
+  private static func synthesizerRate(_ rate: Double) -> Float {
+    let rate = min(max(rate, 0.5), 2)
+    let value = rate >= 1 ? 0.5 + (rate - 1) * 0.18 : 0.5 - (1 - rate) * 1.14
+    return Float(max(value, Double(AVSpeechUtteranceMinimumSpeechRate)))
   }
 
   /// The voice chosen for a language, or the system's for it, or the best it has.
@@ -143,10 +173,25 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
   }
 
   private func willSpeak(_ range: NSRange, of spoken: AVSpeechUtterance) {
-    guard let utterance = queued.first(where: { $0.spoken === spoken })?.utterance else { return }
+    guard let index = queued.firstIndex(where: { $0.spoken === spoken }) else { return }
+    let utterance = queued[index].utterance
+    let now = CACurrentMediaTime()
     if let started {
       self.started = nil
-      change("speaking", ["firstSound": (CACurrentMediaTime() - started) * 1000])
+      change("speaking", ["firstSound": (now - started) * 1000])
+    }
+    if !queued[index].sounded {
+      queued[index].sounded = true
+      if let voice = spoken.voice?.identifier, let ended, ended.voice == voice, now - ended.time > Self.late {
+        // The voice prepared the utterance before it spoke: the next are shorter.
+        let length = max(UInt32(Double(utterance.text.utf16.count) * Self.late / (now - ended.time)), Self.firstLength)
+        Self.promptLengths[voice] = min(Self.promptLengths[voice] ?? Self.length, length)
+        nextLength = min(nextLength, length)
+      }
+      ended = nil
+      if queued.count < 2 {
+        enqueue()
+      }
     }
     // The word the range starts in, or the first, if it starts before any.
     let word = utterance.words.last { Int($0.start) <= range.location } ?? utterance.words.first
@@ -156,7 +201,12 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
   private func finished(_ spoken: AVSpeechUtterance) {
     guard queued.contains(where: { $0.spoken === spoken }) else { return }
     queued.removeAll { $0.spoken === spoken }
-    enqueue(Self.length)
+    ended = spoken.voice.map { (CACurrentMediaTime(), $0.identifier) }
+    // For a voice that reports no words, the next is given now.
+    if queued.isEmpty {
+      enqueue()
+      enqueue()
+    }
     if queued.isEmpty {
       stop()
     }

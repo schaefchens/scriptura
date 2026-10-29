@@ -37,7 +37,8 @@ import java.util.WeakHashMap
  * one spanned string, in pages or one endless scroll. It fetches them from the core itself, from the
  * books the host added, so their text never passes through JS. A word can be tapped, reached word by
  * word or jumped to; JS learns only where the current word stands, never its text. It reads aloud
- * with the device's voices, from the word it is at, and marks each word as it is said.
+ * with the device's voices, from the word it is at, and marks each word as it is said, keeping it in
+ * sight – unless it was scrolled away from it by hand.
  */
 class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
   // Without it, React Native ignores the pages' requests for a new layout.
@@ -64,6 +65,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   /** Read aloud, each verse is followed by the same verse in each book read along; otherwise only the passages' own books are. */
   var speakAlong = false
 
+  /** How fast the voices read, as a multiple of their own rate: from 0.5 to 2. */
+  var speechRate = 1.0
+
   private val onWordChange by EventDispatcher()
   private val onLaidOut by EventDispatcher()
   private val onSpeechChange by EventDispatcher()
@@ -87,8 +91,11 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   private var current: Int? = null
   private val readAloud = ReadAloud(context)
 
-  /** What is read aloud along with the passages. */
-  private var spokenAlong: Pair<List<String>, Boolean> = emptyList<String>() to false
+  /** Whether the word the voice comes to is brought into sight: not after a scroll by hand away from it, until it is in sight again. */
+  private var following = true
+
+  /** What is read aloud along with the passages, and how fast. */
+  private var spokenAs = Triple(emptyList<String>(), false, 1.0)
 
   private val pages = PagedText(context)
 
@@ -102,8 +109,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
         onLaidOut(mapOf("pages" to count, "milliseconds" to firstShown, "all" to millisecondsSinceRender()))
       }
     }
-    readAloud.onWord = { utterance, word -> follow(WordPlace(utterance.passage.toInt(), utterance.book, word.chapter.toInt(), word.verse.toInt(), word.index.toInt())) }
-    readAloud.onChange = { change -> onSpeechChange(change) }
+    readAloud.onWord = { utterance, word -> reached(WordPlace(utterance.passage.toInt(), utterance.book, word.chapter.toInt(), word.verse.toInt(), word.index.toInt())) }
+    readAloud.onChange = ::speechChanged
+    pages.onScrollByHand = ::scrolledByHand
     addView(pages, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
   }
 
@@ -204,11 +212,11 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
       current = it
       pages.highlight(words[it].start, words[it].end)
     }
-    // Other books read along change what is said: the voice goes on from the word it is at.
-    if (companions to speakAlong != spokenAlong && readAloud.state != "stopped") {
+    // Other books read along change what is said, and a new rate how: the voice goes on from the word it is at.
+    if (Triple(companions, speakAlong, speechRate) != spokenAs && readAloud.state != "stopped") {
       if (readAloud.state == "speaking") play() else readAloud.stop()
     }
-    spokenAlong = companions to speakAlong
+    spokenAs = Triple(companions, speakAlong, speechRate)
   }
 
   private val baseTypeface get() = if (font == "serif") Typeface.SERIF else Typeface.DEFAULT
@@ -344,7 +352,20 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   /** Reads aloud from the word marked – or, with none, the first in sight – on to the end. */
   fun play() {
     readAloud.voices = voices
+    readAloud.rate = speechRate
+    following = true
     readAloud.play(shownReferences, companions, speakAlong, readingStart()?.let(::position))
+  }
+
+  /** Brings the word the voice is at – or, not reading aloud, the word marked – into sight, and keeps the words the voice comes to there. */
+  fun follow() {
+    setFollowing(true)
+    current?.let { pages.show(characterAt = words[it].start) }
+  }
+
+  /** Turns to the next or previous page, or a screen down or up, as a hand would. */
+  fun turn(forward: Boolean) {
+    pages.turn(forward)
   }
 
   fun pause() = readAloud.pause()
@@ -375,21 +396,43 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
 
   /** Marks a word reached by a tap, a move or a jump. While reading aloud, the voice goes on from it. */
   private fun select(index: Int) {
+    following = true
     mark(index)
     pages.speak(words[index].start, words[index].end)
     if (readAloud.state == "speaking") play()
   }
 
-  /** Marks the word the voice comes to. Voices report some punctuation apart, as a word of its own: it is still the word it belongs to. */
-  private fun follow(place: WordPlace) {
-    indices[place]?.takeIf { it != current }?.let(::mark)
+  /**
+   * Marks the word the voice comes to, and keeps it in sight – unless the reader was scrolled away from it, until it is in sight
+   * again. Voices report some punctuation apart, as a word of its own: it is still the word it belongs to.
+   */
+  private fun reached(place: WordPlace) {
+    val index = indices[place]?.takeIf { it != current } ?: return
+    if (!following && !pages.isScrollingByHand && pages.isInSight(words[index].start)) setFollowing(true)
+    mark(index, show = following)
   }
 
-  private fun mark(index: Int) {
+  /** While the voice reads, a scroll by hand leaves it be: the reader no longer follows it. */
+  private fun scrolledByHand() {
+    if (readAloud.state == "speaking") setFollowing(false)
+  }
+
+  private fun setFollowing(following: Boolean) {
+    if (following == this.following) return
+    this.following = following
+    if (readAloud.state == "speaking") onSpeechChange(mapOf("state" to "speaking", "following" to following))
+  }
+
+  /** The voice's news for JS; while it speaks, with whether the reader follows it. */
+  private fun speechChanged(change: Map<String, Any>) {
+    onSpeechChange(if (change["state"] == "speaking") change + ("following" to following) else change)
+  }
+
+  private fun mark(index: Int, show: Boolean = true) {
     current = index
     val word = words[index]
     pages.highlight(word.start, word.end)
-    pages.show(characterAt = word.start)
+    if (show) pages.show(characterAt = word.start)
     val place = word.place
     onWordChange(mapOf("passage" to place.passage, "book" to place.book, "chapter" to place.chapter, "verse" to place.verse, "word" to place.index))
   }

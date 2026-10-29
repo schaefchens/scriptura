@@ -6,7 +6,8 @@ import UIKit
 /// one attributed string, in pages or one endless scroll. It fetches them from the core itself, from
 /// the books the host added, so their text never passes through JS. A word can be tapped, reached
 /// word by word or jumped to; JS learns only where the current word stands, never its text. It
-/// reads aloud with the device's voices, from the word it is at, and marks each word as it is said.
+/// reads aloud with the device's voices, from the word it is at, and marks each word as it is said,
+/// keeping it in sight – unless it was scrolled away from it by hand.
 class ReaderView: ExpoView {
   /// Posted as the host adds or removes books: every reader shows what the library now holds.
   static let booksChanged = Notification.Name("ScripturaBooksChanged")
@@ -31,6 +32,8 @@ class ReaderView: ExpoView {
   /// Read aloud, each verse is followed by the same verse in each book read along; otherwise only
   /// the passages' own books are.
   var speakAlong = false
+  /// How fast the voices read, as a multiple of their own rate: from 0.5 to 2.
+  var speechRate = 1.0
 
   let onWordChange = EventDispatcher()
   let onLaidOut = EventDispatcher()
@@ -42,10 +45,13 @@ class ReaderView: ExpoView {
   private var indices: [WordPlace: Int] = [:]
   private var current: Int?
   private let readAloud = ReadAloud()
+  /// Whether the word the voice comes to is brought into sight: not after a scroll by hand away
+  /// from it, until it is in sight again.
+  private var following = true
   /// The passages the text is of: given them again, in another layout, the reader stays where it is.
   private var shownReferences: [Reference] = []
-  /// What is read aloud along with them.
-  private var spokenAlong: ([String], Bool) = ([], false)
+  /// What is read aloud along with them, and how fast.
+  private var spokenAs: ([String], Bool, Double) = ([], false, 1)
   private var booksObserver: NSObjectProtocol?
   /// How tall a letter is in a font, per point of its size, by font and letter.
   private var letterHeights: [String: Double] = [:]
@@ -69,9 +75,10 @@ class ReaderView: ExpoView {
       onLaidOut(["pages": paging == "pages" ? count : 0, "milliseconds": firstShown ?? time, "all": time])
     }
     readAloud.onWord = { [weak self] utterance, word in
-      self?.follow(WordPlace(passage: utterance.passage, book: utterance.book, chapter: word.chapter, verse: word.verse, index: word.index))
+      self?.reached(WordPlace(passage: utterance.passage, book: utterance.book, chapter: word.chapter, verse: word.verse, index: word.index))
     }
-    readAloud.onChange = { [weak self] change in self?.onSpeechChange(change) }
+    readAloud.onChange = { [weak self] change in self?.speechChanged(change) }
+    pages.onScrollByHand = { [weak self] in self?.scrolledByHand() }
     addSubview(pages)
     booksObserver = NotificationCenter.default.addObserver(forName: Self.booksChanged, object: nil, queue: .main) { [weak self] _ in
       // What is still to be said goes with the books.
@@ -168,11 +175,12 @@ class ReaderView: ExpoView {
       current = index
       pages.highlight(words[index].range)
     }
-    // Other books read along change what is said: the voice goes on from the word it is at.
-    if (companions, speakAlong) != spokenAlong, readAloud.state != "stopped" {
+    // Other books read along change what is said, and a new rate how: the voice goes on from the
+    // word it is at.
+    if (companions, speakAlong, speechRate) != spokenAs, readAloud.state != "stopped" {
       readAloud.state == "speaking" ? play() : readAloud.stop()
     }
-    spokenAlong = (companions, speakAlong)
+    spokenAs = (companions, speakAlong, speechRate)
   }
 
   /// A paragraph's font: its own, or the one the app brings for its language, or the system's.
@@ -367,7 +375,23 @@ class ReaderView: ExpoView {
   /// paused at that word goes on.
   func play() {
     readAloud.voices = voices
+    readAloud.rate = speechRate
+    following = true
     readAloud.play(shownReferences, companions: companions, along: speakAlong, from: readingStart().map(position(of:)))
+  }
+
+  /// Brings the word the voice is at – or, not reading aloud, the word marked – into sight, and
+  /// keeps the words the voice comes to there.
+  func follow() {
+    setFollowing(true)
+    if let current {
+      pages.show(characterAt: words[current].range.location)
+    }
+  }
+
+  /// Turns to the next or previous page, or a screen down or up, as a hand would.
+  func turn(forward: Bool) {
+    pages.turn(forward: forward)
   }
 
   func pause() {
@@ -405,6 +429,7 @@ class ReaderView: ExpoView {
 
   /// Marks a word reached by a tap, a move or a jump. While reading aloud, the voice goes on from it.
   private func select(_ index: Int) {
+    following = true
     mark(index)
     if UIAccessibility.isVoiceOverRunning {
       UIAccessibility.post(notification: .announcement, argument: (pages.text.string as NSString).substring(with: words[index].range))
@@ -414,17 +439,47 @@ class ReaderView: ExpoView {
     }
   }
 
-  /// Marks the word the voice comes to. Voices report some punctuation apart, as a word of its own:
-  /// it is still the word it belongs to.
-  private func follow(_ place: WordPlace) {
+  /// Marks the word the voice comes to, and keeps it in sight – unless the reader was scrolled away
+  /// from it, until it is in sight again. Voices report some punctuation apart, as a word of its
+  /// own: it is still the word it belongs to.
+  private func reached(_ place: WordPlace) {
     guard let index = indices[place], index != current else { return }
-    mark(index)
+    if !following, !pages.isScrollingByHand, pages.isInSight(characterAt: words[index].range.location) {
+      setFollowing(true)
+    }
+    mark(index, show: following)
   }
 
-  private func mark(_ index: Int) {
+  /// While the voice reads, a scroll by hand leaves it be: the reader no longer follows it.
+  private func scrolledByHand() {
+    if readAloud.state == "speaking" {
+      setFollowing(false)
+    }
+  }
+
+  private func setFollowing(_ following: Bool) {
+    guard following != self.following else { return }
+    self.following = following
+    if readAloud.state == "speaking" {
+      onSpeechChange(["state": "speaking", "following": following])
+    }
+  }
+
+  /// The voice's news for JS; while it speaks, with whether the reader follows it.
+  private func speechChanged(_ change: [String: Any]) {
+    var change = change
+    if change["state"] as? String == "speaking" {
+      change["following"] = following
+    }
+    onSpeechChange(change)
+  }
+
+  private func mark(_ index: Int, show: Bool = true) {
     let word = words[index]
     pages.highlight(word.range)
-    pages.show(characterAt: word.range.location)
+    if show {
+      pages.show(characterAt: word.range.location)
+    }
     current = index
     let place = word.place
     onWordChange(["passage": place.passage, "book": place.book, "chapter": place.chapter, "verse": place.verse, "word": place.index])

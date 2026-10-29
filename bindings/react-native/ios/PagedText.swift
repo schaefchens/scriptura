@@ -31,9 +31,9 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
 
   /// The text as last given; until it is laid out, the one before it stays in sight.
   private(set) var text = NSAttributedString()
-  /// The character the reader is at: a word it was brought to, or after a scroll, the first on the
-  /// page or of the line at the top. A new layout, after the device turned or the font grew, keeps
-  /// it in sight.
+  /// The character the reader is at: a word it was brought to, or during and after a scroll by hand,
+  /// the first on the page or of the line at the top. A new layout, after the device turned or the
+  /// font grew, keeps it in sight.
   private(set) var anchor = 0
   var highlightColor = UIColor.yellow
   /// The columns of a page that flowing text runs through.
@@ -60,6 +60,8 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
 
   /// A tapped character, by its index in the text.
   var onTap: ((Int) -> Void)?
+  /// A scroll or a page turn by hand begins – or by a screen reader, or by turn(forward:).
+  var onScrollByHand: (() -> Void)?
   /// The first pages show, before all of the text is laid out.
   var onFirstPages: (() -> Void)?
   /// The whole text is laid out, into this many pages, or parts in one endless scroll.
@@ -478,6 +480,44 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     setContentOffset(CGPoint(x: 0, y: min(max(line.minY - bounds.height / 3, 0), lowest)), animated: true)
   }
 
+  /// Whether the character at `index` is in sight: on the page shown, or in one endless scroll, its
+  /// line wholly in view.
+  func isInSight(characterAt index: Int) -> Bool {
+    guard layout.text === text, index < layout.end || layout.complete,
+          let part = layout.parts.lastIndex(atOrBefore: index, \.range.location)
+    else { return false }
+    guard continuous else {
+      return layout.parts[part].page == Int((contentOffset.x / bounds.width).rounded())
+    }
+    return bounds.contains(contentRect(for: NSRange(location: index, length: 0)))
+  }
+
+  /// Whether a finger moves the text, or it still glides after one.
+  var isScrollingByHand: Bool { isTracking || isDragging || isDecelerating }
+
+  /// Turns to the next or previous page, or scrolls a screen down or up, as a hand would: the page
+  /// turned to – in one endless scroll, 0 – or nil at the first or last page, or the top or bottom.
+  @discardableResult
+  func turn(forward: Bool) -> Int? {
+    if continuous {
+      let lowest = max(contentSize.height - bounds.height, 0)
+      let step = (bounds.height - 2 * Self.inset) * (forward ? 1 : -1)
+      let target = min(max(contentOffset.y + step, 0), lowest)
+      guard target != contentOffset.y else { return nil }
+      onScrollByHand?()
+      anchor = character(below: target - 1) ?? anchor
+      setContentOffset(CGPoint(x: 0, y: target), animated: true)
+      return 0
+    }
+    let current = Int((contentOffset.x / bounds.width).rounded())
+    let page = min(max(current + (forward ? 1 : -1), 0), max(pageCount - 1, 0))
+    guard page != current else { return nil }
+    onScrollByHand?()
+    anchor = firstCharacter(onPage: page)
+    setContentOffset(CGPoint(x: CGFloat(page) * bounds.width, y: 0), animated: true)
+    return page
+  }
+
   /// Where the text in `range` shows in this view's content, the whole width of its column: from
   /// its first line to its last in the part it starts in.
   func contentRect(for range: NSRange) -> CGRect {
@@ -526,12 +566,29 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     return CGPoint(x: CGFloat(layout.parts.indices.contains(part) ? layout.parts[part].page : 0) * bounds.width, y: 0)
   }
 
-  /// Once a scroll by hand has come to rest, the reader is where it ended – unless a new text is
-  /// still being laid out.
+  /// During a scroll by hand, and once it has come to rest, the reader is where it is – unless a new
+  /// text is still being laid out.
   private func keepAnchor() {
     if layout.text === text && !layout.parts.isEmpty {
       anchor = characterInSight
     }
+  }
+
+  func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+    onScrollByHand?()
+  }
+
+  func scrollViewDidScroll(_ scrollView: UIScrollView) {
+    if isTracking {
+      keepAnchor()
+    }
+  }
+
+  /// Once the finger lifts, the reader is where the text comes to rest.
+  func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
+    guard layout.text === text, !layout.parts.isEmpty else { return }
+    let target = targetContentOffset.pointee
+    anchor = continuous ? character(below: target.y - 1) ?? anchor : firstCharacter(onPage: Int((target.x / bounds.width).rounded()))
   }
 
   func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
@@ -556,21 +613,8 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     case .left where !continuous: forward = transform.a < 0
     default: return false
     }
-    if continuous {
-      let lowest = max(contentSize.height - bounds.height, 0)
-      let step = (bounds.height - 2 * Self.inset) * (forward ? 1 : -1)
-      let target = min(max(contentOffset.y + step, 0), lowest)
-      anchor = character(below: target - 1) ?? anchor
-      setContentOffset(CGPoint(x: 0, y: target), animated: true)
-      UIAccessibility.post(notification: .pageScrolled, argument: nil)
-      return true
-    }
-    let current = Int((contentOffset.x / bounds.width).rounded())
-    let page = min(max(current + (forward ? 1 : -1), 0), max(pageCount - 1, 0))
-    guard page != current else { return false }
-    anchor = firstCharacter(onPage: page)
-    setContentOffset(CGPoint(x: CGFloat(page) * bounds.width, y: 0), animated: true)
-    UIAccessibility.post(notification: .pageScrolled, argument: "Page \(page + 1) of \(pageCount)")
+    guard let page = turn(forward: forward) else { return false }
+    UIAccessibility.post(notification: .pageScrolled, argument: continuous ? nil : "Page \(page + 1) of \(pageCount)")
     return true
   }
 

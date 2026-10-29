@@ -20,13 +20,15 @@ export type WebReader = {
   jump(position: WordPosition): boolean;
   /**
    * Reads aloud with the browser's voices, from the word marked – or, with none, the first in sight –
-   * on to the end, marking each word as it is said. A tap, a move or a jump while it speaks goes on
-   * from there.
+   * on to the end, marking each word as it is said and keeping it in sight, unless the reader was
+   * scrolled away from it by hand. A tap, a move or a jump while it speaks goes on from there.
    */
   play(): void;
   /** Pauses; play() goes on from the word reached. */
   pause(): void;
   stop(): void;
+  /** Brings the word the voice is at – or, not reading aloud, the word marked – into sight, and keeps the words the voice comes to there. */
+  follow(): void;
   /** Shows what the library now holds, after books were added or removed. */
   refresh(): void;
   /** Turns to the next or previous page, or a screen down or up. */
@@ -44,6 +46,9 @@ type Word = { place: Place; block: number; start: number; end: number };
 type Piece = { node: Text; start: number; length: number };
 
 const INSET = 12;
+/** How long after the last scroll by hand, in milliseconds, the reader follows the voice again when its word is in sight. */
+const HAND_SETTLES = 700;
+const SCROLL_KEYS = new Set(['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' ']);
 const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors'>> = {
   fontSize: 28,
   paging: 'scroll',
@@ -57,6 +62,7 @@ const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors'>> = {
   parallel: 'inline',
   voices: {},
   speakAlong: false,
+  speechRate: 1,
 };
 
 let readers = 0;
@@ -91,11 +97,16 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   let indices = new Map<string, number>();
   let current: number | undefined;
   const readAloud = new ReadAloud(
-    (utterance, word) => follow({ passage: utterance.passage, book: utterance.book, chapter: word.chapter, verse: word.verse, index: word.index }),
-    (change) => options.onSpeechChange?.(change),
+    (utterance, word) => reached({ passage: utterance.passage, book: utterance.book, chapter: word.chapter, verse: word.verse, index: word.index }),
+    // While it speaks, with whether the reader follows it.
+    (change) => options.onSpeechChange?.(change.state === 'speaking' ? { ...change, following } : change),
   );
-  /** What is read aloud along with the passages. */
-  let spokenAlong = '';
+  /** Whether the word the voice comes to is brought into sight: not after a scroll by hand away from it, until it is in sight again. */
+  let following = true;
+  /** When the reader was last scrolled by hand, or glided after it. */
+  let scrolledAt = -Infinity;
+  /** What is read aloud along with the passages, and how fast. */
+  let spokenAs = '';
   let page = 0;
   let pageCount = 1;
   let shownPassages = '';
@@ -161,13 +172,13 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       current = indices.get(key(marked));
       highlight();
     }
-    // Other books read along change what is said: the voice goes on from the word it is at.
-    const spoken = JSON.stringify([companions, options.speakAlong]);
-    if (spoken !== spokenAlong && readAloud.state !== 'stopped') {
+    // Other books read along change what is said, and a new rate how: the voice goes on from the word it is at.
+    const spoken = JSON.stringify([companions, options.speakAlong, options.speechRate]);
+    if (spoken !== spokenAs && readAloud.state !== 'stopped') {
       if (readAloud.state === 'speaking') play();
       else readAloud.stop();
     }
-    spokenAlong = spoken;
+    spokenAs = spoken;
     if (anchor !== undefined) showWord(anchor, 'top');
     else goTo(0);
     const time = performance.now() - started;
@@ -502,21 +513,44 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
 
   /** Marks a word reached by a tap, a move or a jump. While reading aloud, the voice goes on from it. */
   function select(index: number) {
+    following = true;
     mark(index);
     live.textContent = rangeOf(words[index]).toString();
     if (readAloud.state === 'speaking') play();
   }
 
-  /** Marks the word the voice comes to. Voices report some punctuation apart, as a word of its own: it is still the word it belongs to. */
-  function follow(place: Place) {
+  /**
+   * Marks the word the voice comes to, and keeps it in sight – unless the reader was scrolled away from it, until it is in sight
+   * again. Voices report some punctuation apart, as a word of its own: it is still the word it belongs to.
+   */
+  function reached(place: Place) {
     const index = indices.get(key(place));
-    if (index !== undefined && index !== current) mark(index);
+    if (index === undefined || index === current) return;
+    if (!following && performance.now() - scrolledAt > HAND_SETTLES && inSight(index)) setFollowing(true);
+    mark(index, following);
   }
 
-  function mark(index: number) {
+  /** While the voice reads, a scroll by hand leaves it be: the reader no longer follows it. */
+  function scrolledByHand() {
+    scrolledAt = performance.now();
+    if (readAloud.state === 'speaking') setFollowing(false);
+  }
+
+  function setFollowing(value: boolean) {
+    if (value === following) return;
+    following = value;
+    if (readAloud.state === 'speaking') options.onSpeechChange?.({ state: 'speaking', following });
+  }
+
+  function follow() {
+    setFollowing(true);
+    if (current !== undefined) showWord(current, 'third');
+  }
+
+  function mark(index: number, show = true) {
     current = index;
     highlight();
-    showWord(index, 'third');
+    if (show) showWord(index, 'third');
     const { place } = words[index];
     options.onWordChange?.({ passage: place.passage, book: place.book, chapter: place.chapter, verse: place.verse, word: place.index });
   }
@@ -532,6 +566,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
 
   function play() {
     readAloud.voices = options.voices;
+    readAloud.rate = options.speechRate;
+    following = true;
     const { library, passages, companions, speakAlong } = options;
     readAloud.play(library, passages, companions, speakAlong, readingStart());
   }
@@ -549,6 +585,14 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     if (!('highlights' in CSS)) return;
     if (current === undefined) CSS.highlights.delete(highlightName);
     else CSS.highlights.set(highlightName, new Highlight(rangeOf(words[current])));
+  }
+
+  /** Whether a word is in sight: on the page shown, or in one endless scroll, wholly in view. */
+  function inSight(index: number) {
+    const rect = rangeOf(words[index]).getBoundingClientRect();
+    const area = root.getBoundingClientRect();
+    if (layout.kind === 'scroll') return rect.top >= area.top && rect.bottom <= area.bottom;
+    return rect.left >= area.left && rect.right <= area.right;
   }
 
   /** Brings a word into sight: turns to its page, or scrolls it to the top or a third of the way down. */
@@ -576,6 +620,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   }
 
   function turn(forward: boolean) {
+    scrolledByHand();
     if (layout.kind === 'scroll') {
       root.scrollBy({ top: (forward ? 1 : -1) * (root.clientHeight - 2 * INSET), behavior: 'smooth' });
       return;
@@ -609,9 +654,19 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     select(target < 0 ? current : target);
   }
 
-  // A tap selects the word there; in pages, a swipe or the arrow keys turn them.
+  // A tap selects the word there; in pages, a swipe or the arrow keys turn them. In one endless
+  // scroll, the browser scrolls: by the wheel, a finger, the keys or the scroll bar.
   let down: { x: number; y: number } | undefined;
-  root.addEventListener('pointerdown', (event) => (down = { x: event.clientX, y: event.clientY }));
+  root.addEventListener('pointerdown', (event) => {
+    down = { x: event.clientX, y: event.clientY };
+    const area = root.getBoundingClientRect();
+    if (event.clientX - area.left >= root.clientLeft + root.clientWidth) scrolledByHand();
+  });
+  root.addEventListener('touchmove', () => scrolledByHand(), { passive: true });
+  // Once the reader no longer follows the voice, every scroll is a hand's, or its gliding on.
+  root.addEventListener('scroll', () => {
+    if (!following) scrolledAt = performance.now();
+  }, { passive: true });
   root.addEventListener('pointerup', (event) => {
     if (!down) return;
     const [dx, dy] = [event.clientX - down.x, event.clientY - down.y];
@@ -625,7 +680,10 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     }
   });
   root.addEventListener('keydown', (event) => {
-    if (layout.kind === 'scroll') return;
+    if (layout.kind === 'scroll') {
+      if (SCROLL_KEYS.has(event.key)) scrolledByHand();
+      return;
+    }
     const forward = { ArrowRight: true, ArrowLeft: false, PageDown: true, PageUp: false }[event.key];
     if (forward === undefined) return;
     event.preventDefault();
@@ -633,7 +691,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     turn(forward !== rightToLeft);
   });
   root.addEventListener('wheel', (event) => {
-    if (layout.kind === 'scroll' || Math.abs(event.deltaX) + Math.abs(event.deltaY) < 20) return;
+    if (layout.kind === 'scroll') return scrolledByHand();
+    if (Math.abs(event.deltaX) + Math.abs(event.deltaY) < 20) return;
     event.preventDefault();
     turn((Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY) > 0);
   }, { passive: false });
@@ -658,6 +717,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     play,
     pause: () => readAloud.pause(),
     stop: () => readAloud.stop(),
+    follow,
     refresh() {
       // What is still to be said goes with the books.
       readAloud.stop();

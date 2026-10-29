@@ -17,6 +17,8 @@ export type ReaderHandle = {
   play(): void;
   pause(): void;
   stop(): void;
+  /** Brings the word the voice is at, or the word marked, into sight, and keeps the words the voice comes to there. */
+  follow(): void;
   /** Turns to the next or previous page, or a screen down or up. */
   turn(forward: boolean): void;
   /** Shows what the library now holds, after books were added or removed. */
@@ -69,6 +71,7 @@ export function Reader({ ref, className, style, ...options }: ReaderProps) {
     play: () => reader.current?.play(),
     pause: () => reader.current?.pause(),
     stop: () => reader.current?.stop(),
+    follow: () => reader.current?.follow(),
     turn: (forward) => reader.current?.turn(forward),
     refresh: () => reader.current?.refresh(),
   }), []);

@@ -27,6 +27,9 @@ const SIGN_OF_JONAH: Passage[] = [
   { book: 'quran-37', from: 139, to: 144 },
 ];
 
+/** How fast the voice reads, as a multiple of its own rate. */
+const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
 const MOVES: [MoveStep, string][] = [
   ['verse-1', '◀ verse'],
   ['word-1', '◀ word'],
@@ -46,6 +49,7 @@ function App() {
   const [position, setPosition] = useState<WordPosition>();
   const [speech, setSpeech] = useState<SpeechChange>({ state: 'stopped' });
   const [speakAlong, setSpeakAlong] = useState(false);
+  const [rate, setRate] = useState(1);
   const [goTo, setGoTo] = useState('2:1');
   const reader = useRef<ReaderHandle>(null);
 
@@ -62,8 +66,8 @@ function App() {
     const [chapter, verse] = goTo.split(':').map(Number);
     reader.current?.jump({ passage: 0, book: passages[0].book, chapter, verse, word: 0 });
   };
-  const onSpeechChange = (change: SpeechChange) =>
-    setSpeech((last) => ({ ...change, firstSound: change.firstSound ?? (change.state === 'speaking' ? last.firstSound : undefined) }));
+  // Each change tells what is new; while the voice speaks, what it told before still holds.
+  const onSpeechChange = (change: SpeechChange) => setSpeech((last) => (change.state === 'speaking' ? { ...last, ...change } : change));
 
   return (
     <main style={{ background: colors.background, color: colors.text }}>
@@ -104,6 +108,8 @@ function App() {
           <button onClick={() => reader.current?.play()}>Read aloud</button>
         )}
         {speech.state !== 'stopped' && <button onClick={() => reader.current?.stop()}>Stop</button>}
+        <button onClick={() => setRate(RATES[(RATES.indexOf(rate) + 1) % RATES.length])}>{rate}×</button>
+        {speech.state === 'speaking' && speech.following === false && <button onClick={() => reader.current?.follow()}>Back to the voice</button>}
         <output dir="auto">
           {position ? `${title(position.book)}‎ ${position.chapter}:${position.verse} · word ${position.word + 1}` : 'Tap a word'}
           {speech.firstSound !== undefined && ` · first sound after ${Math.round(speech.firstSound)} ms`}
@@ -124,6 +130,7 @@ function App() {
         companions={along}
         parallel={parallel}
         speakAlong={speakAlong}
+        speechRate={rate}
         onWordChange={setPosition}
         onSpeechChange={onSpeechChange}
       />

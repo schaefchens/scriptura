@@ -104,15 +104,18 @@ class PagedText(context: Context) : View(context) {
   /** A screen reader's move through the words, such as "word+1", from a heading or verse. */
   var onAccessibilityMove: ((String, Readable) -> Unit)? = null
 
+  /** A scroll or a page turn by hand begins – or by a screen reader, or by turn(). */
+  var onScrollByHand: (() -> Unit)? = null
+
   /** The text as last given, which stays unchanged: the highlight is drawn instead. */
   var text: Spanned = SpannedString("")
     private set
   private var format = TextFormat(Color.WHITE, 1, false, false, TextPaint(), 1f, 0f, emptyList())
 
   /**
-   * The character the reader is at: a word it was brought to, or after a scroll, the first on the
-   * page or of the line at the top. A new layout, after the device turned or the font grew, keeps
-   * it in sight.
+   * The character the reader is at: a word it was brought to, or during and after a scroll by hand,
+   * the first on the page or of the line at the top – where the scroll comes to rest. A new layout,
+   * after the device turned or the font grew, keeps it in sight.
    */
   var anchor = 0
     private set
@@ -143,6 +146,9 @@ class PagedText(context: Context) : View(context) {
   private val highlightPaint = Paint()
   private val scroller = OverScroller(context)
   private var flung = false
+  /** Whether a finger is on the text, and whether it moved it since it came down. */
+  private var touching = false
+  private var moved = false
 
   /** The headings and verses in sight, each cut to a column: what screen readers find. */
   private var pieces: List<Piece> = emptyList()
@@ -162,18 +168,24 @@ class PagedText(context: Context) : View(context) {
     override fun onDown(event: MotionEvent): Boolean {
       scroller.forceFinished(true)
       flung = false
+      moved = false
       scrollMovesAnchor = true
       return true
     }
 
     override fun onScroll(start: MotionEvent?, event: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
       val shown = shown ?: return false
+      if (!moved) {
+        moved = true
+        onScrollByHand?.invoke()
+      }
       parent?.requestDisallowInterceptTouchEvent(true)
       if (shown.format.continuous) {
         scrollTo(0, (scrollY + distanceY).roundToInt().coerceIn(0, shown.maxScrollY))
       } else {
         scrollTo((scrollX + distanceX).roundToInt().coerceIn(shown.scrollXRange), 0)
       }
+      if (shown.text === text) anchor = characterInSight(shown)
       return true
     }
 
@@ -182,6 +194,7 @@ class PagedText(context: Context) : View(context) {
       flung = true
       if (shown.format.continuous) {
         scroller.fling(0, scrollY, 0, -velocityY.toInt(), 0, 0, 0, shown.maxScrollY)
+        if (shown.text === text) anchor = characterInSight(shown, y = scroller.finalY)
         postInvalidateOnAnimation()
       } else {
         // A fling to the left scrolls right: to the next page, or for pages from the right, the one before.
@@ -295,11 +308,11 @@ class PagedText(context: Context) : View(context) {
     invalidate()
   }
 
-  /** Where the reader is: the first character on the page, or of the first whole line in sight. */
-  private fun characterInSight(shown: Shown): Int {
-    if (!shown.format.continuous) return shown.pages.getOrNull(shown.pageAt(scrollX))?.firstOrNull()?.start ?: 0
+  /** Where the reader is, scrolled to [x] and [y]: the first character on the page, or of the first whole line in sight. */
+  private fun characterInSight(shown: Shown, x: Int = scrollX, y: Int = scrollY): Int {
+    if (!shown.format.continuous) return shown.pages.getOrNull(shown.pageAt(x))?.firstOrNull()?.start ?: 0
     // The first line, in the text's order, that starts in sight.
-    val top = (scrollY - inset).toInt()
+    val top = (y - inset).toInt()
     for (place in shown.placesBetween(top, top + height)) {
       val layout = place.layout
       val origin = place.top - layout.getLineTop(place.firstLine)
@@ -392,6 +405,40 @@ class PagedText(context: Context) : View(context) {
     }
   }
 
+  /** Whether the character at [offset] is in sight: on the page shown, or in one endless scroll, its line wholly in view. */
+  fun isInSight(offset: Int): Boolean {
+    val shown = shown?.takeIf { it.text === text } ?: return false
+    if (offset >= shown.end && !shown.complete) return false
+    if (!shown.format.continuous) return shown.pageOf(offset) == shown.pageAt(scrollX)
+    val layout = shown.placeOf(offset)?.layout ?: return false
+    val line = layout.getLineForOffset(offset)
+    val top = (inset + shown.topOf(offset)).toInt()
+    val bottom = top + layout.getLineBottom(line) - layout.getLineTop(line)
+    return top >= scrollY && bottom <= scrollY + height
+  }
+
+  /** Whether a finger moves the text, or it still glides or settles after one. */
+  val isScrollingByHand get() = touching || (scrollMovesAnchor && !scroller.isFinished)
+
+  /** Turns to the next or previous page, or scrolls a screen down or up, as a hand would. False at the first or last page, or the top or bottom. */
+  fun turn(forward: Boolean): Boolean {
+    val shown = shown ?: return false
+    if (shown.format.continuous) {
+      val target = (scrollY + (if (forward) 1 else -1) * (height - 2 * inset).toInt()).coerceIn(0, shown.maxScrollY)
+      if (target == scrollY) return false
+      onScrollByHand?.invoke()
+      scrollMovesAnchor = true
+      scrollSmoothly(0, target)
+    } else {
+      val page = shown.pageAt(scrollX) + if (forward) 1 else -1
+      if (page !in 0 until shown.pageCount) return false
+      onScrollByHand?.invoke()
+      scrollMovesAnchor = true
+      scrollSmoothly(shown.scrollXOf(page), 0)
+    }
+    return true
+  }
+
   /** The word just reached, from [start] to [end], for screen readers: the piece that holds it says it, and gets their focus. */
   fun speak(start: Int, end: Int) {
     spoken = start until end
@@ -413,6 +460,9 @@ class PagedText(context: Context) : View(context) {
   }
 
   private fun scrollSmoothly(x: Int, y: Int) {
+    // A scroll by hand that settles, or a turn: the reader is where it will rest.
+    val shown = shown
+    if (scrollMovesAnchor && shown != null && shown.text === text) anchor = characterInSight(shown, x, y)
     if (x == scrollX && y == scrollY) return settled()
     scroller.startScroll(scrollX, scrollY, x - scrollX, y - scrollY, PAGE_TURN_MILLISECONDS)
     postInvalidateOnAnimation()
@@ -433,6 +483,10 @@ class PagedText(context: Context) : View(context) {
   }
 
   override fun onTouchEvent(event: MotionEvent): Boolean {
+    when (event.actionMasked) {
+      MotionEvent.ACTION_DOWN -> touching = true
+      MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> touching = false
+    }
     gestures.onTouchEvent(event)
     val shown = shown
     if (shown != null && (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) && !flung) {
@@ -448,18 +502,7 @@ class PagedText(context: Context) : View(context) {
       AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD -> false
       else -> return super.performAccessibilityAction(action, arguments)
     }
-    val shown = shown ?: return false
-    scrollMovesAnchor = true
-    if (shown.format.continuous) {
-      val target = (scrollY + (if (forward) 1 else -1) * (height - 2 * inset).toInt()).coerceIn(0, shown.maxScrollY)
-      if (target == scrollY) return false
-      scrollSmoothly(0, target)
-    } else {
-      val page = shown.pageAt(scrollX) + if (forward) 1 else -1
-      if (page !in 0 until shown.pageCount) return false
-      scrollSmoothly(shown.scrollXOf(page), 0)
-    }
-    return true
+    return turn(forward)
   }
 
   override fun dispatchHoverEvent(event: MotionEvent) = screenReaders.dispatchHoverEvent(event) || super.dispatchHoverEvent(event)

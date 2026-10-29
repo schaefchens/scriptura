@@ -31,6 +31,11 @@ export type SpeechChange = {
   firstSound?: number;
   /** The languages skipped so far, as the device has no voice for them. */
   unvoiced?: string[];
+  /**
+   * While it speaks: whether the reader keeps the word the voice is at in sight. Not once it was
+   * scrolled or turned away from it by hand, until the word is in sight again, or after follow().
+   */
+  following?: boolean;
 };
 
 /**
@@ -74,6 +79,8 @@ export type ReaderOptions = {
   voices?: Record<string, string>;
   /** Read aloud, each verse is followed by the same verse in each companion; otherwise only the passages' own books are spoken. */
   speakAlong?: boolean;
+  /** How fast the voice reads, as a multiple of its own rate: from 0.5 to 2. iOS's voices read no slower than 0.56. */
+  speechRate?: number;
 };
 
 /** How long a text took until its first pages showed, and until all of it was laid out, in milliseconds; and its pages, 0 in one endless scroll. */

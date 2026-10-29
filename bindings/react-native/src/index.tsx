@@ -30,13 +30,18 @@ export type ReaderHandle = {
   jump(position: WordPosition): Promise<boolean>;
   /**
    * Reads aloud with the device's voices, from the word marked – or, with none, the first in sight –
-   * on to the end, marking each word as it is said. A tap, a move or a jump while it speaks goes on
-   * from there. The reader takes the text from the books itself: it never passes through JS.
+   * on to the end, marking each word as it is said and keeping it in sight, unless the reader was
+   * scrolled away from it by hand. A tap, a move or a jump while it speaks goes on from there. The
+   * reader takes the text from the books itself: it never passes through JS.
    */
   play(): Promise<void>;
   /** Pauses; play() goes on from the word reached. */
   pause(): Promise<void>;
   stop(): Promise<void>;
+  /** Brings the word the voice is at – or, not reading aloud, the word marked – into sight, and keeps the words the voice comes to there. */
+  follow(): Promise<void>;
+  /** Turns to the next or previous page, or a screen down or up, as a hand would. */
+  turn(forward: boolean): Promise<void>;
   /** The same as a tap at that point of the reader, in points: for tests without a finger. */
   tapAt(x: number, y: number): Promise<void>;
   /** For tests without a screen reader. */

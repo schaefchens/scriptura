@@ -127,6 +127,9 @@ class ScripturaModule : Module() {
       Prop("speakAlong", false) { view: ReaderView, speakAlong: Boolean ->
         view.speakAlong = speakAlong
       }
+      Prop("speechRate", 1.0) { view: ReaderView, speechRate: Double ->
+        view.speechRate = speechRate
+      }
       OnViewDidUpdateProps { view: ReaderView ->
         view.render()
       }
@@ -145,6 +148,12 @@ class ScripturaModule : Module() {
       }.runOnQueue(Queues.MAIN)
       AsyncFunction("stop") { view: ReaderView ->
         view.stop()
+      }.runOnQueue(Queues.MAIN)
+      AsyncFunction("follow") { view: ReaderView ->
+        view.follow()
+      }.runOnQueue(Queues.MAIN)
+      AsyncFunction("turn") { view: ReaderView, forward: Boolean ->
+        view.turn(forward)
       }.runOnQueue(Queues.MAIN)
       // The same as a tap at that point (in dp), so the hit test can be tried without a finger.
       AsyncFunction("tapAt") { view: ReaderView, x: Double, y: Double ->
