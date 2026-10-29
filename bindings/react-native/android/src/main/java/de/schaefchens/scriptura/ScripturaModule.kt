@@ -3,10 +3,15 @@ package de.schaefchens.scriptura
 import android.graphics.Color
 import android.net.Uri
 import de.schaefchens.scriptura.core.BooksException
+import de.schaefchens.scriptura.core.RecordingsException
 import de.schaefchens.scriptura.core.addBooks
+import de.schaefchens.scriptura.core.addRecordings
 import de.schaefchens.scriptura.core.books
 import de.schaefchens.scriptura.core.clearBooks
+import de.schaefchens.scriptura.core.clearRecordings
+import de.schaefchens.scriptura.core.recordings
 import de.schaefchens.scriptura.core.removeBooks
+import de.schaefchens.scriptura.core.removeRecordings
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.functions.Queues
@@ -76,6 +81,31 @@ class ScripturaModule : Module() {
       ReaderView.booksChanged()
     }.runOnQueue(Queues.MAIN)
 
+    // Recordings of chapters, read here too; an audio that is no URI is found next to them.
+    AsyncFunction("addRecordings") { source: BooksSource ->
+      val ids = try {
+        addRecordings(bytesOf(source, RECORDINGS), baseOf(source))
+      } catch (error: RecordingsException) {
+        throw CodedException("ERR_SCRIPTURA_RECORDINGS", error.message, error)
+      }
+      ReaderView.recordingsChanged()
+      ids
+    }.runOnQueue(Queues.MAIN)
+
+    Function("recordings") {
+      recordings().map { mapOf("id" to it.id, "voice" to it.voice, "book" to it.book, "chapter" to it.chapter.toInt()) }
+    }
+
+    AsyncFunction("removeRecordings") { ids: List<String> ->
+      removeRecordings(ids)
+      ReaderView.recordingsChanged()
+    }.runOnQueue(Queues.MAIN)
+
+    AsyncFunction("clearRecordings") {
+      clearRecordings()
+      ReaderView.recordingsChanged()
+    }.runOnQueue(Queues.MAIN)
+
     // The voices that can read aloud: their names and languages.
     AsyncFunction("speechVoices") { promise: Promise ->
       val context = appContext.reactContext ?: return@AsyncFunction promise.resolve(emptyList<Any>())
@@ -130,6 +160,9 @@ class ScripturaModule : Module() {
       Prop("speechRate", 1.0) { view: ReaderView, speechRate: Double ->
         view.speechRate = speechRate
       }
+      Prop("recordedVoices") { view: ReaderView, voices: List<String>? ->
+        view.recordedVoices = voices
+      }
       OnViewDidUpdateProps { view: ReaderView ->
         view.render()
       }
@@ -167,15 +200,29 @@ class ScripturaModule : Module() {
     }
   }
 
-  private fun bytesOf(source: BooksSource): ByteArray {
+  private fun bytesOf(source: BooksSource, folder: String = BOOKS): ByteArray {
     source.json?.let { return it.toByteArray() }
     val context = appContext.reactContext ?: throw CodedException("ERR_SCRIPTURA_BOOKS", "No context to read books in", null)
     source.asset?.let { asset ->
-      return runCatching { context.assets.open("scriptura-books/$asset").use { it.readBytes() } }
-        .getOrElse { throw CodedException("ERR_SCRIPTURA_BOOKS", "The app bundles no books named $asset", it) }
+      return runCatching { context.assets.open("$folder/$asset").use { it.readBytes() } }
+        .getOrElse { throw CodedException("ERR_SCRIPTURA_BOOKS", "The app bundles no $asset in $folder", it) }
     }
-    val uri = source.uri?.let(Uri::parse) ?: throw CodedException("ERR_SCRIPTURA_BOOKS", "Books need a uri, an asset or json", null)
+    val uri = source.uri?.let(Uri::parse) ?: throw CodedException("ERR_SCRIPTURA_BOOKS", "Books and recordings need a uri, an asset or json", null)
     val stream = if (uri.scheme == null) java.io.File(uri.toString()).inputStream() else context.contentResolver.openInputStream(uri)
-    return stream?.use { it.readBytes() } ?: throw CodedException("ERR_SCRIPTURA_BOOKS", "Can't read books from $uri", null)
+    return stream?.use { it.readBytes() } ?: throw CodedException("ERR_SCRIPTURA_BOOKS", "Can't read $uri", null)
+  }
+
+  /** Where recordings came from, for the audio they name relative to it: the app's folder of them, or a file's. */
+  private fun baseOf(source: BooksSource): String? {
+    if (source.asset != null) return "asset:///$RECORDINGS/"
+    val uri = source.uri?.let(Uri::parse) ?: return null
+    val file = if (uri.scheme == null) Uri.fromFile(java.io.File(uri.toString())) else uri
+    return file.buildUpon().path(file.path?.substringBeforeLast('/', "")).build().toString()
+  }
+
+  private companion object {
+    /** Where the app bundles books, and recordings: see the config plugin. */
+    const val BOOKS = "scriptura-books"
+    const val RECORDINGS = "scriptura-recordings"
   }
 }

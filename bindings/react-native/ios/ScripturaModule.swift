@@ -62,6 +62,27 @@ public class ScripturaModule: Module {
       Self.booksChanged()
     }
 
+    // Recordings of chapters, read here too; an audio that is no URI is found next to them.
+    AsyncFunction("addRecordings") { (source: BooksSource) throws -> [String] in
+      let ids = try addRecordings(json: try Self.data(of: source, folder: Self.recordingsFolder), base: Self.base(of: source))
+      Self.recordingsChanged()
+      return ids
+    }
+
+    Function("recordings") {
+      recordings().map { ["id": $0.id, "voice": $0.voice, "book": $0.book, "chapter": $0.chapter] }
+    }
+
+    AsyncFunction("removeRecordings") { (ids: [String]) in
+      removeRecordings(ids: ids)
+      Self.recordingsChanged()
+    }
+
+    AsyncFunction("clearRecordings") {
+      clearRecordings()
+      Self.recordingsChanged()
+    }
+
     // The voices that can read aloud: their identifiers, names and languages.
     AsyncFunction("speechVoices") {
       ReadAloud.voiceList()
@@ -115,6 +136,9 @@ public class ScripturaModule: Module {
       Prop("speechRate", 1.0) { (view: ReaderView, speechRate: Double) in
         view.speechRate = speechRate
       }
+      Prop("recordedVoices") { (view: ReaderView, voices: [String]?) in
+        view.recordedVoices = voices
+      }
       OnViewDidUpdateProps { (view: ReaderView) in
         view.render()
       }
@@ -152,25 +176,49 @@ public class ScripturaModule: Module {
     }
   }
 
-  private static func data(of source: BooksSource) throws -> Data {
+  /// Where the app bundles books, and recordings: see the config plugin.
+  private static let booksFolder = "scriptura-books"
+  private static let recordingsFolder = "scriptura-recordings"
+
+  private static func data(of source: BooksSource, folder: String = booksFolder) throws -> Data {
     if let json = source.json {
       return Data(json.utf8)
     }
     if let asset = source.asset {
-      guard let url = Bundle.main.url(forResource: asset, withExtension: nil, subdirectory: "scriptura-books") else {
-        throw Exception(name: "ERR_SCRIPTURA_BOOKS", description: "The app bundles no books named \(asset)")
+      guard let url = Bundle.main.url(forResource: asset, withExtension: nil, subdirectory: folder) else {
+        throw Exception(name: "ERR_SCRIPTURA_BOOKS", description: "The app bundles no \(asset) in \(folder)")
       }
       return try Data(contentsOf: url)
     }
-    guard let uri = source.uri, let url = URL(string: uri) else {
-      throw Exception(name: "ERR_SCRIPTURA_BOOKS", description: "Books need a uri, an asset or json")
+    guard let url = fileURL(of: source) else {
+      throw Exception(name: "ERR_SCRIPTURA_BOOKS", description: "Books and recordings need a uri, an asset or json")
     }
-    return try Data(contentsOf: url.isFileURL ? url : URL(fileURLWithPath: uri))
+    return try Data(contentsOf: url)
+  }
+
+  private static func fileURL(of source: BooksSource) -> URL? {
+    guard let uri = source.uri, let url = URL(string: uri) else { return nil }
+    return url.isFileURL ? url : URL(fileURLWithPath: uri)
+  }
+
+  /// Where recordings came from, for the audio they name relative to it: the bundle's folder of them,
+  /// or a file's.
+  private static func base(of source: BooksSource) -> String? {
+    if source.asset != nil {
+      return Bundle.main.url(forResource: recordingsFolder, withExtension: nil)?.absoluteString
+    }
+    return source.json == nil ? fileURL(of: source)?.deletingLastPathComponent().absoluteString : nil
   }
 
   private static func booksChanged() {
     DispatchQueue.main.async {
       NotificationCenter.default.post(name: ReaderView.booksChanged, object: nil)
+    }
+  }
+
+  private static func recordingsChanged() {
+    DispatchQueue.main.async {
+      NotificationCenter.default.post(name: ReaderView.recordingsChanged, object: nil)
     }
   }
 }

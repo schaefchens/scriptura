@@ -19,17 +19,18 @@ export type WebReader = {
   /** Brings the reader to a word by where it stands, as a tap would; to its verse's first word if the verse has no such word. False if the reader shows no such verse. */
   jump(position: WordPosition): boolean;
   /**
-   * Reads aloud with the browser's voices, from the word marked – or, with none, the first in sight –
-   * on to the end, marking each word as it is said and keeping it in sight, unless the reader was
-   * scrolled away from it by hand. A tap, a move or a jump while it speaks goes on from there.
+   * Reads aloud – chapters with recordings from them, the rest with the browser's voices – from the
+   * word marked, or with none, the first in sight, on to the end, marking each word as it is said and
+   * keeping it in sight, unless the reader was scrolled away from it by hand. A tap, a move or a jump
+   * while it reads goes on from there.
    */
   play(): void;
-  /** Pauses; play() goes on from the word reached. */
+  /** Pauses; play() goes on from the word reached – a recording where it paused. */
   pause(): void;
   stop(): void;
   /** Brings the word the voice is at – or, not reading aloud, the word marked – into sight, and keeps the words the voice comes to there. */
   follow(): void;
-  /** Shows what the library now holds, after books were added or removed. */
+  /** Shows what the library now holds, after books or recordings were added or removed. */
   refresh(): void;
   /** Turns to the next or previous page, or a screen down or up. */
   turn(forward: boolean): void;
@@ -49,7 +50,7 @@ const INSET = 12;
 /** How long after the last scroll by hand, in milliseconds, the reader follows the voice again when its word is in sight. */
 const HAND_SETTLES = 700;
 const SCROLL_KEYS = new Set(['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' ']);
-const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors'>> = {
+const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVoices'>> = {
   fontSize: 28,
   paging: 'scroll',
   columns: 1,
@@ -97,7 +98,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   let indices = new Map<string, number>();
   let current: number | undefined;
   const readAloud = new ReadAloud(
-    (utterance, word) => reached({ passage: utterance.passage, book: utterance.book, chapter: word.chapter, verse: word.verse, index: word.index }),
+    (part, word) => reached({ passage: part.passage, book: part.book, chapter: word.chapter, verse: word.verse, index: word.index }),
     // While it speaks, with whether the reader follows it.
     (change) => options.onSpeechChange?.(change.state === 'speaking' ? { ...change, following } : change),
   );
@@ -105,8 +106,9 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   let following = true;
   /** When the reader was last scrolled by hand, or glided after it. */
   let scrolledAt = -Infinity;
-  /** What is read aloud along with the passages, and how fast. */
-  let spokenAs = '';
+  /** What is read aloud along with the passages, and from which recordings; and how fast. */
+  let readAs = '';
+  let rateAs = 1;
   let page = 0;
   let pageCount = 1;
   let shownPassages = '';
@@ -172,13 +174,16 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       current = indices.get(key(marked));
       highlight();
     }
-    // Other books read along change what is said, and a new rate how: the voice goes on from the word it is at.
-    const spoken = JSON.stringify([companions, options.speakAlong, options.speechRate]);
-    if (spoken !== spokenAs && readAloud.state !== 'stopped') {
+    // Other books read along or other recordings change what is read, and a new rate how: the voice goes on from the word it is at. A
+    // recording takes a new rate as it plays.
+    const read = JSON.stringify([companions, options.speakAlong, options.recordedVoices]);
+    const changed = read !== readAs || (options.speechRate !== rateAs && !readAloud.setRate(options.speechRate));
+    if (changed && readAloud.state !== 'stopped') {
       if (readAloud.state === 'speaking') play();
       else readAloud.stop();
     }
-    spokenAs = spoken;
+    readAs = read;
+    rateAs = options.speechRate;
     if (anchor !== undefined) showWord(anchor, 'top');
     else goTo(0);
     const time = performance.now() - started;
@@ -568,8 +573,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     readAloud.voices = options.voices;
     readAloud.rate = options.speechRate;
     following = true;
-    const { library, passages, companions, speakAlong } = options;
-    readAloud.play(library, passages, companions, speakAlong, readingStart());
+    const { library, passages, companions, speakAlong, recordedVoices } = options;
+    readAloud.play(library, passages, companions, speakAlong, readingStart(), recordedVoices);
   }
 
   /** The word reading starts at: the one marked, or the first in sight – none at the very start, where reading starts with the first heading. */
@@ -715,7 +720,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     move,
     jump,
     play,
-    pause: () => readAloud.pause(),
+    pause: () => readAloud.pause(readingStart()),
     stop: () => readAloud.stop(),
     follow,
     refresh() {

@@ -2,17 +2,21 @@
 //! surah – and passages of them as paragraphs to lay out. A paragraph is a chapter's heading, its
 //! running text or a verse on a line of its own, in its book's language, direction and script,
 //! with each verse and word where it stands. Other editions of a book can be read along with it,
-//! verse by verse, matched by the KJV's numbers. Passages can be read aloud: see [`Speech`].
+//! verse by verse, matched by the KJV's numbers. Passages can be read aloud, by the device's voices
+//! or from recordings of their chapters: see [`Speech`].
 //!
-//! The library holds no texts of its own: a host adds books as JSON (see [`Book`]).
+//! The library holds no texts of its own: a host adds books as JSON (see [`Book`]), and recordings
+//! (see [`Recording`]).
 
 mod model;
 mod reader;
 mod speech;
 
-pub use model::{Book, Chapter, Verse, VerseNumbers};
-pub use reader::{Block, Segment, VerseRange, Word};
-pub use speech::{Place, Speech, Utterance};
+use serde::de::Error as _;
+
+pub use model::{Book, Chapter, RecordedVerse, Recording, Verse, VerseNumbers};
+pub use reader::{Block, Segment, VerseRange, WORD_DEFINITION, Word};
+pub use speech::{Part, Place, Speech, Take, TimedWord, Utterance};
 
 /// A whole book, one chapter of it, or a verse range in that chapter.
 #[derive(Clone, Debug, PartialEq)]
@@ -34,10 +38,11 @@ pub struct Options {
     pub companions: Vec<String>,
 }
 
-/// The books a host has added, in the order added.
+/// The books a host has added, and the recordings of their chapters, in the order added.
 #[derive(Default)]
 pub struct Library {
     books: Vec<Book>,
+    recordings: Vec<Recording>,
 }
 
 impl Library {
@@ -74,6 +79,39 @@ impl Library {
         self.books.iter().find(|book| book.id == id)
     }
 
+    /// Adds the recordings of a JSON array, each replacing one of the same id, and returns their
+    /// ids. An audio that is no URI is taken as relative to `base`, where the recordings came from.
+    /// Recordings that count words otherwise than the core does, or whose times go back, are refused.
+    pub fn add_recordings(&mut self, json: &[u8], base: Option<&str>) -> Result<Vec<String>, serde_json::Error> {
+        let mut recordings: Vec<Recording> = serde_json::from_slice(json)?;
+        for recording in &mut recordings {
+            check(recording)?;
+            if let Some(base) = base.filter(|_| !is_absolute(&recording.audio)) {
+                recording.audio = format!("{}/{}", base.trim_end_matches('/'), recording.audio);
+            }
+        }
+        let ids = recordings.iter().map(|recording| recording.id.clone()).collect();
+        for recording in recordings {
+            match self.recordings.iter_mut().find(|old| old.id == recording.id) {
+                Some(old) => *old = recording,
+                None => self.recordings.push(recording),
+            }
+        }
+        Ok(ids)
+    }
+
+    pub fn remove_recordings(&mut self, ids: &[String]) {
+        self.recordings.retain(|recording| !ids.contains(&recording.id));
+    }
+
+    pub fn clear_recordings(&mut self) {
+        self.recordings.clear();
+    }
+
+    pub fn recordings(&self) -> &[Recording] {
+        &self.recordings
+    }
+
     /// The passages as paragraphs: per chapter a heading, then the chapter as running text, or a
     /// verse per line. With companions, other editions of a passage's book are read along with it:
     /// see [`Block::row`]. Passages of books the library doesn't hold give nothing.
@@ -88,12 +126,53 @@ impl Library {
         blocks
     }
 
-    /// What a voice says of the passages, read along with `companions` – only the passages' own
+    /// What is read aloud of the passages, read along with `companions` – only the passages' own
     /// books, or `along`, each verse in every book – from the word at `from`, or else from the
-    /// start: see [`Speech`].
-    pub fn speech(&self, references: &[Reference], companions: &[String], along: bool, from: Option<&Place>) -> Speech {
-        Speech::new(self, references, companions, along, from)
+    /// start: see [`Speech`]. A chapter is played from a recording of one of the `recorded` voices,
+    /// the first that has one – or, with none named, of any – and the device's voice reads the rest.
+    pub fn speech(
+        &self,
+        references: &[Reference],
+        companions: &[String],
+        along: bool,
+        from: Option<&Place>,
+        recorded: Option<&[String]>,
+    ) -> Speech {
+        Speech::new(self, references, companions, along, from, recorded)
     }
+}
+
+/// Whether a recording counts words as the core does, and its times go forward: each verse after
+/// the one before, and each word in its verse, from the verse's start on.
+fn check(recording: &Recording) -> Result<(), serde_json::Error> {
+    if recording.word_definition != WORD_DEFINITION {
+        return Err(serde_json::Error::custom(format!(
+            "the recording {} counts words by definition {}, the core by {WORD_DEFINITION}",
+            recording.id, recording.word_definition
+        )));
+    }
+    let mut number = None;
+    let mut time = 0;
+    for verse in &recording.verses {
+        let mut forward = number.is_none_or(|number| verse.number > number);
+        for next in std::iter::once(verse.start).chain(verse.words.iter().copied()) {
+            forward &= next >= time;
+            time = next;
+        }
+        if !forward {
+            return Err(serde_json::Error::custom(format!(
+                "the recording {} goes back at verse {}",
+                recording.id, verse.number
+            )));
+        }
+        number = Some(verse.number);
+    }
+    Ok(())
+}
+
+/// Whether a reference to audio is a URI of its own, or a path from the root, rather than relative.
+fn is_absolute(reference: &str) -> bool {
+    reference.starts_with('/') || reference.split_once(':').is_some_and(|(scheme, _)| !scheme.contains('/'))
 }
 
 #[cfg(test)]
@@ -124,6 +203,44 @@ mod tests {
         assert!(library.add(b"{}").is_err());
         assert!(library.add(br#"[{"id": "jonah"}]"#).is_err());
         assert!(library.books().is_empty());
+    }
+
+    /// A recording of Jonah 1 with what its verse 1 holds, in the word definition given.
+    fn recording(definition: u32, audio: &str, verse: &str) -> String {
+        format!(
+            r#"[{{"id": "jonah-1", "voice": "Reader", "book": "jonah", "chapter": 1, "audio": "{audio}",
+                 "wordDefinition": {definition}, "verses": [{verse}]}}]"#
+        )
+    }
+
+    #[test]
+    fn a_recording_counting_words_otherwise_or_going_back_is_refused() {
+        let mut library = Library::new();
+        let verse = r#"{"number": 1, "start": 100, "words": [200, 900]}"#;
+        assert!(library.add_recordings(recording(WORD_DEFINITION, "1.mp3", verse).as_bytes(), None).is_ok());
+        assert!(library.add_recordings(recording(WORD_DEFINITION + 1, "1.mp3", verse).as_bytes(), None).is_err());
+        let back = r#"{"number": 1, "start": 100, "words": [900, 200]}"#;
+        assert!(library.add_recordings(recording(WORD_DEFINITION, "1.mp3", back).as_bytes(), None).is_err());
+        let behind = r#"{"number": 1, "start": 100, "words": [200]}, {"number": 2, "start": 150, "words": [300]}"#;
+        assert!(library.add_recordings(recording(WORD_DEFINITION, "1.mp3", behind).as_bytes(), None).is_err());
+        assert_eq!(library.recordings().len(), 1);
+    }
+
+    #[test]
+    fn audio_is_found_relative_to_where_its_recording_came_from() {
+        let verse = r#"{"number": 1, "start": 0, "words": [0]}"#;
+        for (audio, found) in [
+            ("reader/jonah-1.m4a", "file:///books/reader/jonah-1.m4a"),
+            ("https://example.org/jonah-1.m4a", "https://example.org/jonah-1.m4a"),
+            ("asset:///jonah-1.m4a", "asset:///jonah-1.m4a"),
+            ("/audio/jonah-1.m4a", "/audio/jonah-1.m4a"),
+        ] {
+            let mut library = Library::new();
+            library
+                .add_recordings(recording(WORD_DEFINITION, audio, verse).as_bytes(), Some("file:///books/"))
+                .unwrap();
+            assert_eq!(library.recordings()[0].audio, found);
+        }
     }
 
     #[test]

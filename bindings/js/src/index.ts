@@ -15,6 +15,9 @@ export type BookInfo = {
   direction: 'ltr' | 'rtl';
 };
 
+/** A recording of a chapter, as a list shows it: whose voice it is, and which chapter of which book it reads. */
+export type RecordingInfo = { id: string; voice: string; book: string; chapter: number };
+
 /**
  * Where the reader's current word stands: the passage it belongs to, its book (the passage's, or
  * one read along with it) and its place in the scripture. Never its text.
@@ -36,6 +39,8 @@ export type SpeechChange = {
    * scrolled or turned away from it by hand, until the word is in sight again, or after follow().
    */
   following?: boolean;
+  /** While it reads: the voice of the recording it plays – empty while a voice on the device speaks. */
+  recording?: string;
 };
 
 /**
@@ -81,6 +86,12 @@ export type ReaderOptions = {
   speakAlong?: boolean;
   /** How fast the voice reads, as a multiple of its own rate: from 0.5 to 2. iOS's voices read no slower than 0.56. */
   speechRate?: number;
+  /**
+   * The voices whose recordings are played, by the name the recordings give them: a chapter is
+   * played from a recording of the first that has one, and a voice on the device reads the rest.
+   * Without it, from a recording of any voice; with none, from none.
+   */
+  recordedVoices?: string[];
 };
 
 /** How long a text took until its first pages showed, and until all of it was laid out, in milliseconds; and its pages, 0 in one endless scroll. */

@@ -1,6 +1,6 @@
-//! Scriptura for the web, through wasm-bindgen: a library of books in the page, and passages of them
-//! as paragraphs for its reader. Books and paragraphs cross as JSON, which a browser parses faster
-//! than it takes objects built field by field.
+//! Scriptura for the web, through wasm-bindgen: a library of books and recordings in the page, and
+//! passages of them as paragraphs for its reader. Books and paragraphs cross as JSON, which a
+//! browser parses faster than it takes objects built field by field.
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
@@ -9,9 +9,18 @@ use wasm_bindgen::prelude::*;
 #[derive(Default)]
 pub struct Library(scriptura::Library);
 
-/// What a voice says of passages, utterance by utterance: see `scriptura::Speech`.
+/// What is read aloud of passages, part by part: see `scriptura::Speech`.
 #[wasm_bindgen]
 pub struct Speech(scriptura::Speech);
+
+/// A recording as a list shows it: whose it is, and which chapter it reads.
+#[derive(Serialize)]
+struct RecordingInfo<'a> {
+    id: &'a str,
+    voice: &'a str,
+    book: &'a str,
+    chapter: u32,
+}
 
 /// A book as a list of books shows it: what it is, not what it says.
 #[derive(Serialize)]
@@ -48,6 +57,7 @@ struct SpeechOptions {
     companions: Vec<String>,
     #[serde(default)]
     along: bool,
+    recorded: Option<Vec<String>>,
 }
 
 #[wasm_bindgen]
@@ -68,6 +78,37 @@ impl Library {
 
     pub fn clear(&mut self) {
         self.0.clear();
+    }
+
+    /// Adds the recordings of a JSON array, each replacing one of the same id, and returns their ids.
+    /// An audio that is no URI is taken as relative to `base`, where they came from.
+    #[wasm_bindgen(js_name = addRecordings)]
+    pub fn add_recordings(&mut self, json: &[u8], base: Option<String>) -> Result<Vec<String>, JsError> {
+        Ok(self.0.add_recordings(json, base.as_deref())?)
+    }
+
+    #[wasm_bindgen(js_name = removeRecordings)]
+    pub fn remove_recordings(&mut self, ids: Vec<String>) {
+        self.0.remove_recordings(&ids);
+    }
+
+    #[wasm_bindgen(js_name = clearRecordings)]
+    pub fn clear_recordings(&mut self) {
+        self.0.clear_recordings();
+    }
+
+    /// The recordings as JSON: id, voice, book and chapter of each.
+    #[wasm_bindgen(js_name = recordingsJson)]
+    pub fn recordings_json(&self) -> String {
+        let recordings: Vec<_> = (self.0.recordings().iter())
+            .map(|recording| RecordingInfo {
+                id: &recording.id,
+                voice: &recording.voice,
+                book: &recording.book,
+                chapter: recording.chapter,
+            })
+            .collect();
+        serde_json::to_string(&recordings).expect("recordings serialize")
     }
 
     /// The books as JSON: id, code, title, work, language and direction of each.
@@ -95,23 +136,24 @@ impl Library {
         Ok(serde_json::to_string(&self.0.blocks(&parse_references(references)?, &options))?)
     }
 
-    /// What a voice says of the passages – a JSON array of references – from a word's place, in
-    /// JSON, or from the start if it is empty. `options` is JSON too: companions, and whether each
-    /// verse is spoken in every book read along.
+    /// What is read aloud of the passages – a JSON array of references – from a word's place, in
+    /// JSON, or from the start if it is empty. `options` is JSON too: companions, whether each verse
+    /// is read in every book read along, and the voices whose recordings are played.
     pub fn speech(&self, references: &str, options: &str, from: &str) -> Result<Speech, JsError> {
-        let SpeechOptions { companions, along } = serde_json::from_str(options)?;
+        let SpeechOptions { companions, along, recorded } = serde_json::from_str(options)?;
         let from: Option<scriptura::Place> = if from.is_empty() { None } else { Some(serde_json::from_str(from)?) };
-        Ok(Speech(self.0.speech(&parse_references(references)?, &companions, along, from.as_ref())))
+        let references = parse_references(references)?;
+        Ok(Speech(self.0.speech(&references, &companions, along, from.as_ref(), recorded.as_deref())))
     }
 }
 
 #[wasm_bindgen]
 impl Speech {
-    /// The next utterance, in JSON, at most `limit` UTF-16 code units long, cut at a sentence end;
-    /// none after the last.
+    /// The next part, in JSON – `{"speak": utterance}` or `{"play": take}` – where an utterance is
+    /// at most `limit` UTF-16 code units long, cut at a sentence end; none after the last.
     #[wasm_bindgen(js_name = nextJson)]
     pub fn next_json(&mut self, limit: u32) -> Option<String> {
-        self.0.next(limit as usize).map(|utterance| serde_json::to_string(&utterance).expect("utterances serialize"))
+        self.0.next(limit as usize).map(|part| serde_json::to_string(&part).expect("parts serialize"))
     }
 }
 

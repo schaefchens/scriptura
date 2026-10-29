@@ -1,5 +1,6 @@
 import {
   addBooks,
+  addRecordings,
   type BookInfo,
   books,
   type MoveStep,
@@ -37,15 +38,18 @@ export default function App() {
   const [speech, setSpeech] = useState<SpeechChange>({ state: 'stopped' });
   const [speakAlong, setSpeakAlong] = useState(false);
   const [rate, setRate] = useState(1);
+  // Chapters with a recording are played from it, or else read by the device's voices too.
+  const [recited, setRecited] = useState(true);
   const [goTo, setGoTo] = useState('2:1');
   const reader = useRef<ReaderHandle>(null);
 
-  // The books the app bundles, read natively: their text never passes through JS.
+  // The books and recordings the app bundles, read natively: their text never passes through JS.
   useEffect(() => {
     addBooks({ asset: 'books.json' }).then(() => {
       setLibrary(books());
       setBook((current) => current || books()[0]?.id || '');
     });
+    addRecordings({ asset: 'recordings.json' });
   }, []);
 
   const selected = library.find(({ id }) => id === book);
@@ -91,10 +95,12 @@ export default function App() {
           {speech.state === 'speaking' ? button('Pause', () => reader.current?.pause()) : button('Read aloud', () => reader.current?.play())}
           {speech.state !== 'stopped' && button('Stop', () => reader.current?.stop())}
           {button(`${rate}×`, () => setRate(RATES[(RATES.indexOf(rate) + 1) % RATES.length]))}
+          {button('Recordings', () => setRecited(!recited), recited)}
           {speech.state === 'speaking' && speech.following === false && button('Back to the voice', () => reader.current?.follow())}
         </View>
         <Text style={[styles.position, { color: colors.text }]}>
           {position ? `‎${title(position.book)}‎ ${position.chapter}:${position.verse} · word ${position.word + 1}` : 'Tap a word'}
+          {speech.state === 'speaking' && speech.recording ? ` · ${speech.recording}` : ''}
           {speech.firstSound !== undefined && ` · first sound after ${Math.round(speech.firstSound)} ms`}
           {speech.unvoiced?.length ? ` · no voice for ${speech.unvoiced.join(', ')}` : ''}
         </Text>
@@ -112,13 +118,15 @@ export default function App() {
           parallel={parallel}
           speakAlong={speakAlong}
           speechRate={rate}
+          recordedVoices={recited ? undefined : []}
           onWordChange={setPosition}
           onSpeechChange={onSpeechChange}
         />
         <Text style={[styles.sources, { color: colors.secondary }]}>
           World English Bible, Luther 1912 and Smith & Van Dyck, public domain; the Westminster Leningrad Codex from the Open
           Scriptures Hebrew Bible; the SBLGNT, © 2010 Society of Biblical Literature and Logos Bible Software, CC BY 4.0; the Quran
-          from Tanzil (tanzil.net, CC BY 3.0) with quran-tajweed's rules (CC BY 4.0).
+          from Tanzil (tanzil.net, CC BY 3.0) with quran-tajweed's rules (CC BY 4.0). Recited by Mishary Rashid Alafasy, from EveryAyah
+          (everyayah.com); its words timed by quran-align, © 2016 Collin Fair, CC BY 4.0.
         </Text>
       </SafeAreaView>
     </SafeAreaProvider>

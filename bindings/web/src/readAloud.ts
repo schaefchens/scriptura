@@ -1,6 +1,7 @@
 import type { Passage, SpeechChange, Voice, WordPosition } from '@schaefchens/scriptura';
 
-import type { Library, Speech, Utterance } from './library';
+import type { Library, Speech, Take, Utterance } from './library';
+import { PlayRecording } from './playRecording';
 
 /** The first utterance's length, and the longest, in UTF-16 code units: Chromium takes up to 32,767. */
 const FIRST_LENGTH = 200;
@@ -21,12 +22,13 @@ const promptLengths = new Map<string, number>();
 type Queued = { spoken: SpeechSynthesisUtterance; utterance: Utterance; sounded: boolean };
 
 /**
- * Reads passages aloud with the browser's voices, a voice for each language: utterances from the
- * core, one after the other. The first is short, so the voice starts at once; each after it twice as
- * long as the one before, so few sentences are cut apart – as long as the voice starts them at once.
- * Each is given as the one before it sounds, so the voice can prepare it. It tells the reader the
- * word the voice comes to, as the browser reports it. Only voices on the device speak: a network voice would send the text away. Browsers
- * don't pause reliably, so a pause stops, and play goes on from the word the reader is at.
+ * Reads passages aloud: chapters with recordings from them, the rest with the browser's voices, a voice for each language. It takes
+ * the parts from the core one after the other: a take of a recording plays once the voice has said what it was given. The voice's
+ * utterances: the first is short, so the voice starts at once; each after it twice as long as the one before, so few sentences are
+ * cut apart – as long as the voice starts them at once. Each is given as the one before it sounds, so the voice can prepare it. It
+ * tells the reader the word the voice comes to, as the browser reports it, or a recording's timings have it. Only voices on the
+ * device speak: a network voice would send the text away. Browsers don't pause voices reliably, so a pause stops them, and play goes
+ * on from the word the reader is at; a recording pauses in place.
  */
 export class ReadAloud {
   state: SpeechChange['state'] = 'stopped';
@@ -35,6 +37,12 @@ export class ReadAloud {
   /** How fast the voices read, as a multiple of their own rate: from 0.5 to 2. */
   rate = 1;
   private speech: Speech | undefined;
+  private recording: PlayRecording;
+  /** The take of a recording that plays, or that waits for the voice to say what it was given. */
+  private take: Take | undefined;
+  private takeWaits = false;
+  /** Where it paused in a take: play goes on there, from that word. */
+  private pausedAt: WordPosition | undefined;
   /** The utterances given to the browser and not yet done, as the core made them. */
   private queued: Queued[] = [];
   private started: number | undefined;
@@ -47,29 +55,59 @@ export class ReadAloud {
   private starts = 0;
 
   constructor(
-    private onWord: (utterance: Utterance, word: Utterance['words'][number]) => void,
+    private onWord: (part: { passage: number; book: string }, word: Utterance['words'][number] | Take['words'][number]) => void,
     private onChange: (change: SpeechChange) => void,
-  ) {}
+  ) {
+    this.recording = new PlayRecording(
+      (take, word) => this.onWord(take, word),
+      (time) => this.sounded(time),
+      () => this.takeEnded(),
+      () => this.stop(),
+    );
+  }
 
-  /** Reads the passages from the word at `from`, or from their start. */
-  play(library: Library, passages: Passage[], companions: string[], along: boolean, from?: WordPosition) {
+  /**
+   * Reads the passages from the word at `from`, or from their start, playing chapters from recordings of the `recorded` voices –
+   * with none named, of any. A recording paused at that word goes on.
+   */
+  play(library: Library, passages: Passage[], companions: string[], along: boolean, from?: WordPosition, recorded?: string[]) {
+    if (this.state === 'paused' && this.take && samePlace(from, this.pausedAt)) {
+      this.started = performance.now();
+      this.recording.rate = this.rate;
+      this.recording.resume();
+      return this.change('speaking');
+    }
     this.silence();
     const start = ++this.starts;
-    this.speech = library.speech(passages, { companions, along }, from);
+    this.speech = library.speech(passages, { companions, along, recorded }, from);
     this.started = performance.now();
     this.change('speaking');
     loadVoices().then(() => {
       if (start !== this.starts) return;
       this.enqueue();
       this.enqueue();
-      if (this.queued.length === 0) this.stop();
+      if (this.queued.length === 0 && !this.take) this.stop();
     });
   }
 
-  pause() {
+  /** Pauses a recording at the word `at` which the reader is; stops a voice, to go on from there. */
+  pause(at?: WordPosition) {
     if (this.state !== 'speaking') return;
+    if (this.take && !this.takeWaits) {
+      this.recording.pause();
+      this.pausedAt = at;
+      return this.change('paused');
+    }
     this.silence();
     this.change('paused');
+  }
+
+  /** A new rate: a recording takes it at once; a voice only with what it is given next, so it is false for one. */
+  setRate(rate: number) {
+    this.rate = rate;
+    if (!this.take || this.takeWaits) return false;
+    this.recording.setRate(rate);
+    return true;
   }
 
   /** Stops; the languages skipped for want of a voice go with the news. */
@@ -85,6 +123,10 @@ export class ReadAloud {
     this.starts++;
     this.speech?.free();
     this.speech = undefined;
+    this.recording.stop();
+    this.take = undefined;
+    this.takeWaits = false;
+    this.pausedAt = undefined;
     this.queued = [];
     this.started = undefined;
     this.unvoiced.clear();
@@ -94,14 +136,25 @@ export class ReadAloud {
     this.state = 'stopped';
   }
 
+  /** Tells what changed; while it reads, with whose recording plays. */
   private change(state: SpeechChange['state'], details: Omit<SpeechChange, 'state'> = {}) {
     this.state = state;
-    this.onChange({ ...details, state });
+    const recording = this.take && !this.takeWaits ? this.take.voice : '';
+    this.onChange(state === 'speaking' ? { recording, ...details, state } : { ...details, state });
   }
 
-  /** Gives the browser the next utterance with a voice. */
+  /** Gives the browser the next utterance with a voice – or the next take to play, once the voice has said what it was given. */
   private enqueue() {
-    for (let utterance = this.speech?.next(this.nextLength); utterance; utterance = this.speech?.next(this.nextLength)) {
+    if (this.take) return;
+    for (let part = this.speech?.next(this.nextLength); part; part = this.speech?.next(this.nextLength)) {
+      if ('play' in part) {
+        this.take = part.play;
+        this.takeWaits = this.queued.length > 0;
+        if (this.takeWaits) this.recording.prepare(part.play);
+        else this.playTake();
+        return;
+      }
+      const utterance = part.speak;
       const voice = voiceFor(utterance.language, this.voices);
       if (!voice) {
         if (!this.unvoiced.has(utterance.language)) {
@@ -163,7 +216,7 @@ export class ReadAloud {
   /** The voice sounded at `time`: reported once after a start. */
   private sounded(time: number) {
     if (this.started === undefined) return;
-    this.change('speaking', { firstSound: time - this.started });
+    this.change('speaking', { firstSound: Math.max(time - this.started, 0) });
     this.started = undefined;
   }
 
@@ -171,14 +224,32 @@ export class ReadAloud {
     if (!this.queued.includes(entry)) return;
     this.queued = this.queued.filter((other) => other !== entry);
     this.ended = undefined;
+    if (this.queued.length > 0) return;
+    if (this.take) return this.playTake();
     // For a voice that reports no words, the next is given now.
-    if (this.queued.length === 0) {
-      this.enqueue();
-      this.enqueue();
-    }
-    if (this.queued.length === 0) this.stop();
+    this.enqueue();
+    this.enqueue();
+    if (this.queued.length === 0 && !this.take) this.stop();
+  }
+
+  private playTake() {
+    this.takeWaits = false;
+    this.recording.rate = this.rate;
+    this.recording.play(this.take!);
+    this.change('speaking');
+  }
+
+  /** A take played to its end: what follows it is read. */
+  private takeEnded() {
+    this.take = undefined;
+    this.enqueue();
+    this.enqueue();
+    if (this.queued.length === 0 && !this.take) this.stop();
   }
 }
+
+const samePlace = (a?: WordPosition, b?: WordPosition) =>
+  a !== undefined && b !== undefined && a.passage === b.passage && a.book === b.book && a.chapter === b.chapter && a.verse === b.verse && a.word === b.word;
 
 /** The browser's voices, once it has them: some browsers load them only when first asked. */
 function loadVoices(): Promise<SpeechSynthesisVoice[]> {

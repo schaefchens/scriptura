@@ -36,9 +36,9 @@ import java.util.WeakHashMap
  * The reader: passages as paragraphs, each with its own direction, language and font, laid out as
  * one spanned string, in pages or one endless scroll. It fetches them from the core itself, from the
  * books the host added, so their text never passes through JS. A word can be tapped, reached word by
- * word or jumped to; JS learns only where the current word stands, never its text. It reads aloud
- * with the device's voices, from the word it is at, and marks each word as it is said, keeping it in
- * sight – unless it was scrolled away from it by hand.
+ * word or jumped to; JS learns only where the current word stands, never its text. It reads aloud –
+ * chapters with recordings from them, the rest with the device's voices – from the word it is at, and
+ * marks each word as it is said, keeping it in sight – unless it was scrolled away from it by hand.
  */
 class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
   // Without it, React Native ignores the pages' requests for a new layout.
@@ -68,6 +68,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   /** How fast the voices read, as a multiple of their own rate: from 0.5 to 2. */
   var speechRate = 1.0
 
+  /** The voices whose recordings are played, the first that has one for a chapter; with none named, any. */
+  var recordedVoices: List<String>? = null
+
   private val onWordChange by EventDispatcher()
   private val onLaidOut by EventDispatcher()
   private val onSpeechChange by EventDispatcher()
@@ -94,8 +97,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   /** Whether the word the voice comes to is brought into sight: not after a scroll by hand away from it, until it is in sight again. */
   private var following = true
 
-  /** What is read aloud along with the passages, and how fast. */
-  private var spokenAs = Triple(emptyList<String>(), false, 1.0)
+  /** What is read aloud along with the passages, and from which recordings; and how fast. */
+  private var readAs = Triple(emptyList<String>(), false, null as List<String>?)
+  private var rateAs = 1.0
 
   private val pages = PagedText(context)
 
@@ -109,7 +113,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
         onLaidOut(mapOf("pages" to count, "milliseconds" to firstShown, "all" to millisecondsSinceRender()))
       }
     }
-    readAloud.onWord = { utterance, word -> reached(WordPlace(utterance.passage.toInt(), utterance.book, word.chapter.toInt(), word.verse.toInt(), word.index.toInt())) }
+    readAloud.onWord = ::reached
     readAloud.onChange = ::speechChanged
     pages.onScrollByHand = ::scrolledByHand
     addView(pages, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -212,11 +216,15 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
       current = it
       pages.highlight(words[it].start, words[it].end)
     }
-    // Other books read along change what is said, and a new rate how: the voice goes on from the word it is at.
-    if (Triple(companions, speakAlong, speechRate) != spokenAs && readAloud.state != "stopped") {
+    // Other books read along or other recordings change what is read, and a new rate how: the voice goes on from the word it is at. A
+    // recording takes a new rate as it plays.
+    val read = Triple(companions, speakAlong, recordedVoices)
+    val changed = read != readAs || (speechRate != rateAs && !readAloud.changeRate(speechRate))
+    if (changed && readAloud.state != "stopped") {
       if (readAloud.state == "speaking") play() else readAloud.stop()
     }
-    spokenAs = Triple(companions, speakAlong, speechRate)
+    readAs = read
+    rateAs = speechRate
   }
 
   private val baseTypeface get() = if (font == "serif") Typeface.SERIF else Typeface.DEFAULT
@@ -349,12 +357,12 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     return true
   }
 
-  /** Reads aloud from the word marked – or, with none, the first in sight – on to the end. */
+  /** Reads aloud from the word marked – or, with none, the first in sight – on to the end; a recording paused at that word goes on. */
   fun play() {
     readAloud.voices = voices
     readAloud.rate = speechRate
     following = true
-    readAloud.play(shownReferences, companions, speakAlong, readingStart()?.let(::position))
+    readAloud.play(shownReferences, companions, speakAlong, readingStart()?.let(::position), recordedVoices)
   }
 
   /** Brings the word the voice is at – or, not reading aloud, the word marked – into sight, and keeps the words the voice comes to there. */
@@ -368,7 +376,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     pages.turn(forward)
   }
 
-  fun pause() = readAloud.pause()
+  fun pause() = readAloud.pause(current?.let { position(words[it].place) })
 
   fun stop() = readAloud.stop()
 
@@ -584,11 +592,14 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     /** The readers in sight, which show what the library holds as the host adds or removes books. */
     private val shown = java.util.Collections.newSetFromMap(WeakHashMap<ReaderView, Boolean>())
 
-    /** On the main thread, after the host added or removed books: what is still to be said goes with them. */
+    /** On the main thread, after the host added or removed books: what is still to be read goes with them. */
     fun booksChanged() = shown.toList().forEach {
       it.readAloud.stop()
       it.render()
     }
+
+    /** On the main thread, after the host added or removed recordings: what is still to be read goes with them. */
+    fun recordingsChanged() = shown.toList().forEach { it.readAloud.stop() }
 
     private const val LEFT_TO_RIGHT_MARK = "\u200E"
     private const val RIGHT_TO_LEFT_MARK = "\u200F"

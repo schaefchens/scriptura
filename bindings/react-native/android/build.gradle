@@ -23,4 +23,6 @@ dependencies {
   implementation "net.java.dev.jna:jna:5.17.0@aar"
   // Screen readers find the headings and verses the pages draw as virtual views.
   implementation "androidx.customview:customview:1.1.0"
+  // Recordings play with Media3's player: it seeks to the sample, and keeps the voice's pitch at every rate.
+  implementation "androidx.media3:media3-exoplayer:1.11.1"
 }

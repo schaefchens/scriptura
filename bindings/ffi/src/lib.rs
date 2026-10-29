@@ -1,6 +1,7 @@
-//! Scriptura for Swift and Kotlin, through UniFFI: one library of books per process, which the host
-//! fills and every reader view reads from. Only native code binds it, so a passage's text never has
-//! to pass through JavaScript: React Native's module gives JS the books' names, not their text.
+//! Scriptura for Swift and Kotlin, through UniFFI: one library of books and recordings per process,
+//! which the host fills and every reader view reads from. Only native code binds it, so a passage's
+//! text never has to pass through JavaScript: React Native's module gives JS the books' names, not
+//! their text.
 
 use std::sync::{LazyLock, Mutex, RwLock};
 
@@ -17,6 +18,15 @@ pub enum BooksError {
     Invalid(String),
 }
 
+/// Recordings that couldn't be read, with why: they aren't a JSON array of recordings, or count words
+/// otherwise than the core does.
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum RecordingsError {
+    #[error("{0}")]
+    Invalid(String),
+}
+
 /// A book as JS may see it: what it is, not what it says. Editions of the same book share its code.
 #[derive(uniffi::Record)]
 pub struct BookInfo {
@@ -26,6 +36,15 @@ pub struct BookInfo {
     pub work: String,
     pub language: String,
     pub direction: String,
+}
+
+/// A recording as JS may see it: whose it is, and which chapter it reads.
+#[derive(uniffi::Record)]
+pub struct RecordingInfo {
+    pub id: String,
+    pub voice: String,
+    pub book: String,
+    pub chapter: u32,
 }
 
 /// A whole book, one chapter of it, or a verse range in that chapter.
@@ -99,17 +118,52 @@ pub struct Utterance {
     pub words: Vec<Word>,
 }
 
-/// What a voice says of passages, utterance by utterance: see `scriptura::Speech`. It holds what
-/// is still to be said, so a reader drops it as the host removes books.
+/// Verses played from a recording: see `scriptura::Take`.
+#[derive(uniffi::Record)]
+pub struct Take {
+    pub passage: u32,
+    pub book: String,
+    pub voice: String,
+    pub audio: String,
+    pub start: u32,
+    pub end: Option<u32>,
+    pub words: Vec<TimedWord>,
+}
+
+#[derive(uniffi::Record)]
+pub struct TimedWord {
+    pub chapter: u32,
+    pub verse: u32,
+    pub index: u32,
+    pub start: u32,
+}
+
+/// What is read aloud next: an utterance for the device's voice, or a take from a recording. Not Part,
+/// which Swift's reader has.
+#[derive(uniffi::Enum)]
+pub enum SpeechPart {
+    Speak { utterance: Utterance },
+    Play { take: Take },
+}
+
+/// What is read aloud of passages, part by part: see `scriptura::Speech`. It holds what is still to
+/// be read, so a reader drops it as the host removes books or recordings.
 #[derive(uniffi::Object)]
 pub struct Speech(Mutex<scriptura::Speech>);
 
 #[uniffi::export]
 impl Speech {
     /// The passages read along with `companions` – only their own books, or `along`, each verse in
-    /// every book – from the word at `from`, or else from the start.
+    /// every book – from the word at `from`, or else from the start; chapters from recordings of
+    /// the `recorded` voices, or with none named, of any.
     #[uniffi::constructor]
-    pub fn new(references: Vec<Reference>, companions: Vec<String>, along: bool, from: Option<WordPosition>) -> Self {
+    pub fn new(
+        references: Vec<Reference>,
+        companions: Vec<String>,
+        along: bool,
+        from: Option<WordPosition>,
+        recorded: Option<Vec<String>>,
+    ) -> Self {
         let from = from.map(|WordPosition { passage, book, chapter, verse, word }| scriptura::Place {
             passage,
             book,
@@ -117,16 +171,32 @@ impl Speech {
             verse,
             word,
         });
-        let speech = LIBRARY.read().unwrap().speech(&core_references(references), &companions, along, from.as_ref());
+        let library = LIBRARY.read().unwrap();
+        let speech =
+            library.speech(&core_references(references), &companions, along, from.as_ref(), recorded.as_deref());
         Speech(Mutex::new(speech))
     }
 
-    /// The next utterance, at most `limit` UTF-16 code units long, cut at a sentence end; none after
-    /// the last.
-    pub fn next(&self, limit: u32) -> Option<Utterance> {
-        let utterance = self.0.lock().unwrap().next(limit as usize)?;
-        let scriptura::Utterance { passage, book, language, heading, text, words } = utterance;
-        Some(Utterance { passage, book, language, heading, text, words: words.into_iter().map(Word::from).collect() })
+    /// The next part: a take, or an utterance at most `limit` UTF-16 code units long, cut at a
+    /// sentence end; none after the last.
+    pub fn next(&self, limit: u32) -> Option<SpeechPart> {
+        Some(match self.0.lock().unwrap().next(limit as usize)? {
+            scriptura::Part::Speak(scriptura::Utterance { passage, book, language, heading, text, words }) => {
+                let words = words.into_iter().map(Word::from).collect();
+                SpeechPart::Speak { utterance: Utterance { passage, book, language, heading, text, words } }
+            }
+            scriptura::Part::Play(scriptura::Take { passage, book, voice, audio, start, end, words }) => {
+                let words = (words.into_iter())
+                    .map(|scriptura::TimedWord { chapter, verse, index, start }| TimedWord {
+                        chapter,
+                        verse,
+                        index,
+                        start,
+                    })
+                    .collect();
+                SpeechPart::Play { take: Take { passage, book, voice, audio, start, end, words } }
+            }
+        })
     }
 }
 
@@ -158,6 +228,36 @@ pub fn books() -> Vec<BookInfo> {
         direction: book.direction.clone(),
     };
     library.books().iter().map(info).collect()
+}
+
+/// Adds the recordings of a JSON array, each replacing one of the same id, and returns their ids. An
+/// audio that is no URI is taken as relative to `base`, where they came from.
+#[uniffi::export]
+pub fn add_recordings(json: Vec<u8>, base: Option<String>) -> Result<Vec<String>, RecordingsError> {
+    let mut library = LIBRARY.write().unwrap();
+    library.add_recordings(&json, base.as_deref()).map_err(|error| RecordingsError::Invalid(error.to_string()))
+}
+
+#[uniffi::export]
+pub fn remove_recordings(ids: Vec<String>) {
+    LIBRARY.write().unwrap().remove_recordings(&ids);
+}
+
+#[uniffi::export]
+pub fn clear_recordings() {
+    LIBRARY.write().unwrap().clear_recordings();
+}
+
+#[uniffi::export]
+pub fn recordings() -> Vec<RecordingInfo> {
+    let library = LIBRARY.read().unwrap();
+    let info = |recording: &scriptura::Recording| RecordingInfo {
+        id: recording.id.clone(),
+        voice: recording.voice.clone(),
+        book: recording.book.clone(),
+        chapter: recording.chapter,
+    };
+    library.recordings().iter().map(info).collect()
 }
 
 /// The passages as paragraphs, read along with `companions`: see `scriptura::Library::blocks`.

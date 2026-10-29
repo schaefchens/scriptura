@@ -289,31 +289,13 @@ fn paragraph<'a>(
             let separator = if kind == "verse" { '\t' } else { '\u{a0}' };
             text.push(&format!("{label}{separator}"), Some(NUMBER));
         }
-        // A word is a run of non-space characters in the verse's text, which may span tajweed runs,
-        // with a letter or a digit in it: a mark standing alone, such as the Hebrew paseq, is none.
-        let mut index = 0;
-        let mut word: Option<(u32, bool)> = None;
-        let mut end_word = |word: Option<(u32, bool)>, end: u32, words: &mut Vec<Word>| {
-            if let Some((start, true)) = word {
-                words.push(Word { chapter, verse: verse.number, index, start, end });
-                index += 1;
-            }
-        };
+        let offset = text.length;
+        for (index, (start, end)) in (0..).zip(words_of(verse)) {
+            text.words.push(Word { chapter, verse: verse.number, index, start: offset + start, end: offset + end });
+        }
         for (run, rule) in &verse.runs {
-            let mut offset = text.length;
-            let read = rule.as_deref() != Some(KETIV);
-            for char in run.chars() {
-                if char.is_whitespace() || !read {
-                    end_word(word.take(), offset, &mut text.words);
-                } else {
-                    let (start, lettered) = word.unwrap_or((offset, false));
-                    word = Some((start, lettered || char.is_alphanumeric()));
-                }
-                offset += char.len_utf16() as u32;
-            }
             text.push(run, rule.as_deref());
         }
-        end_word(word, text.length, &mut text.words);
         if book.verse_numbers == VerseNumbers::End && !label.is_empty() {
             text.push(&format!("\u{a0}{}{label}", book.verse_number_prefix), Some(NUMBER));
         }
@@ -334,6 +316,38 @@ fn paragraph<'a>(
         verses: text.verses,
         words: text.words,
     }
+}
+
+/// What a word is, in the version recordings name, as their timings count words so: see
+/// [`words_of`]. Whatever changes what a word is raises it.
+pub const WORD_DEFINITION: u32 = 1;
+
+/// A verse's words, each as its range in the verse's text, in UTF-16 code units. A word is a run of
+/// non-space characters, which may span tajweed runs, with a letter or a digit in it: a mark
+/// standing alone, such as the Hebrew paseq, is none, nor is a word as written where another is read.
+pub(crate) fn words_of(verse: &Verse) -> Vec<(u32, u32)> {
+    let mut words = Vec::new();
+    let mut word: Option<(u32, bool)> = None;
+    let mut end_word = |word: Option<(u32, bool)>, end: u32| {
+        if let Some((start, true)) = word {
+            words.push((start, end));
+        }
+    };
+    let mut offset = 0;
+    for (run, rule) in &verse.runs {
+        let read = rule.as_deref() != Some(KETIV);
+        for char in run.chars() {
+            if char.is_whitespace() || !read {
+                end_word(word.take(), offset);
+            } else {
+                let (start, lettered) = word.unwrap_or((offset, false));
+                word = Some((start, lettered || char.is_alphanumeric()));
+            }
+            offset += char.len_utf16() as u32;
+        }
+    }
+    end_word(word, offset);
+    words
 }
 
 /// A paragraph's text as it grows: its segments, verses and words, and its length in UTF-16 units.

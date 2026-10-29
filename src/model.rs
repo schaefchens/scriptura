@@ -1,6 +1,6 @@
-//! The books a host gives the library, as JSON: an array of books in the shape below, with
-//! camelCase names. The import tool, `bindings/js/import.mjs`, writes them from USFM, OSIS and
-//! Tanzil's text.
+//! The books a host gives the library, and the recordings of their chapters, as JSON: arrays in
+//! the shapes below, with camelCase names. The import tool, `bindings/js/import.mjs`, writes books
+//! from USFM, OSIS and Tanzil's text, and recordings from recitations whose words were timed.
 
 use serde::Deserialize;
 
@@ -63,4 +63,35 @@ pub struct Verse {
     /// The text in runs, each with its role, if it has one: "ketiv" for a word as written where
     /// another is read, or a tajweed rule. The reader colors a run by its role.
     pub runs: Vec<(String, Option<String>)>,
+}
+
+/// A chapter read aloud: its audio, and where each of its verses and their words start in it, in
+/// milliseconds. A word ends where the next starts, and a verse where the next verse does, or with
+/// the audio: there are no end times. What precedes the first verse, such as a heading read or an
+/// opening formula, plays only as the chapter is read from its start.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Recording {
+    /// Unique among the recordings of a library.
+    pub id: String,
+    /// Who reads it, as the host names them: a reciter, a narrator, a voice it was rendered in.
+    pub voice: String,
+    /// The book, by id, and the chapter of it that it reads.
+    pub book: String,
+    pub chapter: u32,
+    /// Where its audio is: a URI, or one relative to where the recordings came from.
+    pub audio: String,
+    /// What a word is to its timings: the version of the core's [`WORD_DEFINITION`](crate::WORD_DEFINITION)
+    /// they count words in.
+    pub word_definition: u32,
+    /// Every verse of the chapter, in order.
+    pub verses: Vec<RecordedVerse>,
+}
+
+/// A verse of a recording: where it starts, and where each of its words does.
+#[derive(Deserialize, Debug, Clone)]
+pub struct RecordedVerse {
+    pub number: u32,
+    pub start: u32,
+    pub words: Vec<u32>,
 }

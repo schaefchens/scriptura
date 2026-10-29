@@ -8,7 +8,7 @@
     "android": { "package": "de.schaefchens.scriptura.example" },
     "plugins": [
       ["expo-font", { "fonts": ["./fonts"] }],
-      ["@schaefchens/scriptura-react-native", { "books": ["./texts/books.json"] }]
+      ["@schaefchens/scriptura-react-native", { "books": ["./texts/books.json"], "recordings": ["./recordings"] }]
     ]
   }
 }

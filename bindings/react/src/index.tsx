@@ -21,7 +21,7 @@ export type ReaderHandle = {
   follow(): void;
   /** Turns to the next or previous page, or a screen down or up. */
   turn(forward: boolean): void;
-  /** Shows what the library now holds, after books were added or removed. */
+  /** Shows what the library now holds, after books or recordings were added or removed. */
   refresh(): void;
 };
 

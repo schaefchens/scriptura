@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Imports scripture as the books Scriptura reads – a JSON array in the shape of the core's
-// src/model.rs – and fetches the fonts the reader sets them in:
+// src/model.rs – and recordings of their chapters, and fetches the fonts the reader sets them in:
 //
 //   scriptura-import <config.json>
 //
@@ -11,7 +11,9 @@
 //     "fonts": "fonts",
 //     "bibles": [{ "usfm": "<zip from eBible.org>", "work": "World English Bible", "language": "en",
 //                  "direction": "ltr", "books": [{ "id": "jonah", "code": "JON" }] }],
-//     "quran": { "surahs": [1, 112] }
+//     "quran": { "surahs": [1, 112] },
+//     "recordings": { "folder": "recordings", "quran": [{ "everyayah": "Alafasy_128kbps",
+//                     "voice": "Mishary Rashid Alafasy", "surahs": [1, 112] }] }
 //   }
 //
 // Bibles come as USFM in a zip, as eBible.org has them, or as OSIS (`"osis": "<base URL>"`, a book
@@ -22,9 +24,17 @@
 // `extraFonts` ({ family, url, file? }), named after their PostScript names, so one family name
 // works on iOS, Android and the web.
 //
-// Texts and fonts are licensed one by one: check each before passing it on, with the notice it
-// asks for – the SBLGNT's and Tanzil's do.
-import { execFileSync } from 'node:child_process';
+// Recordings of surahs come from EveryAyah's recitations, a file per verse, whose words
+// quran-align timed: each surah's verses are joined into one file, in `format` (m4a, opus or mp3),
+// and its timings written to recordings.json in `folder`. Some files changed since they were
+// timed: a verse whose timings outlast its audio has its words spread over it by their letters. A surah but the first and the ninth opens
+// with the basmala, as its verse 0, from the recitation of Al-Fatiha's first verse. Joining and
+// encoding needs ffmpeg.
+//
+// Texts, recordings and fonts are licensed one by one: check each before passing it on, with the
+// notice it asks for – the SBLGNT's, Tanzil's and quran-align's do. No recitation is known to be
+// under an open license.
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -37,6 +47,18 @@ const TANZIL_TEXT = 'https://github.com/cpfair/quran-tajweed/files/7281388/quran
 const TAJWEED_RULES =
   'https://raw.githubusercontent.com/cpfair/quran-tajweed/master/output/tajweed.hafs.uthmani-pause-sajdah.json';
 const ARABIC_INDIC = 0x660;
+// Word timings for recitations on EveryAyah, CC BY 4.0, a file per recitation: <folder>.json.
+const QURAN_ALIGN = 'https://github.com/cpfair/quran-align/releases/download/release-2016-11-24/quran-align-data-2016-11-24.zip';
+const EVERYAYAH = 'https://everyayah.com/data/';
+// What a word is to the core's src/reader.rs, in the version recordings name.
+const WORD_DEFINITION = 1;
+// How recordings are encoded, by format: mono, as recitations are, at rates that keep them clear.
+const ENCODINGS = {
+  m4a: ['-c:a', 'aac', '-b:a', '64k', '-movflags', '+faststart'],
+  opus: ['-c:a', 'libopus', '-b:a', '40k'],
+  mp3: ['-c:a', 'libmp3lame', '-b:a', '64k'],
+};
+const SAMPLE_RATE = 44100;
 
 const configPath = process.argv[2];
 if (!configPath) {
@@ -206,20 +228,29 @@ for (const { usfm, osis, work, language, direction, digits, books: wanted } of c
   }
 }
 
-if (config.quran) {
-  const font = scriptFonts.find(({ quran }) => quran);
-  const metadata = await (await download(TANZIL_METADATA)).text();
-  // Tanzil's metadata lists each surah as [start, verses, order, rukus, name, transliteration, …].
-  const start = metadata.indexOf('QuranData.Sura = [');
-  const titles = [...metadata.slice(start, metadata.indexOf('];', start)).matchAll(/\[\d+, \d+, \d+, \d+, '([^']*)'/g)].map(([, title]) => title);
-  // One verse per line, as surah|verse|text, below the notice.
-  const quran = new Map(
+let tanzil;
+/** Tanzil's text, once: one verse per line, as surah|verse|text, below the notice. */
+async function tanzilText() {
+  tanzil ??= new Map(
     (await (await download(TANZIL_TEXT)).text())
       .split('\n')
       .filter((line) => /^\d/.test(line))
       .map((line) => line.split('|'))
       .map(([surah, verse, text]) => [`${surah}:${verse}`, text.trim()]),
   );
+  return tanzil;
+}
+
+/** Whether a surah opens with the basmala as a verse of its own: Tanzil's text opens its first verse with it. */
+const opensWithBasmala = (surah) => surah !== 1 && surah !== 9;
+
+if (config.quran) {
+  const font = scriptFonts.find(({ quran }) => quran);
+  const metadata = await (await download(TANZIL_METADATA)).text();
+  // Tanzil's metadata lists each surah as [start, verses, order, rukus, name, transliteration, …].
+  const start = metadata.indexOf('QuranData.Sura = [');
+  const titles = [...metadata.slice(start, metadata.indexOf('];', start)).matchAll(/\[\d+, \d+, \d+, \d+, '([^']*)'/g)].map(([, title]) => title);
+  const quran = await tanzilText();
   const rules = new Map((await (await download(TAJWEED_RULES)).json()).map(({ surah, ayah, annotations }) => [`${surah}:${ayah}`, annotations]));
   for (const surah of config.quran.surahs) {
     const verses = [];
@@ -229,7 +260,7 @@ if (config.quran) {
       // Tanzil's text opens the first verse of every surah but Al-Fatiha (whose first verse it is)
       // and At-Tawba with the basmala's four words, which the mushaf doesn't count. They become
       // verse 0, so verse 1 and its words match the mushaf.
-      if (verse === 1 && surah !== 1 && surah !== 9) {
+      if (verse === 1 && opensWithBasmala(surah)) {
         const basmala = letters.join('').split(' ').slice(0, 4).join(' ');
         const length = Array.from(basmala).length + 1;
         verses.push({ number: 0, label: '', runs: tajweedRuns(basmala, annotations.filter(({ end }) => end <= length)) });
@@ -255,7 +286,149 @@ if (config.quran) {
   }
 }
 
-const out = relative(config.books);
-await mkdir(dirname(out), { recursive: true });
-await writeFile(out, JSON.stringify(books));
-console.log(`Imported ${books.length} books into ${out}${fontCount ? ` and ${fontCount} fonts into ${relative(config.fonts)}` : ''}.`);
+if (config.books) {
+  const out = relative(config.books);
+  await mkdir(dirname(out), { recursive: true });
+  await writeFile(out, JSON.stringify(books));
+  console.log(`Imported ${books.length} books into ${out}${fontCount ? ` and ${fontCount} fonts into ${relative(config.fonts)}` : ''}.`);
+}
+
+/** A verse's words, as the core counts them: runs of non-space characters with a letter or a digit. */
+const wordsOf = (text) => text.split(/\s+/).filter((word) => /[\p{L}\p{N}]/u.test(word));
+
+/** How many letters a word has, its marks aside: what a stretch of time is shared out by. */
+const lettersOf = (word) => word.match(/\p{L}/gu)?.length ?? 1;
+
+/**
+ * Where each word of a verse starts in its recitation, in milliseconds, from quran-align's
+ * segments: [first word, the word after the last, start, end], words counted as Tanzil's text
+ * split at spaces. A segment of several words is shared out among them by their letters, and a word
+ * no segment times, or one timed before the word ahead of it, gets its share of the time between the
+ * words timed around it. After the disjoined letters some verses open with, the segments count a
+ * word or two too many: those counts are taken back.
+ */
+function wordStarts(segments, words, duration) {
+  const count = words.length;
+  const over = Math.max(...segments.map(([, after]) => after), count) - count;
+  if (over > 0 && !segments.some(([first]) => first >= 1 && first < 1 + over)) {
+    segments = segments.map(([first, after, start, end]) => (first > 0 ? [first - over, after - over, start, end] : [first, after, start, end]));
+  }
+  const starts = new Array(count).fill(undefined);
+  for (const [first, after, start, end] of segments) {
+    const timed = words.slice(first, Math.min(after, count));
+    const letters = timed.reduce((sum, word) => sum + lettersOf(word), 0);
+    let time = start;
+    timed.forEach((word, index) => {
+      starts[first + index] ??= Math.round(time);
+      time += ((end - start) * lettersOf(word)) / letters;
+    });
+  }
+  let latest = 0;
+  starts.forEach((start, index) => {
+    if (start === undefined || start < latest) starts[index] = undefined;
+    else latest = start;
+  });
+  // The words between two timed ones – or the verse's start and end – share the time between them.
+  let before = -1;
+  for (let index = 0; index <= count; index++) {
+    if (index < count && starts[index] === undefined) continue;
+    if (index - before > 1) {
+      const first = Math.max(before, 0);
+      const from = before < 0 ? 0 : starts[before];
+      const to = index < count ? starts[index] : duration;
+      const between = words.slice(first, index);
+      const letters = between.reduce((sum, word) => sum + lettersOf(word), 0);
+      let time = from;
+      between.forEach((word, offset) => {
+        starts[first + offset] ??= Math.round(time);
+        time += ((to - from) * lettersOf(word)) / letters;
+      });
+    }
+    before = index;
+  }
+  return starts;
+}
+
+/** A file's audio as 16-bit mono samples, for joining. */
+const samplesOf = (file) => execFileSync('ffmpeg', ['-v', 'error', '-i', file, '-f', 's16le', '-ac', '1', '-ar', String(SAMPLE_RATE), '-'], { maxBuffer: 1 << 30 });
+
+/** Downloads what `urls` point to into `directory`, a few at a time, and returns the files. */
+async function downloadAll(urls, directory) {
+  const files = urls.map((url) => join(directory, url.split('/').at(-1)));
+  let next = 0;
+  const worker = async () => {
+    while (next < urls.length) {
+      const at = next++;
+      await writeFile(files[at], Buffer.from(await (await download(urls[at])).arrayBuffer()));
+    }
+  };
+  await Promise.all(Array.from({ length: 8 }, worker));
+  return files;
+}
+
+/** Joins audio files into one, encoded once, and returns where each starts in it, in milliseconds. */
+async function joinAudio(files, out, format) {
+  const encoder = spawn('ffmpeg', ['-v', 'error', '-y', '-f', 's16le', '-ac', '1', '-ar', String(SAMPLE_RATE), '-i', '-', ...ENCODINGS[format], out], {
+    stdio: ['pipe', 'inherit', 'inherit'],
+  });
+  const done = new Promise((resolve, reject) => encoder.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg failed for ${out}`)))));
+  const starts = [];
+  let samples = 0;
+  for (const file of files) {
+    starts.push((samples * 1000) / SAMPLE_RATE);
+    const audio = samplesOf(file);
+    samples += audio.length / 2;
+    if (!encoder.stdin.write(audio)) await new Promise((resolve) => encoder.stdin.once('drain', resolve));
+  }
+  encoder.stdin.end();
+  await done;
+  return { starts, duration: (samples * 1000) / SAMPLE_RATE };
+}
+
+if (config.recordings) {
+  const folder = relative(config.recordings.folder);
+  const recordingsFile = join(folder, 'recordings.json');
+  const quran = await tanzilText();
+  const timings = await downloadZip(QURAN_ALIGN, 'quran-align.zip');
+  const recordings = [];
+  for (const { everyayah, voice, surahs, format = 'm4a' } of config.recordings.quran ?? []) {
+    const aligned = new Map(
+      JSON.parse(execFileSync('unzip', ['-p', timings, `*${everyayah}.json`], { maxBuffer: 1 << 28 })).map((verse) => [`${verse.surah}:${verse.ayah}`, verse]),
+    );
+    await mkdir(join(folder, everyayah), { recursive: true });
+    for (const surah of surahs) {
+      // The verses as the books have them: the basmala as verse 0, read as Al-Fatiha's first verse.
+      const verses = [];
+      if (opensWithBasmala(surah)) verses.push({ number: 0, key: '1:1', words: wordsOf(quran.get('1:1')) });
+      for (let verse = 1; quran.has(`${surah}:${verse}`); verse++) {
+        const words = wordsOf(quran.get(`${surah}:${verse}`));
+        verses.push({ number: verse, key: `${surah}:${verse}`, words: verse === 1 && opensWithBasmala(surah) ? words.slice(4) : words });
+      }
+      const name = (key) => key.split(':').map((number) => number.padStart(3, '0')).join('');
+      const directory = await mkdtemp(join(downloads, `${everyayah}-${surah}-`));
+      const files = await downloadAll(verses.map(({ key }) => `${EVERYAYAH}${everyayah}/${name(key)}.mp3`), directory);
+      const audio = `${everyayah}/quran-${surah}.${format}`;
+      const { starts, duration } = await joinAudio(files, join(folder, audio), format);
+      recordings.push({
+        id: `${everyayah}/quran-${surah}`,
+        voice,
+        book: `quran-${surah}`,
+        chapter: surah,
+        audio,
+        wordDefinition: WORD_DEFINITION,
+        verses: verses.map(({ number, key, words }, index) => {
+          const start = Math.round(starts[index]);
+          const length = (starts[index + 1] ?? duration) - starts[index];
+          let { segments } = aligned.get(key);
+          if (segments.some(([, , , end]) => end > length + 100)) {
+            console.warn(`${everyayah} ${surah}:${number}: its timings outlast its audio, so its words are spread over it by their letters.`);
+            segments = [];
+          }
+          return { number, start, words: wordStarts(segments, words, length).map((time) => start + time) };
+        }),
+      });
+    }
+  }
+  await writeFile(recordingsFile, JSON.stringify(recordings));
+  console.log(`Imported ${recordings.length} recordings into ${folder}.`);
+}

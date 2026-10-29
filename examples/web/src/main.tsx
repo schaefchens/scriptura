@@ -14,10 +14,11 @@ import {
 import { StrictMode, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
-// The books and fonts the import tool fetched: npm run texts.
+// The books, recordings and fonts the import tool fetched: npm run texts.
 await loadScriptura();
 const library = new Library();
 await library.fetch('/texts/books.json');
+await library.fetchRecordings('/recordings/recordings.json');
 addScriptFonts('/fonts/');
 
 /** Passages of several books on one page: those read along each in rows, the surah as it is. */
@@ -50,6 +51,8 @@ function App() {
   const [speech, setSpeech] = useState<SpeechChange>({ state: 'stopped' });
   const [speakAlong, setSpeakAlong] = useState(false);
   const [rate, setRate] = useState(1);
+  // Chapters with a recording are played from it, or else read by the browser's voices too.
+  const [recited, setRecited] = useState(true);
   const [goTo, setGoTo] = useState('2:1');
   const reader = useRef<ReaderHandle>(null);
 
@@ -109,9 +112,13 @@ function App() {
         )}
         {speech.state !== 'stopped' && <button onClick={() => reader.current?.stop()}>Stop</button>}
         <button onClick={() => setRate(RATES[(RATES.indexOf(rate) + 1) % RATES.length])}>{rate}×</button>
+        <label>
+          <input type="checkbox" checked={recited} onChange={() => setRecited(!recited)} /> Recordings
+        </label>
         {speech.state === 'speaking' && speech.following === false && <button onClick={() => reader.current?.follow()}>Back to the voice</button>}
         <output dir="auto">
           {position ? `${title(position.book)}‎ ${position.chapter}:${position.verse} · word ${position.word + 1}` : 'Tap a word'}
+          {speech.state === 'speaking' && speech.recording && ` · ${speech.recording}`}
           {speech.firstSound !== undefined && ` · first sound after ${Math.round(speech.firstSound)} ms`}
           {speech.unvoiced?.length ? ` · no voice for ${speech.unvoiced.join(', ')}` : ''}
         </output>
@@ -131,6 +138,7 @@ function App() {
         parallel={parallel}
         speakAlong={speakAlong}
         speechRate={rate}
+        recordedVoices={recited ? undefined : []}
         onWordChange={setPosition}
         onSpeechChange={onSpeechChange}
       />
@@ -138,7 +146,9 @@ function App() {
         World English Bible, Luther 1912 and Smith &amp; Van Dyck, public domain; the Westminster Leningrad Codex from the{' '}
         <a href="https://github.com/openscriptures/morphhb">Open Scriptures Hebrew Bible</a>; the SBLGNT, © 2010 Society of Biblical
         Literature and Logos Bible Software, CC BY 4.0; the Quran from <a href="https://tanzil.net">Tanzil</a> (CC BY 3.0) with{' '}
-        <a href="https://github.com/cpfair/quran-tajweed">quran-tajweed</a>'s rules (CC BY 4.0).
+        <a href="https://github.com/cpfair/quran-tajweed">quran-tajweed</a>'s rules (CC BY 4.0). Recited by Mishary Rashid Alafasy, from{' '}
+        <a href="https://everyayah.com">EveryAyah</a>; its words timed by <a href="https://github.com/cpfair/quran-align">quran-align</a>, ©
+        2016 Collin Fair, CC BY 4.0.
       </footer>
     </main>
   );

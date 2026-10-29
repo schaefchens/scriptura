@@ -1,4 +1,4 @@
-import type { BookInfo, LaidOut, MoveStep, ReaderOptions, SpeechChange, Voice, WordPosition } from '@schaefchens/scriptura';
+import type { BookInfo, LaidOut, MoveStep, ReaderOptions, RecordingInfo, SpeechChange, Voice, WordPosition } from '@schaefchens/scriptura';
 import { requireNativeModule, requireNativeView } from 'expo';
 import type { Ref } from 'react';
 import type { NativeSyntheticEvent, StyleProp, ViewStyle } from 'react-native';
@@ -6,8 +6,8 @@ import type { NativeSyntheticEvent, StyleProp, ViewStyle } from 'react-native';
 export * from '@schaefchens/scriptura';
 
 /**
- * Where books come from: a file, by a file:// URI or a path; one the app bundles, by its name (see
- * app.plugin.js); or JS itself. Only the last passes their text through JS.
+ * Where books or recordings come from: a file, by a file:// URI or a path; one the app bundles, by
+ * its name (see app.plugin.js); or JS itself. Only the last passes books' text through JS.
  */
 export type BooksSource = { uri: string } | { asset: string } | { json: string };
 
@@ -29,13 +29,14 @@ export type ReaderHandle = {
   /** Brings the reader to a word by where it stands, as a tap would; to its verse's first word if the verse has no such word. False if the reader shows no such verse. */
   jump(position: WordPosition): Promise<boolean>;
   /**
-   * Reads aloud with the device's voices, from the word marked – or, with none, the first in sight –
-   * on to the end, marking each word as it is said and keeping it in sight, unless the reader was
-   * scrolled away from it by hand. A tap, a move or a jump while it speaks goes on from there. The
-   * reader takes the text from the books itself: it never passes through JS.
+   * Reads aloud – chapters with recordings from them, the rest with the device's voices – from the
+   * word marked, or with none, the first in sight, on to the end, marking each word as it is said
+   * and keeping it in sight, unless the reader was scrolled away from it by hand. A tap, a move or a
+   * jump while it reads goes on from there. The reader takes the text from the books itself: it
+   * never passes through JS.
    */
   play(): Promise<void>;
-  /** Pauses; play() goes on from the word reached. */
+  /** Pauses; play() goes on from the word reached – a recording where it paused. */
   pause(): Promise<void>;
   stop(): Promise<void>;
   /** Brings the word the voice is at – or, not reading aloud, the word marked – into sight, and keeps the words the voice comes to there. */
@@ -85,6 +86,10 @@ type ScripturaModule = {
   books(): BookInfo[];
   removeBooks(ids: string[]): Promise<void>;
   clearBooks(): Promise<void>;
+  addRecordings(source: BooksSource): Promise<string[]>;
+  recordings(): RecordingInfo[];
+  removeRecordings(ids: string[]): Promise<void>;
+  clearRecordings(): Promise<void>;
   speechVoices(): Promise<Voice[]>;
 };
 
@@ -100,6 +105,20 @@ export const removeBooks = (ids: string[]) => scriptura.removeBooks(ids);
 
 /** Removes every book, as when an app locks: readers show nothing until books are added again. */
 export const clearBooks = () => scriptura.clearBooks();
+
+/**
+ * Adds recordings of chapters, each replacing one of the same id, and returns their ids: a JSON array
+ * in the shape of the core's src/model.rs, whose audio, where it is no URI, is found next to them.
+ * Recordings that count words otherwise than the core does are refused. Reading aloud stops.
+ */
+export const addRecordings = (source: BooksSource) => scriptura.addRecordings(source);
+
+/** The recordings added: whose voice, and which chapter. */
+export const recordings = () => scriptura.recordings();
+
+export const removeRecordings = (ids: string[]) => scriptura.removeRecordings(ids);
+
+export const clearRecordings = () => scriptura.clearRecordings();
 
 /** The voices on the device that can read aloud. */
 export const speechVoices = () => scriptura.speechVoices();

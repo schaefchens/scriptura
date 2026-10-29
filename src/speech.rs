@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
-use crate::{Block, Library, Options, Reference, VerseNumbers, Word};
+use crate::reader::words_of;
+use crate::{Block, Book, Library, Options, Recording, Reference, VerseNumbers, Word};
 
 /// Where a word stands: in which passage of a request, in which book – the passage's, or one read
 /// along with it – and where in the scripture: its chapter, its verse, and which word of the verse.
@@ -28,26 +31,64 @@ pub struct Utterance {
     pub words: Vec<Word>,
 }
 
-/// What a voice says of passages, utterance by utterance: each chapter's heading on its own, then
-/// its verses, as the core's words – no verse numbers, no word written but not read, no mark
-/// standing alone, Hebrew without its cantillation marks. Voices plan their intonation sentence by sentence, so the verses are cut only at
-/// sentence ends, into utterances as long as a voice takes; a sentence longer than that at a clause.
-/// Each passage and book is spoken in its language. Read along with other books, by default only
-/// the passage's own book is spoken; `along`, each verse is followed by the same verse in each of
-/// them.
+/// Verses of a passage's book played from a recording of their chapter: from `start` to `end` in
+/// its audio, in milliseconds – or to the audio's end, without an end – with each word where it
+/// stands and where it starts in the audio.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Take {
+    pub passage: u32,
+    pub book: String,
+    /// The recording's: who reads, and where its audio is.
+    pub voice: String,
+    pub audio: String,
+    pub start: u32,
+    pub end: Option<u32>,
+    pub words: Vec<TimedWord>,
+}
+
+/// A word where it stands, and where it starts in a recording, in milliseconds.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TimedWord {
+    pub chapter: u32,
+    pub verse: u32,
+    pub index: u32,
+    pub start: u32,
+}
+
+/// What is read aloud next: an utterance for the device's voice, or a take from a recording.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Part {
+    Speak(Utterance),
+    Play(Take),
+}
+
+/// What is read aloud of passages, part by part. A chapter with a recording is played from it;
+/// a voice on the device says the rest, utterance by utterance: each chapter's heading on its own,
+/// then its verses, as the core's words – no verse numbers, no word written but not read, no mark
+/// standing alone, Hebrew without its cantillation marks. Voices plan their intonation sentence by
+/// sentence, so the verses are cut only at sentence ends, into utterances as long as a voice takes;
+/// a sentence longer than that at a clause. Each passage and book is spoken in its language. Read
+/// along with other books, by default only the passage's own book is read; `along`, each verse is
+/// followed by the same verse in each of them.
 pub struct Speech {
     stretches: Vec<Stretch>,
-    /// Where the next utterance starts: a stretch, and a word of it.
+    /// The recordings that stretches are played from.
+    recordings: Vec<Recording>,
+    /// Where the next part starts: a stretch, and a word of it.
     at: (usize, usize),
 }
 
-/// A heading, or verses that follow each other in one passage, book and language.
+/// A heading, or verses that follow each other in one passage, book and language, and either
+/// played from one recording or not.
 struct Stretch {
     passage: u32,
     book: String,
     language: String,
     heading: Option<String>,
     words: Vec<Spoken>,
+    /// The recording it is played from, as its index in the speech's.
+    recording: Option<usize>,
 }
 
 /// A word as spoken, and where it stands: in the scripture, and in which row its book is read along.
@@ -83,9 +124,11 @@ impl Speech {
         companions: &[String],
         along: bool,
         from: Option<&Place>,
+        recorded: Option<&[String]>,
     ) -> Speech {
         let options = Options { font_size: 1.0, verse_per_line: false, companions: companions.to_vec() };
         let blocks = library.blocks(references, &options);
+        let mut recordings = Recordings { library, voices: recorded, chapters: HashMap::new(), chosen: Vec::new() };
         let mut stretches: Vec<Stretch> = Vec::new();
         // Where `from` is spoken – or, in a book not spoken, the row it stands in.
         let mut start = None;
@@ -94,7 +137,7 @@ impl Speech {
             let spoken = along || block.column == 0;
             if block.kind == "heading" {
                 if let Some(text) = spoken.then(|| heading(library, block, &blocks[at + 1..])).flatten() {
-                    stretches.push(Stretch::of(block, Some(text)));
+                    stretches.push(Stretch::of(block, Some(text), None));
                 }
                 continue;
             }
@@ -103,17 +146,19 @@ impl Speech {
                 continue;
             }
             let Some(book) = library.book(&block.book).filter(|_| !block.words.is_empty()) else { continue };
-            let follows = stretches.last().is_some_and(|last| {
-                last.heading.is_none()
-                    && (last.passage, &last.book, &last.language) == (block.passage, &block.book, &block.language)
-            });
-            if !follows {
-                stretches.push(Stretch::of(block, None));
-            }
-            let at = stretches.len() - 1;
-            let stretch = &mut stretches[at];
             let text: Vec<u16> = block.segments.iter().flat_map(|segment| segment.text.encode_utf16()).collect();
             for (index, word) in block.words.iter().enumerate() {
+                let recording = recordings.of(book, word.chapter);
+                let follows = stretches.last().is_some_and(|last| {
+                    last.heading.is_none()
+                        && last.recording == recording
+                        && (last.passage, &last.book, &last.language) == (block.passage, &block.book, &block.language)
+                });
+                if !follows {
+                    stretches.push(Stretch::of(block, None, recording));
+                }
+                let at = stretches.len() - 1;
+                let stretch = &mut stretches[at];
                 if from.is_some_and(|place| block.place(word) == *place) {
                     start = Some((at, stretch.words.len()));
                 }
@@ -132,6 +177,16 @@ impl Speech {
                 stretch.words.push(Spoken { chapter, verse, index, row, text, after, pause });
             }
         }
+        // A recording reads its chapter's verses without their heading.
+        for at in 0..stretches.len() {
+            let (passage, book) = (stretches[at].passage, &stretches[at].book);
+            let verses = stretches[at + 1..]
+                .iter()
+                .find(|other| other.heading.is_none() && other.passage == passage && other.book == *book);
+            if verses.is_some_and(|verses| verses.recording.is_some()) {
+                stretches[at].heading = None;
+            }
+        }
         // A word of a book not spoken starts the reading at the passage's own verse in its row.
         let start = start.or_else(|| {
             let (passage, row) = beside?;
@@ -140,14 +195,23 @@ impl Speech {
                 (stretch.passage == passage).then_some((at, word))
             })
         });
-        Speech { stretches, at: start.unwrap_or((0, 0)) }
+        Speech { stretches, recordings: recordings.chosen, at: start.unwrap_or((0, 0)) }
     }
 
-    /// The next utterance, at most `limit` UTF-16 code units long – or a single word longer than
-    /// that – cut at the last sentence end within it, or else at a clause; none after the last.
-    pub fn next(&mut self, limit: usize) -> Option<Utterance> {
-        let (at, first) = self.at;
+    /// The next part: a take of a recording, or an utterance at most `limit` UTF-16 code units long
+    /// – or a single word longer than that – cut at the last sentence end within it, or else at a
+    /// clause; none after the last.
+    pub fn next(&mut self, limit: usize) -> Option<Part> {
+        let (mut at, mut first) = self.at;
+        // Past what is left with nothing to say: a heading a recording reads.
+        while self.stretches.get(at).is_some_and(|stretch| stretch.heading.is_none() && first >= stretch.words.len()) {
+            (at, first) = (at + 1, 0);
+        }
         let stretch = self.stretches.get(at)?;
+        if let Some(recording) = stretch.recording {
+            self.at = (at + 1, 0);
+            return Some(Part::Play(self.take(at, first, recording)));
+        }
         let mut utterance = Utterance {
             passage: stretch.passage,
             book: stretch.book.clone(),
@@ -158,7 +222,7 @@ impl Speech {
         };
         if stretch.heading.is_some() {
             self.at = (at + 1, 0);
-            return Some(utterance);
+            return Some(Part::Speak(utterance));
         }
         let words = &stretch.words;
         // The words that fit, a space between each two.
@@ -196,15 +260,95 @@ impl Speech {
             offset += utf16(word.after) as u32;
         }
         self.at = if end == words.len() { (at + 1, 0) } else { (at, end) };
-        Some(utterance)
+        Some(Part::Speak(utterance))
+    }
+
+    /// The stretch at `at`, from its word `first`, played from its recording: from the start of the
+    /// audio if it reads the chapter from its start, else from the verse's start, or the word's;
+    /// up to where the verse after its last starts.
+    fn take(&self, at: usize, first: usize, recording: usize) -> Take {
+        let stretch = &self.stretches[at];
+        let recording = &self.recordings[recording];
+        let words = &stretch.words[first..];
+        // A recording fits only if it has every verse of the chapter.
+        let verse = |number: u32| recording.verses.iter().position(|verse| verse.number == number).unwrap_or_default();
+        let start_of = |word: &Spoken| recording.verses[verse(word.verse)].words[word.index as usize];
+        let opening = &words[0];
+        let start = match verse(opening.verse) {
+            0 if first == 0 && opening.index == 0 => 0,
+            at if opening.index == 0 => recording.verses[at].start,
+            _ => start_of(opening),
+        };
+        let last = verse(words[words.len() - 1].verse);
+        Take {
+            passage: stretch.passage,
+            book: stretch.book.clone(),
+            voice: recording.voice.clone(),
+            audio: recording.audio.clone(),
+            start,
+            end: recording.verses.get(last + 1).map(|verse| verse.start),
+            words: (words.iter())
+                .map(|word| TimedWord {
+                    chapter: word.chapter,
+                    verse: word.verse,
+                    index: word.index,
+                    start: start_of(word),
+                })
+                .collect(),
+        }
     }
 }
 
 impl Stretch {
-    fn of(block: &Block, heading: Option<String>) -> Stretch {
+    fn of(block: &Block, heading: Option<String>, recording: Option<usize>) -> Stretch {
         let (passage, book, language) = (block.passage, block.book.clone(), block.language.clone());
-        Stretch { passage, book, language, heading, words: Vec::new() }
+        Stretch { passage, book, language, heading, words: Vec::new(), recording }
     }
+}
+
+/// The recordings a speech plays its chapters from: for each chapter, the first of the voices asked
+/// for – or with none asked for, of any – that recorded it whole, counting its words as the core does.
+struct Recordings<'a> {
+    library: &'a Library,
+    voices: Option<&'a [String]>,
+    /// Each chapter's, by book and chapter number, as its index in `chosen`.
+    chapters: HashMap<(String, u32), Option<usize>>,
+    chosen: Vec<Recording>,
+}
+
+impl Recordings<'_> {
+    fn of(&mut self, book: &Book, chapter: u32) -> Option<usize> {
+        let key = (book.id.clone(), chapter);
+        if let Some(&found) = self.chapters.get(&key) {
+            return found;
+        }
+        let all = self.library.recordings();
+        let fitting =
+            |recording: &&Recording| recording.book == book.id && recording.chapter == chapter && fits(recording, book);
+        let found = match self.voices {
+            None => all.iter().find(fitting),
+            Some(voices) => {
+                voices.iter().find_map(|voice| all.iter().filter(|recording| recording.voice == *voice).find(fitting))
+            }
+        };
+        let found = found.map(|recording| {
+            self.chosen.push(recording.clone());
+            self.chosen.len() - 1
+        });
+        self.chapters.insert(key, found);
+        found
+    }
+}
+
+/// Whether a recording has every verse of its chapter, each with as many words as the core counts.
+fn fits(recording: &Recording, book: &Book) -> bool {
+    let Some(chapter) = book.chapters.iter().find(|chapter| chapter.number == recording.chapter) else { return false };
+    chapter.verses.len() == recording.verses.len()
+        && chapter
+            .verses
+            .iter()
+            .zip(&recording.verses)
+            .all(|(verse, recorded)| verse.number == recorded.number && words_of(verse).len() == recorded.words.len())
 }
 
 impl Block {
@@ -271,18 +415,47 @@ mod tests {
         library
     });
 
+    /// The same books, and recordings of Al-Fatiha in two voices and of the start of Al-Baqarah.
+    static RECORDED: LazyLock<Library> = LazyLock::new(|| {
+        let mut library = Library::new();
+        library.add(include_bytes!("../tests/fixtures/books.json")).expect("the fixtures are valid");
+        let recordings = include_bytes!("../tests/fixtures/recordings.json");
+        library.add_recordings(recordings, Some("file:///recordings/")).expect("the fixtures are valid");
+        library
+    });
+
     fn reference(book: &str, chapter: Option<u32>, from: Option<u32>, to: Option<u32>) -> Reference {
         Reference { book: book.into(), chapter, from, to }
     }
 
     fn speech(references: &[Reference], companions: &[&str], along: bool, from: Option<&Place>) -> Speech {
         let companions: Vec<String> = companions.iter().map(|id| id.to_string()).collect();
-        LIBRARY.speech(references, &companions, along, from)
+        LIBRARY.speech(references, &companions, along, from, None)
     }
 
-    /// The utterances, each at most `limit` long, to the end.
-    fn all(mut speech: Speech, limit: usize) -> Vec<Utterance> {
+    /// The utterances, each at most `limit` long, to the end – of a speech without recordings.
+    fn all(speech: Speech, limit: usize) -> Vec<Utterance> {
+        let parts = parts(speech, limit);
+        parts
+            .into_iter()
+            .map(|part| if let Part::Speak(utterance) = part { utterance } else { panic!("{part:?}") })
+            .collect()
+    }
+
+    fn parts(mut speech: Speech, limit: usize) -> Vec<Part> {
         std::iter::from_fn(|| speech.next(limit)).collect()
+    }
+
+    /// What is read aloud with the recordings, by the voices `recorded`, or any.
+    fn recorded(references: &[Reference], from: Option<&Place>, recorded: Option<&[&str]>) -> Vec<Part> {
+        let recorded: Option<Vec<String>> =
+            recorded.map(|voices| voices.iter().map(|voice| voice.to_string()).collect());
+        parts(RECORDED.speech(references, &[], false, from, recorded.as_deref()), 4000)
+    }
+
+    fn take(part: &Part) -> &Take {
+        let Part::Play(take) = part else { panic!("{part:?}") };
+        take
     }
 
     fn texts(utterances: &[Utterance]) -> Vec<&str> {
@@ -441,5 +614,60 @@ mod tests {
         // A word of a book not spoken starts the reading at the passage's verse beside it.
         let beside = all(speech(&references, &["jonah-de"], false, Some(&place(0, "jonah-de", 2, 2, 4))), 4000);
         assert_eq!((beside[0].book.as_str(), beside[0].words[0].verse, beside[0].words[0].index), ("jonah", 2, 0));
+    }
+
+    #[test]
+    fn a_chapter_recorded_is_played_whole_without_its_heading() {
+        let fatiha = recorded(&[reference("quran-1", None, None, None)], None, None);
+        assert_eq!(fatiha.len(), 1);
+        let take = take(&fatiha[0]);
+        assert_eq!((take.voice.as_str(), take.audio.as_str()), ("Reciter", "file:///recordings/reciter/quran-1.mp3"));
+        assert_eq!((take.start, take.end, take.words.len()), (0, None, 29));
+        let word = &take.words[5];
+        assert_eq!((word.chapter, word.verse, word.index, word.start), (1, 2, 1, 6900));
+    }
+
+    #[test]
+    fn verses_play_from_their_start_to_the_next_verse_and_a_word_from_its_own() {
+        let verses = recorded(&[reference("quran-1", None, Some(2), Some(3))], None, None);
+        let verses = take(&verses[0]);
+        assert_eq!((verses.start, verses.end, verses.words.len()), (6000, Some(18000), 6));
+        let from = place(0, "quran-1", 1, 7, 2);
+        let rest = recorded(&[reference("quran-1", None, None, None)], Some(&from), None);
+        let rest = take(&rest[0]);
+        assert_eq!((rest.start, rest.end, rest.words[0].index), (37500, None, 2));
+    }
+
+    #[test]
+    fn the_first_voice_asked_for_reads_and_without_one_the_devices() {
+        let fatiha = [reference("quran-1", None, None, None)];
+        assert_eq!(take(&recorded(&fatiha, None, Some(&["Nobody", "Other", "Reciter"]))[0]).voice, "Other");
+        assert_eq!(take(&recorded(&fatiha, None, Some(&["Other"]))[0]).audio, "https://example.org/other/quran-1.mp3");
+        let spoken = recorded(&fatiha, None, Some(&[]));
+        assert!(matches!(&spoken[..], [Part::Speak(heading), Part::Speak(_)] if heading.heading));
+    }
+
+    #[test]
+    fn a_recording_that_counts_other_words_is_not_played() {
+        // Its verse 255 has three words, not fifty.
+        let baqarah = recorded(&[reference("quran-2", None, None, None)], None, None);
+        assert!(baqarah.iter().all(|part| matches!(part, Part::Speak(_))), "{baqarah:?}");
+    }
+
+    #[test]
+    fn a_reading_list_mixes_the_devices_voice_and_recordings() {
+        let list = [reference("jonah", Some(1), Some(17), Some(17)), reference("quran-1", None, Some(7), Some(7))];
+        let parts = recorded(&list, None, None);
+        let kinds: Vec<_> = parts
+            .iter()
+            .map(|part| match part {
+                Part::Speak(utterance) => {
+                    (utterance.book.as_str(), if utterance.heading { "heading" } else { "verses" })
+                }
+                Part::Play(take) => (take.book.as_str(), "take"),
+            })
+            .collect();
+        assert_eq!(kinds, [("jonah", "heading"), ("jonah", "verses"), ("quran-1", "take")]);
+        assert_eq!((take(&parts[2]).start, take(&parts[2]).end), (36000, None));
     }
 }

@@ -12,6 +12,8 @@
 | quran-1, quran-2 | Tanzil Uthmani 1.0.2 | [tanzil.net](http://tanzil.net) | CC BY 3.0, below |
 | quran-1, quran-2: tajweed rules | quran-tajweed | [cpfair/quran-tajweed](https://github.com/cpfair/quran-tajweed) | CC BY 4.0 |
 
+`recordings.json` holds recordings of Al-Fatiha in two voices and of the start of Al-Baqarah, their timings made up: the last counts three words in verse 255, which has fifty.
+
 Changes made by the import: the SBLGNT's apparatus signs are left out. The Hebrew's paragraph signs and the editors' notes are left out, and the two forms of a word written one way and read another are marked. The basmala opening Al-Baqarah stands as a verse of its own, verse 0. The Quran text itself is unchanged.
 
 The SBLGNT: Copyright © 2010 by the Society of Biblical Literature and Logos Bible Software.

@@ -1,16 +1,17 @@
 import AVFoundation
 
-/// Reads passages aloud with the device's voices, a voice for each language: utterances from the
-/// core, one after the other, so their text never passes through JS. The first is short, so the
-/// voice starts at once; each after it twice as long as the one before, so few sentences are cut
-/// apart – as long as the voice starts them at once. Each is given as the one before it sounds,
-/// so the voice can prepare it. It tells the reader the word the voice comes to, as the voice
-/// reports it.
+/// Reads passages aloud: chapters with recordings from them, the rest with the device's voices, a
+/// voice for each language. It takes the parts from the core one after the other, so their text
+/// never passes through JS: a take of a recording plays once the voice has said what it was given.
+/// The voice's utterances: the first is short, so the voice starts at once; each after it twice as
+/// long as the one before, so few sentences are cut apart – as long as the voice starts them at once.
+/// Each is given as the one before it sounds, so the voice can prepare it. It tells the reader the
+/// word the voice comes to, as the voice reports it, or a recording's timings have it.
 final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
-  /// The voice comes to a word of an utterance.
-  var onWord: ((Utterance, Word) -> Void)?
+  /// The voice, or a recording, comes to a word.
+  var onWord: ((WordPlace) -> Void)?
   /// "speaking", "paused" or "stopped"; after a start, how long until the first word sounded, in
-  /// milliseconds; the languages skipped for want of a voice.
+  /// milliseconds; the languages skipped for want of a voice; whose recording plays.
   var onChange: (([String: Any]) -> Void)?
   /// A voice per language, by identifier; otherwise the device's for it.
   var voices: [String: String] = [:]
@@ -22,6 +23,10 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
   private(set) var pausedAt: WordPosition?
   private let synthesizer = AVSpeechSynthesizer()
   private var speech: Speech?
+  private let recording = PlayRecording()
+  /// The take of a recording that plays, or that waits for the voice to say what it was given.
+  private var take: Take?
+  private var takeWaits = false
   /// The utterances given to the synthesizer and not yet done, as the core made them, and whether
   /// they sounded yet.
   private var queued: [(spoken: AVSpeechUtterance, utterance: Utterance, sounded: Bool)] = []
@@ -48,33 +53,65 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
     synthesizer.delegate = self
     // An audio session of its own, which the system manages: the app's stays as the app set it.
     synthesizer.usesApplicationAudioSession = false
+    recording.onWord = { [weak self] take, word in
+      self?.onWord?(WordPlace(passage: take.passage, book: take.book, chapter: word.chapter, verse: word.verse, index: word.index))
+    }
+    recording.onSound = { [weak self] time in self?.sounded(at: time) }
+    recording.onEnd = { [weak self] in self?.takeEnded() }
+    recording.onPause = { [weak self] in
+      guard let self, state == "speaking" else { return }
+      pausedAt = nil
+      change("paused")
+    }
+    recording.onError = { [weak self] in self?.stop() }
   }
 
-  /// Reads the passages from the word at `from`, or from their start; a voice paused there goes on.
-  func play(_ references: [Reference], companions: [String], along: Bool, from: WordPosition?) {
+  /// Reads the passages from the word at `from`, or from their start, playing chapters from
+  /// recordings of the `recorded` voices – with none named, of any. A voice or a recording paused at
+  /// that word goes on.
+  func play(_ references: [Reference], companions: [String], along: Bool, from: WordPosition?, recorded: [String]?) {
+    if state == "paused", from == pausedAt, take != nil, !takeWaits {
+      started = CACurrentMediaTime()
+      recording.rate = rate
+      recording.resume()
+      return change("speaking")
+    }
     if state == "paused", synthesizer.isPaused, from == pausedAt {
       synthesizer.continueSpeaking()
       return change("speaking")
     }
     silence()
-    speech = Speech(references: references, companions: companions, along: along, from: from)
+    speech = Speech(references: references, companions: companions, along: along, from: from, recorded: recorded)
     started = CACurrentMediaTime()
     change("speaking")
     enqueue()
     enqueue()
-    if queued.isEmpty {
+    if queued.isEmpty, take == nil {
       stop()
     }
   }
 
-  /// Pauses at the end of the word, `at` which the reader is.
+  /// Pauses at the end of the word, `at` which the reader is – a recording at once.
   func pause(at word: WordPosition?) {
     guard state == "speaking" else { return }
     pausedAt = word
+    if take != nil, !takeWaits {
+      recording.pause()
+      return change("paused")
+    }
     // The pause isn't the voice's wait.
     ended = nil
     synthesizer.pauseSpeaking(at: .word)
     change("paused")
+  }
+
+  /// A new rate: a recording takes it at once; a voice only with what it is given next, so it is
+  /// false for one.
+  func setRate(_ rate: Double) -> Bool {
+    self.rate = rate
+    guard take != nil, !takeWaits else { return false }
+    recording.setRate(rate)
+    return true
   }
 
   /// Stops; the languages skipped for want of a voice go with the news.
@@ -102,6 +139,9 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
   /// Drops what was to be said, without a word to JS.
   private func silence() {
     speech = nil
+    recording.stop()
+    take = nil
+    takeWaits = false
     queued = []
     pausedAt = nil
     started = nil
@@ -112,14 +152,35 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
     state = "stopped"
   }
 
+  /// Tells what changed; while it reads, with whose recording plays.
   private func change(_ state: String, _ details: [String: Any] = [:]) {
     self.state = state
-    onChange?(details.merging(["state": state]) { _, new in new })
+    var change = details.merging(["state": state]) { _, new in new }
+    if state == "speaking", change["recording"] == nil {
+      change["recording"] = takeWaits ? "" : take?.voice ?? ""
+    }
+    onChange?(change)
   }
 
-  /// Gives the synthesizer the next utterance with a voice.
+  /// Gives the synthesizer the next utterance with a voice – or the next take to play, once the
+  /// voice has said what it was given.
   private func enqueue() {
-    while let utterance = speech?.next(limit: nextLength) {
+    guard take == nil else { return }
+    while let part = speech?.next(limit: nextLength) {
+      let utterance: Utterance
+      switch part {
+      case .play(let take):
+        self.take = take
+        takeWaits = !queued.isEmpty
+        if takeWaits {
+          recording.prepare(take)
+        } else {
+          playTake()
+        }
+        return
+      case .speak(let spoken):
+        utterance = spoken
+      }
       guard let voice = voice(for: utterance.language) else {
         if unvoiced.insert(utterance.language).inserted {
           change(state, ["unvoiced": Array(unvoiced).sorted()])
@@ -176,10 +237,7 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
     guard let index = queued.firstIndex(where: { $0.spoken === spoken }) else { return }
     let utterance = queued[index].utterance
     let now = CACurrentMediaTime()
-    if let started {
-      self.started = nil
-      change("speaking", ["firstSound": (now - started) * 1000])
-    }
+    sounded(at: now)
     if !queued[index].sounded {
       queued[index].sounded = true
       if let voice = spoken.voice?.identifier, let ended, ended.voice == voice, now - ended.time > Self.late {
@@ -195,19 +253,46 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
     }
     // The word the range starts in, or the first, if it starts before any.
     let word = utterance.words.last { Int($0.start) <= range.location } ?? utterance.words.first
-    word.map { onWord?(utterance, $0) }
+    word.map { onWord?(WordPlace(passage: utterance.passage, book: utterance.book, chapter: $0.chapter, verse: $0.verse, index: $0.index)) }
+  }
+
+  /// The voice or a recording sounded, at `time`: reported once after a start.
+  private func sounded(at time: CFTimeInterval) {
+    guard let started else { return }
+    self.started = nil
+    change("speaking", ["firstSound": max(time - started, 0) * 1000])
   }
 
   private func finished(_ spoken: AVSpeechUtterance) {
     guard queued.contains(where: { $0.spoken === spoken }) else { return }
     queued.removeAll { $0.spoken === spoken }
     ended = spoken.voice.map { (CACurrentMediaTime(), $0.identifier) }
-    // For a voice that reports no words, the next is given now.
-    if queued.isEmpty {
-      enqueue()
-      enqueue()
+    guard queued.isEmpty else { return }
+    if take != nil {
+      return playTake()
     }
-    if queued.isEmpty {
+    // For a voice that reports no words, the next is given now.
+    enqueue()
+    enqueue()
+    if queued.isEmpty, take == nil {
+      stop()
+    }
+  }
+
+  private func playTake() {
+    guard let take else { return }
+    takeWaits = false
+    recording.rate = rate
+    recording.play(take)
+    change("speaking")
+  }
+
+  /// A take played to its end: what follows it is read.
+  private func takeEnded() {
+    take = nil
+    enqueue()
+    enqueue()
+    if queued.isEmpty, take == nil {
       stop()
     }
   }

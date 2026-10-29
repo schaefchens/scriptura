@@ -6,11 +6,14 @@ import UIKit
 /// one attributed string, in pages or one endless scroll. It fetches them from the core itself, from
 /// the books the host added, so their text never passes through JS. A word can be tapped, reached
 /// word by word or jumped to; JS learns only where the current word stands, never its text. It
-/// reads aloud with the device's voices, from the word it is at, and marks each word as it is said,
-/// keeping it in sight – unless it was scrolled away from it by hand.
+/// reads aloud – chapters with recordings from them, the rest with the device's voices – from the
+/// word it is at, and marks each word as it is said, keeping it in sight – unless it was scrolled
+/// away from it by hand.
 class ReaderView: ExpoView {
   /// Posted as the host adds or removes books: every reader shows what the library now holds.
   static let booksChanged = Notification.Name("ScripturaBooksChanged")
+  /// Posted as the host adds or removes recordings: what is still to be read goes with them.
+  static let recordingsChanged = Notification.Name("ScripturaRecordingsChanged")
 
   var passages: [PassageRecord] = []
   var fontSize = 28.0
@@ -34,6 +37,9 @@ class ReaderView: ExpoView {
   var speakAlong = false
   /// How fast the voices read, as a multiple of their own rate: from 0.5 to 2.
   var speechRate = 1.0
+  /// The voices whose recordings are played, the first that has one for a chapter; with none named,
+  /// any.
+  var recordedVoices: [String]?
 
   let onWordChange = EventDispatcher()
   let onLaidOut = EventDispatcher()
@@ -50,9 +56,10 @@ class ReaderView: ExpoView {
   private var following = true
   /// The passages the text is of: given them again, in another layout, the reader stays where it is.
   private var shownReferences: [Reference] = []
-  /// What is read aloud along with them, and how fast.
-  private var spokenAs: ([String], Bool, Double) = ([], false, 1)
-  private var booksObserver: NSObjectProtocol?
+  /// What is read aloud along with them, and from which recordings; and how fast.
+  private var readAs: ([String], Bool, [String]?) = ([], false, nil)
+  private var rateAs = 1.0
+  private var observers: [NSObjectProtocol] = []
   /// How tall a letter is in a font, per point of its size, by font and letter.
   private var letterHeights: [String: Double] = [:]
   private var renderStarted: CFTimeInterval = 0
@@ -74,21 +81,25 @@ class ReaderView: ExpoView {
       let time = milliseconds(since: renderStarted)
       onLaidOut(["pages": paging == "pages" ? count : 0, "milliseconds": firstShown ?? time, "all": time])
     }
-    readAloud.onWord = { [weak self] utterance, word in
-      self?.reached(WordPlace(passage: utterance.passage, book: utterance.book, chapter: word.chapter, verse: word.verse, index: word.index))
-    }
+    readAloud.onWord = { [weak self] place in self?.reached(place) }
     readAloud.onChange = { [weak self] change in self?.speechChanged(change) }
     pages.onScrollByHand = { [weak self] in self?.scrolledByHand() }
     addSubview(pages)
-    booksObserver = NotificationCenter.default.addObserver(forName: Self.booksChanged, object: nil, queue: .main) { [weak self] _ in
-      // What is still to be said goes with the books.
-      self?.readAloud.stop()
-      self?.render()
-    }
+    let center = NotificationCenter.default
+    observers = [
+      center.addObserver(forName: Self.booksChanged, object: nil, queue: .main) { [weak self] _ in
+        // What is still to be read goes with the books.
+        self?.readAloud.stop()
+        self?.render()
+      },
+      center.addObserver(forName: Self.recordingsChanged, object: nil, queue: .main) { [weak self] _ in
+        self?.readAloud.stop()
+      },
+    ]
   }
 
   deinit {
-    booksObserver.map(NotificationCenter.default.removeObserver)
+    observers.forEach(NotificationCenter.default.removeObserver)
     readAloud.stop()
   }
 
@@ -175,12 +186,14 @@ class ReaderView: ExpoView {
       current = index
       pages.highlight(words[index].range)
     }
-    // Other books read along change what is said, and a new rate how: the voice goes on from the
-    // word it is at.
-    if (companions, speakAlong, speechRate) != spokenAs, readAloud.state != "stopped" {
+    // Other books read along or other recordings change what is read, and a new rate how: the voice
+    // goes on from the word it is at. A recording takes a new rate as it plays.
+    let changed = readAs != (companions, speakAlong, recordedVoices) || (speechRate != rateAs && !readAloud.setRate(speechRate))
+    if changed, readAloud.state != "stopped" {
       readAloud.state == "speaking" ? play() : readAloud.stop()
     }
-    spokenAs = (companions, speakAlong, speechRate)
+    readAs = (companions, speakAlong, recordedVoices)
+    rateAs = speechRate
   }
 
   /// A paragraph's font: its own, or the one the app brings for its language, or the system's.
@@ -372,12 +385,12 @@ class ReaderView: ExpoView {
   }
 
   /// Reads aloud from the word marked – or, with none, the first in sight – on to the end; a voice
-  /// paused at that word goes on.
+  /// or a recording paused at that word goes on.
   func play() {
     readAloud.voices = voices
     readAloud.rate = speechRate
     following = true
-    readAloud.play(shownReferences, companions: companions, along: speakAlong, from: readingStart().map(position(of:)))
+    readAloud.play(shownReferences, companions: companions, along: speakAlong, from: readingStart().map(position(of:)), recorded: recordedVoices)
   }
 
   /// Brings the word the voice is at – or, not reading aloud, the word marked – into sight, and

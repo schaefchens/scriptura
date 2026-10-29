@@ -1,4 +1,4 @@
-import type { BookInfo, Passage, WordPosition } from '@schaefchens/scriptura';
+import type { BookInfo, Passage, RecordingInfo, WordPosition } from '@schaefchens/scriptura';
 
 import init, { Library as Core, type Speech as CoreSpeech } from './generated/scriptura_wasm.js';
 
@@ -34,12 +34,30 @@ export type Utterance = {
   words: { chapter: number; verse: number; index: number; start: number; end: number }[];
 };
 
-/** What a voice says of passages, utterance by utterance: see the core's Speech. */
+/**
+ * Verses played from a recording of their chapter: from `start` to `end` in its audio, in milliseconds – or to its end, without an
+ * end – with each word where it stands and where it starts in the audio. See the core's Take.
+ */
+export type Take = {
+  passage: number;
+  book: string;
+  /** The recording's: who reads, and where its audio is. */
+  voice: string;
+  audio: string;
+  start: number;
+  end: number | null;
+  words: { chapter: number; verse: number; index: number; start: number }[];
+};
+
+/** What is read aloud next: an utterance for the device's voice, or a take from a recording. */
+export type Part = { speak: Utterance } | { play: Take };
+
+/** What is read aloud of passages, part by part: see the core's Speech. */
 export class Speech {
   constructor(private core: CoreSpeech) {}
 
-  /** The next utterance, at most `limit` UTF-16 code units long, cut at a sentence end; none after the last. */
-  next(limit: number): Utterance | undefined {
+  /** The next part: a take, or an utterance at most `limit` UTF-16 code units long, cut at a sentence end; none after the last. */
+  next(limit: number): Part | undefined {
     const json = this.core.nextJson(limit);
     return json === undefined ? undefined : JSON.parse(json);
   }
@@ -57,14 +75,16 @@ export async function loadScriptura(url?: string | URL) {
   await loading;
 }
 
-/** The books a page has added, and passages of them as paragraphs. On the web, their text is the page's anyway. */
+const bytesOf = (json: string | ArrayBuffer | Uint8Array) =>
+  typeof json === 'string' ? new TextEncoder().encode(json) : json instanceof Uint8Array ? json : new Uint8Array(json);
+
+/** The books a page has added, the recordings of their chapters, and passages of them as paragraphs. On the web, their text is the page's anyway. */
 export class Library {
   private core = new Core();
 
   /** Adds the books of a JSON array, each replacing one of the same id, and returns their ids. */
   add(json: string | ArrayBuffer | Uint8Array): string[] {
-    const bytes = typeof json === 'string' ? new TextEncoder().encode(json) : json instanceof Uint8Array ? json : new Uint8Array(json);
-    return this.core.add(bytes);
+    return this.core.add(bytesOf(json));
   }
 
   /** Fetches books and adds them. */
@@ -76,6 +96,34 @@ export class Library {
 
   remove(ids: string[]) {
     this.core.remove(ids);
+  }
+
+  /**
+   * Adds the recordings of a JSON array, each replacing one of the same id, and returns their ids. An audio that is no URL is taken as
+   * relative to `base`, where they came from. Recordings that count words otherwise than the core does are refused.
+   */
+  addRecordings(json: string | ArrayBuffer | Uint8Array, base?: string | URL): string[] {
+    return this.core.addRecordings(bytesOf(json), base === undefined ? undefined : new URL(base, location.href).href);
+  }
+
+  /** Fetches recordings and adds them: their audio is found next to them. */
+  async fetchRecordings(url: string | URL): Promise<string[]> {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`${response.status} for ${url}`);
+    return this.addRecordings(await response.arrayBuffer(), new URL('.', new URL(url, location.href)));
+  }
+
+  removeRecordings(ids: string[]) {
+    this.core.removeRecordings(ids);
+  }
+
+  clearRecordings() {
+    this.core.clearRecordings();
+  }
+
+  /** What the recordings are: id, voice, book and chapter. */
+  recordings(): RecordingInfo[] {
+    return JSON.parse(this.core.recordingsJson());
   }
 
   clear() {
@@ -93,10 +141,10 @@ export class Library {
   }
 
   /**
-   * What a voice says of the passages, read along with `companions` – only their own books, or
-   * `along`, each verse in every book – from the word at `from`, or else from the start.
+   * What is read aloud of the passages, read along with `companions` – only their own books, or `along`, each verse in every book –
+   * from the word at `from`, or else from the start; chapters from recordings of the `recorded` voices, or with none named, of any.
    */
-  speech(passages: Passage[], options: { companions?: string[]; along?: boolean }, from?: WordPosition): Speech {
+  speech(passages: Passage[], options: { companions?: string[]; along?: boolean; recorded?: string[] }, from?: WordPosition): Speech {
     return new Speech(this.core.speech(JSON.stringify(passages), JSON.stringify(options), from ? JSON.stringify(from) : ''));
   }
 }

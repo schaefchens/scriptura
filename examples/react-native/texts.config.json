@@ -84,5 +84,19 @@
       37,
       112
     ]
+  },
+  "recordings": {
+    "folder": "recordings",
+    "quran": [
+      {
+        "everyayah": "Alafasy_128kbps",
+        "voice": "Mishary Rashid Alafasy",
+        "surahs": [
+          1,
+          37,
+          112
+        ]
+      }
+    ]
   }
 }
