@@ -66,15 +66,15 @@ reader.play();
 
 ## What the tests show
 
-2026-10-28, on the iPhone 17 simulator, an Android 16 tablet emulator and Chrome on a Mac:
+2026-10-28, on the iPhone 17 simulator, an Android 16 emulator with Google's speech engine and Brave (Chromium 155) on a Mac:
 
 - **Every script renders,** in the reader's own fonts: Hebrew with points and cantillation, polytonic Greek, vocalized Arabic, Persian (on iOS and Android; the web example has none) and the Quran with its tajweed colors.
 - **Reading along** matches verses across numbering schemes, inline and side by side, in reading lists too; right-to-left books run their columns and pages from the right.
 - **Speed:** the Psalms in Hebrew, English and German, a verse per line (7,449 verses), side by side, show their first pages after 0.6 s on iOS and 0.5 s on Android, and are laid out in full after 1.0 s and 1.7 s; the English Psalms alone, a verse per line, take 0.17 s in the browser.
 - **Reading aloud**, also on an Android emulator with Google's speech engine:
   - English, German, Hebrew, Greek and Arabic have voices on all three platforms; Persian has none on any.
-  - The highlight follows every word on iOS and Android – on Android within 20 ms of where it sounds – and most in Chrome, which joins some short words with the next.
-  - Psalm 119, within the whole Psalms, sounds after 0.8–0.9 s on iOS, 0.6 s on Android and 0.4 s in Chrome. After a tap or a jump while speaking, the voice goes on after 0.07–0.4 s.
+  - The highlight follows every word on iOS and Android – on Android within 20 ms of where it sounds – and most in Brave, which joins some short words with the next.
+  - Psalm 119, within the whole Psalms, sounds after 0.8–0.9 s on iOS, 0.6 s on Android and 0.4 s in Brave. After a tap or a jump while speaking, the voice goes on after 0.07–0.4 s.
   - Without its cantillation, Google's Hebrew voice reads twice as fast; Apple's reads Hebrew alike either way.
   - Switching voices – books read along verse by verse, reading lists that change language – costs 0.1–0.7 s on Android and a Mac, 3–19 s on the iOS simulator.
 

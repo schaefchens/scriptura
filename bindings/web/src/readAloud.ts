@@ -2,7 +2,7 @@ import type { Passage, SpeechChange, Voice, WordPosition } from '@schaefchens/sc
 
 import type { Library, Speech, Utterance } from './library';
 
-/** The first utterance's length, and the others', in UTF-16 code units: Chrome takes up to 32,767. */
+/** The first utterance's length, and the others', in UTF-16 code units: Chromium takes up to 32,767. */
 const FIRST_LENGTH = 200;
 const LENGTH = 32000;
 
@@ -108,7 +108,7 @@ export class ReadAloud {
       spoken.onend = spoken.onerror = () => {
         if (!this.queued.includes(entry)) return;
         // A voice that ends an utterance it never started can't speak: rather than run through the
-        // rest, as Chrome once did with every utterance, reading stops.
+        // rest, as Brave once did with every utterance, reading stops.
         if (startedAt === undefined) return this.stop();
         this.sounded(startedAt);
         this.finished(entry);
