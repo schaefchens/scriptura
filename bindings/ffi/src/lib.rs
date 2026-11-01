@@ -27,6 +27,15 @@ pub enum RecordingsError {
     Invalid(String),
 }
 
+/// Marks that couldn't be read, with why: they aren't a JSON array of marks, or one ends before it
+/// starts.
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum MarksError {
+    #[error("{0}")]
+    Invalid(String),
+}
+
 /// A book as JS may see it: what it is, not what it says. Editions of the same book share its code.
 #[derive(uniffi::Record)]
 pub struct BookInfo {
@@ -48,6 +57,27 @@ pub struct RecordingInfo {
     pub book: String,
     pub chapter: u32,
     pub misfit: Option<String>,
+}
+
+/// An end of a mark: a word of a verse, or the whole verse, without one: see `scriptura::MarkEnd`.
+#[derive(uniffi::Record)]
+pub struct MarkEnd {
+    pub chapter: u32,
+    pub verse: u32,
+    pub word: Option<u32>,
+}
+
+/// A mark as JS may see it: which words of which book it marks and how, and whether it has a note –
+/// not the note itself.
+#[derive(uniffi::Record)]
+pub struct MarkInfo {
+    pub id: String,
+    pub book: String,
+    pub from: MarkEnd,
+    pub to: MarkEnd,
+    pub highlight: Option<String>,
+    pub underline: Option<String>,
+    pub note: bool,
 }
 
 /// A whole book, one chapter of it, or a verse range in that chapter.
@@ -77,6 +107,18 @@ pub struct Block {
     pub words: Vec<Word>,
     pub notes: Vec<NoteMark>,
     pub drop_cap: Option<DropCap>,
+    pub marks: Vec<PlacedMark>,
+}
+
+/// A host's mark in a paragraph, and its note where the mark ends: see `scriptura::PlacedMark`.
+#[derive(uniffi::Record)]
+pub struct PlacedMark {
+    pub id: String,
+    pub start: u32,
+    pub end: u32,
+    pub highlight: Option<String>,
+    pub underline: Option<String>,
+    pub note: Option<Vec<NoteRun>>,
 }
 
 #[derive(uniffi::Record)]
@@ -312,8 +354,40 @@ pub fn recordings() -> Vec<RecordingInfo> {
     library.recordings().iter().map(info).collect()
 }
 
+/// Adds the marks of a JSON array, each replacing one of the same id, and returns their ids.
+#[uniffi::export]
+pub fn add_marks(json: Vec<u8>) -> Result<Vec<String>, MarksError> {
+    LIBRARY.write().unwrap().add_marks(&json).map_err(|error| MarksError::Invalid(error.to_string()))
+}
+
+#[uniffi::export]
+pub fn remove_marks(ids: Vec<String>) {
+    LIBRARY.write().unwrap().remove_marks(&ids);
+}
+
+#[uniffi::export]
+pub fn clear_marks() {
+    LIBRARY.write().unwrap().clear_marks();
+}
+
+#[uniffi::export]
+pub fn marks() -> Vec<MarkInfo> {
+    let library = LIBRARY.read().unwrap();
+    let end = |end: &scriptura::MarkEnd| MarkEnd { chapter: end.chapter, verse: end.verse, word: end.word };
+    let info = |mark: &scriptura::Mark| MarkInfo {
+        id: mark.id.clone(),
+        book: mark.book.clone(),
+        from: end(&mark.from),
+        to: end(&mark.to),
+        highlight: mark.highlight.clone(),
+        underline: mark.underline.clone(),
+        note: !mark.note.is_empty(),
+    };
+    library.marks().iter().map(info).collect()
+}
+
 /// The passages as paragraphs, read along with `companions`, with the notes as asked for and drop
-/// caps if asked for: see `scriptura::Library::blocks`.
+/// caps if asked for, and the host's marks over their words: see `scriptura::Library::blocks`.
 #[uniffi::export]
 pub fn reader_blocks(
     references: Vec<Reference>,
@@ -323,13 +397,39 @@ pub fn reader_blocks(
     notes: Notes,
     drop_caps: bool,
 ) -> Vec<Block> {
+    let options = core_options(font_size, verse_per_line, companions, notes, drop_caps);
+    LIBRARY.read().unwrap().blocks(&core_references(references), &options).into_iter().map(Block::from).collect()
+}
+
+/// The marks in the passages' paragraphs, paragraph by paragraph as `reader_blocks` gives them with
+/// the same arguments: for a reader to draw them anew as they change, its layout kept.
+#[uniffi::export]
+pub fn reader_marks(
+    references: Vec<Reference>,
+    font_size: f64,
+    verse_per_line: bool,
+    companions: Vec<String>,
+    notes: Notes,
+    drop_caps: bool,
+) -> Vec<Vec<PlacedMark>> {
+    let options = core_options(font_size, verse_per_line, companions, notes, drop_caps);
+    let placed = LIBRARY.read().unwrap().marks_in(&core_references(references), &options);
+    placed.into_iter().map(|marks| marks.into_iter().map(PlacedMark::from).collect()).collect()
+}
+
+fn core_options(
+    font_size: f64,
+    verse_per_line: bool,
+    companions: Vec<String>,
+    notes: Notes,
+    drop_caps: bool,
+) -> scriptura::Options {
     let notes = match notes {
         Notes::None => scriptura::Notes::None,
         Notes::Marks => scriptura::Notes::Marks,
         Notes::Inline => scriptura::Notes::Inline,
     };
-    let options = scriptura::Options { font_size, verse_per_line, companions, notes, drop_caps };
-    LIBRARY.read().unwrap().blocks(&core_references(references), &options).into_iter().map(Block::from).collect()
+    scriptura::Options { font_size, verse_per_line, companions, notes, drop_caps }
 }
 
 fn core_references(references: Vec<Reference>) -> Vec<scriptura::Reference> {
@@ -367,25 +467,13 @@ impl From<scriptura::Block> for Block {
             drop_cap: block
                 .drop_cap
                 .map(|scriptura::DropCap { letter_start, letter_end }| DropCap { letter_start, letter_end }),
+            marks: block.marks.into_iter().map(PlacedMark::from).collect(),
         }
     }
 }
 
 impl From<scriptura::NoteMark> for NoteMark {
     fn from(note: scriptura::NoteMark) -> Self {
-        let runs = (note.runs.into_iter())
-            .map(|scriptura::NoteRun { text, role, language, target }| NoteRun {
-                text,
-                role,
-                language,
-                target: target.map(|scriptura::Target { book, chapter, verse, to }| Target {
-                    book,
-                    chapter,
-                    verse,
-                    to,
-                }),
-            })
-            .collect();
         NoteMark {
             chapter: note.chapter,
             verse: note.verse,
@@ -393,8 +481,28 @@ impl From<scriptura::NoteMark> for NoteMark {
             end: note.end,
             kind: note.kind,
             mark: note.mark,
-            runs,
+            runs: note.runs.into_iter().map(NoteRun::from).collect(),
         }
+    }
+}
+
+impl From<scriptura::PlacedMark> for PlacedMark {
+    fn from(mark: scriptura::PlacedMark) -> Self {
+        PlacedMark {
+            id: mark.id,
+            start: mark.start,
+            end: mark.end,
+            highlight: mark.highlight,
+            underline: mark.underline,
+            note: mark.note.map(|runs| runs.into_iter().map(NoteRun::from).collect()),
+        }
+    }
+}
+
+impl From<scriptura::NoteRun> for NoteRun {
+    fn from(scriptura::NoteRun { text, role, language, target }: scriptura::NoteRun) -> Self {
+        let target = target.map(|scriptura::Target { book, chapter, verse, to }| Target { book, chapter, verse, to });
+        NoteRun { text, role, language, target }
     }
 }
 

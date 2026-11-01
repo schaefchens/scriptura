@@ -1,6 +1,7 @@
 import {
   createReader,
   type MoveStep,
+  type Selection,
   type WebReader,
   type WebReaderOptions,
   type WordPosition,
@@ -23,6 +24,8 @@ export type ReaderHandle = {
   turn(forward: boolean): void;
   /** Lays the text out anew, as the reader does by itself as its library's books change, and stops reading aloud. */
   refresh(): void;
+  /** Selects words or verses, as a long press and a drag would, or nothing. Reported through onSelectionChange like any selection. */
+  select(selection: Selection | null): void;
 };
 
 export type ReaderProps = WebReaderOptions & {
@@ -42,7 +45,7 @@ export function Reader({ ref, className, style, ...options }: ReaderProps) {
   const made = useRef(false);
   const latest = useRef(options);
   latest.current = options;
-  const { library, onWordChange: _word, onLaidOut: _laidOut, onSpeechChange: _speech, onReference: _reference, ...shown } = options;
+  const { library, onWordChange: _word, onLaidOut: _laidOut, onSpeechChange: _speech, onReference: _reference, onSelectionChange: _selection, onMarkTap: _mark, ...shown } = options;
   const shownKey = JSON.stringify(shown);
   const withCallbacks = (): WebReaderOptions => ({
     ...latest.current,
@@ -50,6 +53,8 @@ export function Reader({ ref, className, style, ...options }: ReaderProps) {
     onLaidOut: (time) => latest.current.onLaidOut?.(time),
     onSpeechChange: (change) => latest.current.onSpeechChange?.(change),
     onReference: (target) => latest.current.onReference?.(target),
+    onSelectionChange: (selection) => latest.current.onSelectionChange?.(selection),
+    onMarkTap: (tap) => latest.current.onMarkTap?.(tap),
   });
 
   useEffect(() => {
@@ -75,6 +80,7 @@ export function Reader({ ref, className, style, ...options }: ReaderProps) {
     follow: () => reader.current?.follow(),
     turn: (forward) => reader.current?.turn(forward),
     refresh: () => reader.current?.refresh(),
+    select: (selection) => reader.current?.select(selection),
   }), []);
 
   return <div ref={element} className={className} style={style} />;

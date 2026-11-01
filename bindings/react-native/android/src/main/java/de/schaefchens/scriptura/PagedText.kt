@@ -4,18 +4,20 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
 import android.graphics.Rect
+import android.graphics.RectF
 import android.os.Bundle
 import android.text.SpannableString
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.SpannedString
+import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextDirectionHeuristics
 import android.text.TextPaint
 import android.text.style.LocaleSpan
 import android.view.GestureDetector
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.accessibility.AccessibilityManager
@@ -73,6 +75,15 @@ data class Mark(
 }
 
 /**
+ * A host's mark as it is drawn over the text: its words, from [start] to before [end], a fill behind
+ * them and a line under them – ARGB colors – and the sign of its note where it ends, if it has one.
+ */
+class Decoration(val start: Int, val end: Int, val fill: Int?, val line: Int?, val sign: Sign?)
+
+/** The sign of a mark's note: its mark's id, what it shows, in which color, after words [size] pixels large. */
+class Sign(val id: String, val text: String, val color: Int, val size: Float)
+
+/**
  * Paragraphs of the text, from [start] to [end], that stand side by side with others: in a row, in a
  * column of it, and whether they are headings, which go on a page only with the row after them.
  */
@@ -108,8 +119,9 @@ class TextFormat(
  * the view's height. The first pages come from laying out only the start of the text, to a
  * paragraph's end; the whole of it is laid out on another thread, so a long book shows without a
  * wait – and until then, what was in sight stays as it was. Only what is in sight is drawn. A page
- * follows the finger and settles; the scroll flings. Screen readers get each heading and verse in
- * sight, and turn the pages.
+ * follows the finger and settles; the scroll flings. A long press chooses words, the finger moving
+ * no text until it lifts. A host's marks are drawn under the text, the signs of their notes over it.
+ * Screen readers get each heading and verse in sight, each note's mark and sign, and turn the pages.
  *
  * The text comes in sections, each laid out at its own width: text that flows, or books read along
  * side by side, in cells, a column for each book, each row level. In pages, each section starts a
@@ -121,6 +133,20 @@ class PagedText(context: Context) : View(context) {
 
   /** A screen reader's tap on a note's mark, by the note's index. */
   var onMarkTap: ((Int) -> Unit)? = null
+
+  /** A tap, or a screen reader's, on the sign of a mark's note, by the mark's id. */
+  var onSignTap: ((String) -> Unit)? = null
+
+  /**
+   * A long press: the offset of the character there, or none where no text is; then, the finger still
+   * down, each character it moves over; and the finger lifting. The text doesn't move meanwhile.
+   */
+  var onSelectStart: ((Int?) -> Unit)? = null
+  var onSelectMove: ((Int?) -> Unit)? = null
+  var onSelectEnd: (() -> Unit)? = null
+
+  /** A screen reader's selection of a verse – or, if the second is true, the selection taken on to it. */
+  var onAccessibilitySelect: ((Readable, Boolean) -> Unit)? = null
 
   /** The first pages show. */
   var onFirstPages: (() -> Unit)? = null
@@ -162,6 +188,25 @@ class PagedText(context: Context) : View(context) {
       highlightPaint.color = value
     }
 
+  /** The host's marks, drawn over the text. */
+  var decorations: List<Decoration> = emptyList()
+    private set
+
+  /** The words selected, as stretches of the text – each from its first character to before its last – and their color. */
+  private var selection: List<IntRange> = emptyList()
+  var selectionColor: Int
+    get() = selectionPaint.color
+    set(value) {
+      selectionPaint.color = value
+    }
+  private val selectionPaint = Paint()
+  private val markPaint = Paint()
+  private val signPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
+  private val density = resources.displayMetrics.density
+
+  /** Whether a finger chooses words, after a long press: it moves no text until it lifts. */
+  private var selecting = false
+
   /** The layout in sight, and the text, format and sections' widths the whole text is being laid out for on another thread. */
   private var shown: Shown? = null
   private var underWay: Triple<Spanned, TextFormat, List<Int>>? = null
@@ -172,7 +217,6 @@ class PagedText(context: Context) : View(context) {
   private var highlight: IntRange? = null
   /** A character to bring into sight once the layout reaches it. */
   private var pendingSight: Int? = null
-  private val highlightPath = Path()
   private val highlightPaint = Paint()
   private val scroller = OverScroller(context)
   private var flung = false
@@ -235,8 +279,17 @@ class PagedText(context: Context) : View(context) {
     }
 
     override fun onSingleTapUp(event: MotionEvent): Boolean {
-      onTap?.invoke(offsetAt(event.x, event.y))
+      val sign = signAt(event.x, event.y)
+      if (sign != null) onSignTap?.invoke(sign) else onTap?.invoke(offsetAt(event.x, event.y))
       return true
+    }
+
+    // A long press chooses words: the gestures take no move of the finger after it.
+    override fun onLongPress(event: MotionEvent) {
+      selecting = true
+      parent?.requestDisallowInterceptTouchEvent(true)
+      performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+      onSelectStart?.invoke(offsetAt(event.x, event.y))
     }
   })
 
@@ -246,6 +299,9 @@ class PagedText(context: Context) : View(context) {
     this.format = format
     this.anchor = anchor
     highlight = null
+    decorations = emptyList()
+    selection = emptyList()
+    selecting = false
     spoken = null
     pendingSight = null
     if (width > 0 && height > 0) paginate()
@@ -356,14 +412,14 @@ class PagedText(context: Context) : View(context) {
   override fun onDraw(canvas: Canvas) {
     val shown = shown ?: return
     // In the layout of the section it is in.
-    val highlighted = highlight?.takeIf { shown.text === text && it.last <= shown.end }?.let { range ->
-      shown.placeOf(range.first)?.layout?.also { it.getSelectionPath(range.first, range.last, highlightPath) }
-    }
+    val highlighted = highlight?.takeIf { shown.text === text && it.last <= shown.end }?.let { range -> shown.placeOf(range.first)?.layout }
+    // The marks and the selection are of the text given; the text in sight may still be the one before.
+    val decorated = shown.text === text
     if (shown.format.continuous) {
       val top = (scrollY - inset).toInt()
       canvas.save()
       canvas.clipRect(scrollX, scrollY, scrollX + width, scrollY + height)
-      for (place in shown.placesBetween(top, top + height)) draw(canvas, place, 0, highlighted)
+      for (place in shown.placesBetween(top, top + height)) draw(canvas, place, 0, highlighted, decorated)
       canvas.restore()
       return
     }
@@ -371,22 +427,166 @@ class PagedText(context: Context) : View(context) {
     val position = scrollX / shown.width.toFloat()
     for (slot in floor(position).toInt()..ceil(position).toInt()) {
       val page = if (shown.format.rightToLeft) -slot else slot
-      for (place in shown.pages.getOrNull(page).orEmpty()) draw(canvas, place, shown.scrollXOf(page), highlighted)
+      for (place in shown.pages.getOrNull(page).orEmpty()) draw(canvas, place, shown.scrollXOf(page), highlighted, decorated)
     }
   }
 
-  /** Draws the lines of [place] on a page that starts [pageLeft] from the content's left – and the highlight, if it is in [highlighted]. */
-  private fun draw(canvas: Canvas, place: Place, pageLeft: Int, highlighted: StaticLayout?) {
+  /**
+   * Draws the lines of [place] on a page that starts [pageLeft] from the content's left – and the
+   * highlight, if it is in [highlighted]. Under the text, the marks' fills, the words selected, the
+   * highlight and the marks' lines; over it, the signs of the marks' notes, which may stand in the
+   * margin.
+   */
+  private fun draw(canvas: Canvas, place: Place, pageLeft: Int, highlighted: StaticLayout?, decorated: Boolean) {
     val layout = place.layout
     val top = layout.getLineTop(place.firstLine)
+    val (from, to) = layout.getLineStart(place.firstLine) to layout.getLineEnd(place.endLine - 1)
     canvas.save()
     canvas.translate(pageLeft + place.left, inset + place.top - top)
     // Short of the next line's top: a layout draws the line that starts at the clip's bottom too,
     // and the marks above a line such as an Arabic one's would show here.
     canvas.clipRect(0, top, place.width, layout.getLineTop(place.endLine) - 1)
-    if (layout === highlighted) canvas.drawPath(highlightPath, highlightPaint)
+    if (decorated) {
+      for (decoration in decorations) {
+        markPaint.color = decoration.fill ?: continue
+        fill(canvas, layout, maxOf(decoration.start, from), minOf(decoration.end, to), markPaint)
+      }
+      for (range in selection) fill(canvas, layout, maxOf(range.first, from), minOf(range.last, to), selectionPaint)
+    }
+    val word = highlight
+    if (layout === highlighted && word != null) fill(canvas, layout, maxOf(word.first, from), minOf(word.last, to), highlightPaint)
+    if (decorated) {
+      // A little under the baseline, so the word the voice is at shows its line too.
+      val thickness = 2 * density
+      for (decoration in decorations) {
+        val line = decoration.line ?: continue
+        markPaint.color = line
+        forEachLine(layout, maxOf(decoration.start, from), minOf(decoration.end, to)) { at, left, right ->
+          val y = layout.getLineBaseline(at) + thickness
+          canvas.drawRect(left, y, right, y + thickness, markPaint)
+        }
+      }
+    }
     layout.draw(canvas)
     canvas.restore()
+    if (!decorated) return
+    val signs = decorations.filter { it.sign != null && it.end - 1 in from until to }
+    if (signs.isEmpty()) return
+    canvas.save()
+    canvas.translate(pageLeft + place.left, inset + place.top - top)
+    for (decoration in signs) {
+      val sign = decoration.sign ?: continue
+      val (x, baseline) = signOrigin(layout, decoration, sign)
+      signPaint.color = sign.color
+      canvas.drawText(sign.text, x, baseline, signPaint)
+    }
+    canvas.restore()
+  }
+
+  /** Fills the text from [start] to before [end] in [layout], line by line: from its first character's edge to its last's, as tall as its line's text. */
+  private fun fill(canvas: Canvas, layout: StaticLayout, start: Int, end: Int, paint: Paint) {
+    forEachLine(layout, start, end) { line, left, right ->
+      canvas.drawRect(left, layout.getLineTop(line).toFloat(), right, textBottom(layout, line), paint)
+    }
+  }
+
+  /** Where a line's text ends below: at its bottom, short of the space after its paragraph, if it is the paragraph's last. */
+  private fun textBottom(layout: StaticLayout, line: Int): Float {
+    val bottom = layout.getLineBottom(line).toFloat()
+    val end = layout.getLineEnd(line)
+    if (end == 0) return bottom
+    val spacing = text.getSpans(end - 1, end, ParagraphSpacingSpan::class.java).firstOrNull { text.getSpanEnd(it) == end }?.spacing ?: return bottom
+    // The line spacing's multiple takes the paragraph's space along.
+    return maxOf(layout.getLineTop(line).toFloat(), bottom - spacing * format.lineSpacing)
+  }
+
+  /**
+   * Each line's part of the text from [start] to before [end] in [layout], from the edge of its first
+   * character to that of its last, its spaces at the line's end left out.
+   */
+  private inline fun forEachLine(layout: StaticLayout, start: Int, end: Int, block: (line: Int, left: Float, right: Float) -> Unit) {
+    if (start >= end) return
+    for (line in layout.getLineForOffset(start)..layout.getLineForOffset(end - 1)) {
+      val (from, to) = maxOf(start, layout.getLineStart(line)) to minOf(end, layout.getLineVisibleEnd(line))
+      if (from >= to) continue
+      val (x1, x2) = layout.getPrimaryHorizontal(from) to edgeBefore(layout, line, to)
+      block(line, minOf(x1, x2), maxOf(x1, x2))
+    }
+  }
+
+  /** Where the text on [line] of [layout] stands up to [offset]: the edge after its character before – at the line's end, the line's. */
+  private fun edgeBefore(layout: StaticLayout, line: Int, offset: Int) = when {
+    // At the line's end, the offset is the next line's start.
+    offset < layout.getLineEnd(line) || line == layout.lineCount - 1 -> layout.getPrimaryHorizontal(offset)
+    layout.getParagraphDirection(line) == Layout.DIR_RIGHT_TO_LEFT -> layout.getLineLeft(line)
+    else -> layout.getLineRight(line)
+  }
+
+  /**
+   * Where the sign of a mark's note stands in its layout: its left and its baseline, raised as a note's
+   * mark is – after the mark's last word, and after a note's mark that follows it straight away; in a
+   * paragraph from the right, before them.
+   */
+  private fun signOrigin(layout: StaticLayout, decoration: Decoration, sign: Sign): Pair<Float, Float> {
+    var end = decoration.end
+    marks.firstOrNull { it.start == end && it.end - it.start == it.text.length }?.let { end = it.end }
+    val line = layout.getLineForOffset(decoration.end - 1)
+    val edge = edgeBefore(layout, line, end)
+    signPaint.textSize = sign.size * MarkSpan.SCALE
+    val gap = sign.size * 0.05f
+    val x = if (layout.getParagraphDirection(line) == Layout.DIR_RIGHT_TO_LEFT) edge - gap - signPaint.measureText(sign.text) else edge + gap
+    return x to layout.getLineBaseline(line) - sign.size * MarkSpan.RAISE
+  }
+
+  /**
+   * Where the sign of a mark's note shows in the content, on [place], on a page [pageLeft] from the
+   * content's left – with room around it for a finger, if [touch].
+   */
+  private fun signBounds(place: Place, decoration: Decoration, pageLeft: Int, touch: Boolean): Rect? {
+    val sign = decoration.sign ?: return null
+    val layout = place.layout
+    val (x, baseline) = signOrigin(layout, decoration, sign)
+    val metrics = signPaint.fontMetrics
+    val (left, origin) = pageLeft + place.left + x to inset + place.top - layout.getLineTop(place.firstLine) + baseline
+    val bounds = RectF(left, origin + metrics.ascent, left + signPaint.measureText(sign.text), origin + metrics.descent)
+    if (touch) bounds.inset(-8 * density, -6 * density)
+    return Rect(bounds.left.toInt(), bounds.top.toInt(), ceil(bounds.right).toInt(), ceil(bounds.bottom).toInt())
+  }
+
+  /** Where the sign of a mark's note shows in the content, if it is laid out. */
+  private fun signBounds(decoration: Decoration, touch: Boolean): Rect? {
+    val shown = shown?.takeIf { it.text === text } ?: return null
+    val last = decoration.end - 1
+    if (decoration.sign == null || (last >= shown.end && !shown.complete)) return null
+    val place = shown.placeOf(last) ?: return null
+    val line = place.layout.getLineForOffset(last)
+    if (line < place.firstLine || line >= place.endLine) return null
+    return signBounds(place, decoration, if (shown.format.continuous) 0 else shown.scrollXOf(place.page), touch)
+  }
+
+  /** The sign of a mark's note at a point in this view's pixels, or near it, by the mark's id. */
+  fun signAt(x: Float, y: Float): String? {
+    val (atX, atY) = (x + scrollX).toInt() to (y + scrollY).toInt()
+    return decorations.firstOrNull { signBounds(it, touch = true)?.contains(atX, atY) == true }?.sign?.id
+  }
+
+  /** Where the sign of a mark's note shows, in this view's pixels, if it does. */
+  fun signRect(id: String): Rect? {
+    val decoration = decorations.firstOrNull { it.sign?.id == id } ?: return null
+    return signBounds(decoration, touch = false)?.apply { offset(-scrollX, -scrollY) }
+  }
+
+  /** Draws the host's marks over the text: see [Decoration]. Screen readers find the signs of their notes, and hear marked verses as marked. */
+  fun decorate(decorations: List<Decoration>) {
+    this.decorations = decorations
+    updatePieces()
+    invalidate()
+  }
+
+  /** Draws the words selected, as stretches of the text – each from its first character to before its last – or none. */
+  fun select(stretches: List<IntRange>) {
+    selection = stretches
+    invalidate()
   }
 
   /** The offset of the character at a point in this view's pixels, if the text holds one there – or a little way around it, the nearest. */
@@ -503,7 +703,7 @@ class PagedText(context: Context) : View(context) {
 
   private fun focusSpoken(): Boolean {
     val spoken = spoken ?: return true
-    val piece = pieces.indexOfFirst { spoken.first in it.start until it.end }
+    val piece = pieces.indexOfFirst { it.mark == null && it.sign == null && spoken.first in it.start until it.end }
     if (piece < 0) return false
     if (screenReaders.accessibilityFocusedVirtualViewId == piece) {
       screenReaders.invalidateVirtualView(piece, AccessibilityEventCompat.CONTENT_CHANGE_TYPE_STATE_DESCRIPTION)
@@ -540,6 +740,18 @@ class PagedText(context: Context) : View(context) {
     when (event.actionMasked) {
       MotionEvent.ACTION_DOWN -> touching = true
       MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> touching = false
+    }
+    // After a long press, the finger chooses words until it lifts; the gestures still see it lift.
+    if (selecting) {
+      when (event.actionMasked) {
+        MotionEvent.ACTION_MOVE -> onSelectMove?.invoke(offsetAt(event.x, event.y))
+        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+          selecting = false
+          onSelectEnd?.invoke()
+        }
+      }
+      gestures.onTouchEvent(event)
+      return true
     }
     gestures.onTouchEvent(event)
     val shown = shown
@@ -591,6 +803,12 @@ class PagedText(context: Context) : View(context) {
             (left + place.width).toInt(), (origin + layout.getLineBottom(layout.getLineForOffset(maxOf(end - 1, start)))).toInt(),
           )
           add(Piece(readable, start, end, bounds))
+          // After it, the signs of the marks' notes that end in it: buttons of their own.
+          for (decoration in decorations) {
+            val sign = decoration.sign ?: continue
+            if (decoration.end - 1 !in start until end) continue
+            signBounds(place, decoration, pageLeft, touch = true)?.let { add(Piece(readable, decoration.end - 1, decoration.end, it, sign = sign.id)) }
+          }
         }
       }
       if (shown.format.continuous) {
@@ -610,26 +828,35 @@ class PagedText(context: Context) : View(context) {
     screenReaders.invalidateRoot()
   }
 
-  /** The headings, verses and notes' marks in sight, as JS may see them: where they stand and where they are, in dp, but not their text. */
+  /**
+   * The headings, verses, notes' marks and signs of marks' notes in sight, as JS may see them: where
+   * they stand and where they are, in dp, but not their text; and whether a verse is marked.
+   */
   fun accessibilityElementsInSight(): List<Map<String, Any?>> {
-    val density = resources.displayMetrics.density
     return pieces.map { piece ->
       val bounds = Rect(piece.bounds).apply { offset(-scrollX, -scrollY) }
       val frame = listOf(bounds.left, bounds.top, bounds.width(), bounds.height()).map { (it / density * 10).roundToInt() / 10.0 }
       val mark = piece.mark
-      if (mark != null) {
-        mapOf(
+      val sign = piece.sign
+      when {
+        mark != null -> mapOf(
           "passage" to mark.passage, "book" to mark.book, "chapter" to mark.chapter, "verse" to mark.verse, "note" to mark.text, "kind" to mark.kind,
           "language" to mark.language, "frame" to frame,
         )
-      } else {
-        mapOf(
+        sign != null -> mapOf(
+          "passage" to piece.readable.passage, "book" to piece.readable.book, "chapter" to piece.readable.chapter, "verse" to piece.readable.verse,
+          "kind" to "mark", "mark" to sign, "language" to piece.readable.language, "frame" to frame,
+        )
+        else -> mapOf(
           "passage" to piece.readable.passage, "book" to piece.readable.book, "chapter" to piece.readable.chapter, "verse" to piece.readable.verse,
           "language" to piece.readable.language, "frame" to frame,
-        )
+        ) + if (isMarked(piece)) mapOf("marked" to true) else emptyMap()
       }
     }
   }
+
+  /** Whether a verse piece has a host's mark on it. */
+  private fun isMarked(piece: Piece) = piece.readable.verse != null && decorations.any { it.start < piece.end && it.end > piece.start }
 
   /** A piece's text as a screen reader reads it: each note's mark in it named where it stands, as ", footnote 1, "; a note shown in full is read as it stands. */
   private fun spoken(piece: Piece): String {
@@ -830,14 +1057,14 @@ class PagedText(context: Context) : View(context) {
     val height get() = layout.getLineTop(endLine) - layout.getLineTop(firstLine)
   }
 
-  /** A heading or verse in sight, cut to one column, and where it is in the content – or a note's mark in a verse. */
-  private class Piece(val readable: Readable, val start: Int, val end: Int, val bounds: Rect, val mark: Mark? = null)
+  /** A heading or verse in sight, cut to one column, and where it is in the content – or a note's mark in a verse, or the sign of a mark's note, by the mark's id. */
+  private class Piece(val readable: Readable, val start: Int, val end: Int, val bounds: Rect, val mark: Mark? = null, val sign: String? = null)
 
   private inner class ScreenReaders : ExploreByTouchHelper(this@PagedText) {
     override fun getVirtualViewAt(x: Float, y: Float): Int {
       val (atX, atY) = (x + scrollX).toInt() to (y + scrollY).toInt()
-      // A mark before the verse it is in.
-      val mark = pieces.indexOfFirst { it.mark != null && it.bounds.contains(atX, atY) }
+      // A note's mark, or a sign, before the verse it is in.
+      val mark = pieces.indexOfFirst { (it.mark != null || it.sign != null) && it.bounds.contains(atX, atY) }
       val index = if (mark >= 0) mark else pieces.indexOfFirst { it.bounds.contains(atX, atY) }
       return if (index >= 0) index else INVALID_ID
     }
@@ -854,30 +1081,42 @@ class PagedText(context: Context) : View(context) {
         return
       }
       val mark = piece.mark
-      if (mark != null) {
-        // A note's mark is a button that opens it.
+      if (mark != null || piece.sign != null) {
+        // A note's mark is a button that opens it; so is the sign of a mark's note.
         node.className = "android.widget.Button"
-        node.text = mark.label
+        node.text = mark?.label ?: NOTE
         node.setBoundsInParent(piece.bounds)
         node.isClickable = true
         node.addAction(AccessibilityActionCompat.ACTION_CLICK)
         return
       }
-      // TalkBack reads a piece with the voice of its language, and each note's mark by name.
-      node.text = SpannableString(spoken(piece)).apply {
-        setSpan(LocaleSpan(Locale.forLanguageTag(piece.readable.language)), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+      // TalkBack reads a piece with the voice of its language, and each note's mark by name; a
+      // marked verse as marked, first.
+      val marked = if (isMarked(piece)) MARKED else ""
+      node.text = SpannableString(marked + spoken(piece)).apply {
+        setSpan(LocaleSpan(Locale.forLanguageTag(piece.readable.language)), marked.length, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
       }
       node.setBoundsInParent(piece.bounds)
       node.isHeading = piece.readable.verse == null
       spoken?.takeIf { it.first in piece.start until piece.end }?.let { node.stateDescription = text.subSequence(it.first, it.last + 1) }
       for ((action, label, _) in MOVES) node.addAction(AccessibilityActionCompat(action, label))
+      if (piece.readable.verse != null) for ((action, label, _) in SELECTIONS) node.addAction(AccessibilityActionCompat(action, label))
     }
 
     override fun onPerformActionForVirtualView(id: Int, action: Int, arguments: Bundle?): Boolean {
       val piece = pieces.getOrNull(id) ?: return false
+      if (piece.sign != null) {
+        if (action != AccessibilityNodeInfoCompat.ACTION_CLICK) return false
+        onSignTap?.invoke(piece.sign)
+        return true
+      }
       if (piece.mark != null) {
         if (action != AccessibilityNodeInfoCompat.ACTION_CLICK) return false
         onMarkTap?.invoke(piece.mark.index)
+        return true
+      }
+      SELECTIONS.firstOrNull { it.first == action }?.let { (_, _, extend) ->
+        onAccessibilitySelect?.invoke(piece.readable, extend)
         return true
       }
       val step = MOVES.firstOrNull { it.first == action }?.third ?: return false
@@ -904,6 +1143,16 @@ class PagedText(context: Context) : View(context) {
       Triple(R.id.scriptura_next_verse, "Next verse", "verse+1"),
       Triple(R.id.scriptura_previous_verse, "Previous verse", "verse-1"),
     )
+
+    /** Selecting a verse, or taking the selection on to it, as accessibility actions; the second says which. */
+    val SELECTIONS = listOf(
+      Triple(R.id.scriptura_select_verse, "Select verse", false),
+      Triple(R.id.scriptura_extend_selection, "Extend selection to this verse", true),
+    )
+
+    /** What screen readers call the sign of a mark's note, and say before a marked verse. */
+    const val NOTE = "Note"
+    const val MARKED = "Marked. "
   }
 }
 

@@ -1,15 +1,21 @@
 import {
   addBooks,
+  addMarks,
   addRecordings,
   type BookInfo,
   books,
-  recordings,
+  type Mark,
+  MARK_COLORS,
+  type MarkEnd,
   type MoveStep,
   palette,
   Reader,
   type ReaderHandle,
+  recordings,
   type ReferenceTarget,
+  removeMarks,
   SCRIPT_FONTS,
+  type Selection,
   type SpeechChange,
   type WordPosition,
 } from '@schaefchens/scriptura-react-native';
@@ -53,6 +59,12 @@ export default function App() {
   const [missing, setMissing] = useState<string>();
   const pending = useRef<WordPosition>(undefined);
   const reader = useRef<ReaderHandle>(null);
+  // The app's marks, kept here with their notes, and given to the reader to draw – as JSON, from JS: an app keeps the text of its
+  // notes out of JS by adding them from a file; the words selected, to mark; a note for the next mark; and the marks tapped last.
+  const [marks, setMarks] = useState<Mark[]>([]);
+  const [selection, setSelection] = useState<Selection | null>(null);
+  const [note, setNote] = useState('');
+  const [tapped, setTapped] = useState<string[]>([]);
 
   // The books and recordings the app bundles, read natively: their text never passes through JS.
   useEffect(() => {
@@ -96,6 +108,22 @@ export default function App() {
     const timer = setTimeout(() => reader.current?.jump(pending.current!).then(() => (pending.current = undefined)), 300);
     return () => clearTimeout(timer);
   }, [book]);
+  // A mark on the words selected, with the note typed, if any: the selection then goes.
+  const mark = (style: Pick<Mark, 'highlight' | 'underline'>) => {
+    if (!selection) return;
+    const made: Mark = { id: `mark-${Date.now()}`, book: selection.book, from: selection.from, to: selection.to, ...style };
+    if (note.trim()) made.note = [{ text: note.trim() }];
+    setMarks([...marks, made]);
+    addMarks({ json: JSON.stringify([made]) });
+    setNote('');
+    reader.current?.select(null);
+  };
+  const remove = (ids: string[]) => {
+    setMarks(marks.filter((mark) => !ids.includes(mark.id)));
+    removeMarks(ids);
+    setTapped([]);
+  };
+  const tappedNotes = marks.filter((mark) => tapped.includes(mark.id) && mark.note).map((mark) => mark.note!.map((run) => run.text).join(''));
 
   const button = (label: string, onPress: () => void, selectedButton = false) => (
     <Pressable key={label} onPress={onPress} style={[styles.button, { borderColor: colors.border }, selectedButton && { backgroundColor: colors.text }]}>
@@ -133,6 +161,25 @@ export default function App() {
           })}
           {speech.state === 'speaking' && speech.following === false && button('Back to the voice', () => reader.current?.follow())}
         </View>
+        {selection && (
+          <View style={styles.row}>
+            <Text style={{ color: colors.text }}>Mark {describeSelection(selection)}:</Text>
+            {Object.keys(MARK_COLORS).map((color) => (
+              <Pressable key={color} onPress={() => mark({ highlight: color })} style={[styles.button, { borderColor: colors.border, backgroundColor: colors.marks[color] }]}>
+                <Text style={{ color: colors.text }}>{color}</Text>
+              </Pressable>
+            ))}
+            {button('Underline', () => mark({ underline: 'blue' }))}
+            <TextInput value={note} onChangeText={setNote} placeholder="with a note" placeholderTextColor={colors.secondary} style={[styles.input, { color: colors.text, borderColor: colors.border }]} />
+            {button('Cancel', () => reader.current?.select(null))}
+          </View>
+        )}
+        {tapped.length > 0 && (
+          <View style={styles.row}>
+            <Text style={{ color: colors.text }}>{tappedNotes.length > 0 ? `Marked: ${tappedNotes.join(' · ')}` : 'Marked'}</Text>
+            {button(tapped.length > 1 ? 'Delete marks' : 'Delete mark', () => remove(tapped))}
+          </View>
+        )}
         <Text style={[styles.position, { color: colors.text }]}>
           {position ? `‎${title(position.book)}‎ ${position.chapter}:${position.verse} · word ${position.word + 1}` : 'Tap a word'}
           {missing ? ` · ${missing}` : ''}
@@ -158,9 +205,14 @@ export default function App() {
           speakAlong={speakAlong}
           speechRate={rate}
           recordedVoices={recited ? [recited] : []}
-          onWordChange={setPosition}
+          onWordChange={(word) => {
+            setPosition(word);
+            setTapped([]);
+          }}
           onSpeechChange={onSpeechChange}
           onReference={onReference}
+          onSelectionChange={setSelection}
+          onMarkTap={(tap) => setTapped(tap.ids)}
         />
         <Text style={[styles.sources, { color: colors.secondary }]}>
           World English Bible, Luther 1912 and Smith & Van Dyck, public domain; the Westminster Leningrad Codex from the Open
@@ -172,6 +224,10 @@ export default function App() {
     </SafeAreaProvider>
   );
 }
+
+/** A selection as "1:17–2:1", a word as "1:17·4". */
+const describeSelection = ({ from, to }: Selection) => `${describeEnd(from)}–${describeEnd(to)}`;
+const describeEnd = (end: MarkEnd) => `${end.chapter}:${end.verse}${end.word === undefined ? '' : `·${end.word + 1}`}`;
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },

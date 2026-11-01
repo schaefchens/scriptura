@@ -25,6 +25,19 @@ struct RecordingInfo<'a> {
     misfit: Option<String>,
 }
 
+/// A mark as a list shows it: which words of which book it marks and how, and whether it has a note –
+/// not the note itself.
+#[derive(Serialize)]
+struct MarkInfo<'a> {
+    id: &'a str,
+    book: &'a str,
+    from: scriptura::MarkEnd,
+    to: scriptura::MarkEnd,
+    highlight: Option<&'a str>,
+    underline: Option<&'a str>,
+    note: bool,
+}
+
 /// A book as a list of books shows it: what it is, not what it says.
 #[derive(Serialize)]
 struct BookInfo<'a> {
@@ -129,6 +142,40 @@ impl Library {
         serde_json::to_string(&recordings).expect("recordings serialize")
     }
 
+    /// Adds the marks of a JSON array, each replacing one of the same id, and returns their ids. A
+    /// mark that ends before it starts is refused.
+    #[wasm_bindgen(js_name = addMarks)]
+    pub fn add_marks(&mut self, json: &[u8]) -> Result<Vec<String>, JsError> {
+        Ok(self.0.add_marks(json)?)
+    }
+
+    #[wasm_bindgen(js_name = removeMarks)]
+    pub fn remove_marks(&mut self, ids: Vec<String>) {
+        self.0.remove_marks(&ids);
+    }
+
+    #[wasm_bindgen(js_name = clearMarks)]
+    pub fn clear_marks(&mut self) {
+        self.0.clear_marks();
+    }
+
+    /// The marks as JSON: id, book, from and to, highlight and underline of each, and whether it has a note.
+    #[wasm_bindgen(js_name = marksJson)]
+    pub fn marks_json(&self) -> String {
+        let marks: Vec<_> = (self.0.marks().iter())
+            .map(|mark| MarkInfo {
+                id: &mark.id,
+                book: &mark.book,
+                from: mark.from,
+                to: mark.to,
+                highlight: mark.highlight.as_deref(),
+                underline: mark.underline.as_deref(),
+                note: !mark.note.is_empty(),
+            })
+            .collect();
+        serde_json::to_string(&marks).expect("marks serialize")
+    }
+
     /// The books as JSON: id, code, title, work, language and direction of each.
     #[wasm_bindgen(js_name = booksJson)]
     pub fn books_json(&self) -> String {
@@ -145,9 +192,10 @@ impl Library {
         serde_json::to_string(&books).expect("books serialize")
     }
 
-    /// The passages – a JSON array of references – as paragraphs, in JSON. `options` is JSON too:
-    /// fontSize, versePerLine and companions, how the notes show (notes: "marks", "inline" or
-    /// "none"; marks by default) and whether drop caps are wanted (dropCaps: by default they are).
+    /// The passages – a JSON array of references – as paragraphs, in JSON, the marks over their
+    /// words. `options` is JSON too: fontSize, versePerLine and companions, how the notes show
+    /// (notes: "marks", "inline" or "none"; marks by default) and whether drop caps are wanted
+    /// (dropCaps: by default they are).
     #[wasm_bindgen(js_name = blocksJson)]
     pub fn blocks_json(&self, references: &str, options: &str) -> Result<String, JsError> {
         let Options { font_size, verse_per_line, companions, notes, drop_caps } = serde_json::from_str(options)?;

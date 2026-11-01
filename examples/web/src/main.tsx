@@ -2,6 +2,9 @@ import {
   addScriptFonts,
   Library,
   loadScriptura,
+  type Mark,
+  MARK_COLORS,
+  type MarkEnd,
   type MoveStep,
   type Passage,
   palette,
@@ -9,6 +12,7 @@ import {
   type ReaderHandle,
   type ReferenceTarget,
   SCRIPT_FONTS,
+  type Selection,
   type SpeechChange,
   type WordPosition,
 } from '@schaefchens/scriptura-react';
@@ -68,6 +72,12 @@ function App() {
   const [missing, setMissing] = useState<string>();
   const pending = useRef<WordPosition>(undefined);
   const reader = useRef<ReaderHandle>(null);
+  // The page's marks, kept here with their notes as an app would keep them, and given to the library to draw; the words selected,
+  // to mark; a note for the next mark; and the marks tapped last, by id, to delete.
+  const [marks, setMarks] = useState<Mark[]>([]);
+  const [selection, setSelection] = useState<Selection | null>(null);
+  const [note, setNote] = useState('');
+  const [tapped, setTapped] = useState<string[]>([]);
 
   const passages = useMemo(() => (book === 'sign' ? SIGN_OF_JONAH : [{ book }]), [book]);
   // Other editions of the passages' books, which can be read along with them.
@@ -96,6 +106,27 @@ function App() {
     if (pending.current?.book === book) reader.current?.jump(pending.current);
     pending.current = undefined;
   }, [book]);
+  // A mark on the words selected, with the note typed, if any: the selection then goes.
+  const mark = (style: Pick<Mark, 'highlight' | 'underline'>) => {
+    if (!selection) return;
+    const made: Mark = { id: `mark-${Date.now()}`, book: selection.book, from: selection.from, to: selection.to, ...style };
+    if (note.trim()) made.note = [{ text: note.trim() }];
+    setMarks([...marks, made]);
+    library.addMarks([made]);
+    setNote('');
+    cancel();
+  };
+  // The page's selection goes as the note is typed: the words selected last stay to be marked, until cancelled.
+  const cancel = () => {
+    reader.current?.select(null);
+    setSelection(null);
+  };
+  const remove = (ids: string[]) => {
+    setMarks(marks.filter((mark) => !ids.includes(mark.id)));
+    library.removeMarks(ids);
+    setTapped([]);
+  };
+  const tappedNotes = marks.filter((mark) => tapped.includes(mark.id) && mark.note).map((mark) => mark.note!.map((run) => run.text).join(''));
 
   return (
     <main style={{ background: colors.background, color: colors.text }}>
@@ -158,6 +189,27 @@ function App() {
           {speech.unvoiced?.length ? ` · no voice for ${speech.unvoiced.join(', ')}` : ''}
         </output>
       </header>
+      {/* A row of its own, always there, so the reader keeps its height as a selection comes and goes. */}
+      <div className="marking">
+        {selection ? (
+          <>
+            Mark {describeSelection(selection)}:
+            {Object.keys(MARK_COLORS).map((color) => (
+              <button key={color} onClick={() => mark({ highlight: color })} style={{ background: colors.marks[color] }}>{color}</button>
+            ))}
+            <button onClick={() => mark({ underline: 'blue' })}>Underline</button>
+            <input value={note} onChange={(event) => setNote(event.target.value)} placeholder="with a note" size={14} />
+            <button onClick={cancel}>Cancel</button>
+          </>
+        ) : tapped.length > 0 ? (
+          <>
+            {tappedNotes.length > 0 ? `Marked: ${tappedNotes.join(' · ')}` : 'Marked'}
+            <button onClick={() => remove(tapped)}>Delete {tapped.length > 1 ? 'marks' : 'mark'}</button>
+          </>
+        ) : (
+          'Select words to mark them; tap a mark to delete it, its sign to read its note.'
+        )}
+      </div>
       <Reader
         ref={reader}
         className="reader"
@@ -177,9 +229,14 @@ function App() {
         speakAlong={speakAlong}
         speechRate={rate}
         recordedVoices={recited ? [recited] : []}
-        onWordChange={setPosition}
+        onWordChange={(word) => {
+          setPosition(word);
+          setTapped([]);
+        }}
         onSpeechChange={onSpeechChange}
         onReference={onReference}
+        onSelectionChange={(selected) => selected && setSelection(selected)}
+        onMarkTap={(tap) => setTapped(tap.ids)}
       />
       <footer>
         World English Bible, Luther 1912 and Smith &amp; Van Dyck, public domain; the Westminster Leningrad Codex from the{' '}
@@ -192,6 +249,10 @@ function App() {
     </main>
   );
 }
+
+/** A selection as "1:17–2:1", a word as "1:17·4". */
+const describeSelection = ({ from, to }: Selection) => `${describeEnd(from)}–${describeEnd(to)}`;
+const describeEnd = (end: MarkEnd) => `${end.chapter}:${end.verse}${end.word === undefined ? '' : `·${end.word + 1}`}`;
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

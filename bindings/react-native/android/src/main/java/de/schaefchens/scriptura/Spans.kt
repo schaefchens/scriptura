@@ -6,6 +6,7 @@ import android.graphics.Typeface
 import android.text.Layout
 import android.text.Spanned
 import android.text.style.LeadingMarginSpan
+import android.text.style.LineHeightSpan
 import android.text.style.ReplacementSpan
 import kotlin.math.roundToInt
 
@@ -29,6 +30,16 @@ class MarkSpan(private val color: Int?) : ReplacementSpan() {
   companion object {
     const val SCALE = 0.6f
     const val RAISE = 0.33f
+  }
+}
+
+/** Space below a paragraph, like iOS's paragraphSpacing: [spacing] pixels added to its last line, which the marks' fills leave out. */
+class ParagraphSpacingSpan(val spacing: Int) : LineHeightSpan {
+  override fun chooseHeight(text: CharSequence, start: Int, end: Int, spanstartv: Int, lineHeight: Int, fm: Paint.FontMetricsInt) {
+    if (end == (text as Spanned).getSpanEnd(this)) {
+      fm.descent += spacing
+      fm.bottom += spacing
+    }
   }
 }
 

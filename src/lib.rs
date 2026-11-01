@@ -5,8 +5,8 @@
 //! verse by verse, matched by the KJV's numbers. Passages can be read aloud, by the device's voices
 //! or from recordings of their chapters: see [`Speech`].
 //!
-//! The library holds no texts of its own: a host adds books as JSON (see [`Book`]), and recordings
-//! (see [`Recording`]).
+//! The library holds no texts of its own: a host adds books as JSON (see [`Book`]), recordings
+//! (see [`Recording`]), and its marks on the books' words (see [`Mark`]), which readers draw.
 
 mod model;
 mod reader;
@@ -14,8 +14,8 @@ mod speech;
 
 use serde::de::Error as _;
 
-pub use model::{Book, Chapter, Note, NoteRun, RecordedVerse, Recording, Target, Verse, VerseNumbers};
-pub use reader::{Block, DropCap, NoteMark, Segment, VerseRange, WORD_DEFINITION, Word};
+pub use model::{Book, Chapter, Mark, MarkEnd, Note, NoteRun, RecordedVerse, Recording, Target, Verse, VerseNumbers};
+pub use reader::{Block, DropCap, NoteMark, PlacedMark, Segment, VerseRange, WORD_DEFINITION, Word};
 pub use speech::{Part, Place, Speech, Take, TimedWord, Utterance};
 
 /// A whole book, one chapter of it, or a verse range in that chapter.
@@ -73,11 +73,13 @@ pub enum Notes {
     Inline,
 }
 
-/// The books a host has added, and the recordings of their chapters, in the order added.
+/// The books a host has added, the recordings of their chapters, and the host's marks on their
+/// words, each in the order added.
 #[derive(Default)]
 pub struct Library {
     books: Vec<Book>,
     recordings: Vec<Recording>,
+    marks: Vec<Mark>,
 }
 
 impl Library {
@@ -147,6 +149,35 @@ impl Library {
         &self.recordings
     }
 
+    /// Adds the marks of a JSON array, each replacing one of the same id, and returns their ids. A
+    /// mark that ends before it starts is refused.
+    pub fn add_marks(&mut self, json: &[u8]) -> Result<Vec<String>, serde_json::Error> {
+        let marks: Vec<Mark> = serde_json::from_slice(json)?;
+        if let Some(mark) = marks.iter().find(|mark| mark.from.start() > mark.to.end()) {
+            return Err(serde_json::Error::custom(format!("the mark {} ends before it starts", mark.id)));
+        }
+        let ids = marks.iter().map(|mark| mark.id.clone()).collect();
+        for mark in marks {
+            match self.marks.iter_mut().find(|old| old.id == mark.id) {
+                Some(old) => *old = mark,
+                None => self.marks.push(mark),
+            }
+        }
+        Ok(ids)
+    }
+
+    pub fn remove_marks(&mut self, ids: &[String]) {
+        self.marks.retain(|mark| !ids.contains(&mark.id));
+    }
+
+    pub fn clear_marks(&mut self) {
+        self.marks.clear();
+    }
+
+    pub fn marks(&self) -> &[Mark] {
+        &self.marks
+    }
+
     /// Why a recording isn't played for the book it reads, if it isn't: the library holds no such
     /// book, or the book's verses or their words aren't the recording's.
     pub fn misfit(&self, recording: &Recording) -> Option<String> {
@@ -156,7 +187,8 @@ impl Library {
     /// The passages as paragraphs: per chapter a heading, then the chapter as running text, or a
     /// verse per line. With companions, other editions of a passage's book are read along with it:
     /// see [`Block::row`]. Passages of books the library doesn't hold give nothing. A note that
-    /// refers to verses the library holds shows them: see [`Library::preview`].
+    /// refers to verses the library holds shows them: see [`Library::preview`]. The host's marks
+    /// stand over their words: see [`PlacedMark`].
     pub fn blocks(&self, references: &[Reference], options: &Options) -> Vec<Block> {
         let companions: Vec<&Book> = options.companions.iter().filter_map(|id| self.book(id)).collect();
         let mut rows = 0..;
@@ -164,13 +196,26 @@ impl Library {
         for (passage, reference) in (0..).zip(references) {
             blocks.extend(reader::blocks(self, reference, passage, options, &companions, &mut rows));
         }
+        reader::place_marks(&mut blocks, &self.marks);
         for block in &mut blocks {
             for note in &mut block.notes {
                 let previews = self.previews(&block.book, &note.runs);
                 note.runs.extend(previews);
             }
+            for mark in &mut block.marks {
+                if let Some(runs) = &mut mark.note {
+                    let previews = self.previews(&block.book, runs);
+                    runs.extend(previews);
+                }
+            }
         }
         blocks
+    }
+
+    /// The marks in the passages' paragraphs, as [`Library::blocks`] places them, paragraph by
+    /// paragraph: for a reader to draw them anew as they change, its layout kept.
+    pub fn marks_in(&self, references: &[Reference], options: &Options) -> Vec<Vec<PlacedMark>> {
+        self.blocks(references, options).into_iter().map(|block| block.marks).collect()
     }
 
     /// The book that verses a note refers to are read in: of the code the note names, the edition
@@ -415,5 +460,47 @@ mod tests {
             drop_caps: true,
         };
         assert!(Library::new().blocks(&[reference], &options).is_empty());
+    }
+
+    fn mark(id: &str, from: &str, to: &str) -> String {
+        format!(r#"{{"id": "{id}", "book": "jonah", "from": {from}, "to": {to}, "highlight": "yellow"}}"#)
+    }
+
+    #[test]
+    fn marks_replace_those_of_the_same_id_and_a_mark_ending_before_it_starts_is_refused() {
+        let mut library = Library::new();
+        let first = mark("a", r#"{"chapter": 1, "verse": 1, "word": 2}"#, r#"{"chapter": 1, "verse": 3}"#);
+        let second = mark("b", r#"{"chapter": 2, "verse": 1}"#, r#"{"chapter": 2, "verse": 1}"#);
+        assert_eq!(library.add_marks(format!("[{first}, {second}]").as_bytes()).unwrap(), ["a", "b"]);
+        let again = mark("a", r#"{"chapter": 1, "verse": 1}"#, r#"{"chapter": 1, "verse": 1}"#);
+        library.add_marks(format!("[{again}]").as_bytes()).unwrap();
+        assert_eq!(library.marks().len(), 2);
+        assert_eq!(library.marks()[0].from.word, None);
+        assert_eq!(library.marks()[0].from, MarkEnd { chapter: 1, verse: 1, word: None });
+        assert!(library.marks()[0].note.is_empty() && library.marks()[0].underline.is_none());
+        // A whole verse reaches past any word of it; a later verse or chapter comes after.
+        for (from, to) in [
+            (r#"{"chapter": 1, "verse": 2}"#, r#"{"chapter": 1, "verse": 1}"#),
+            (r#"{"chapter": 2, "verse": 1}"#, r#"{"chapter": 1, "verse": 9}"#),
+            (r#"{"chapter": 1, "verse": 1, "word": 3}"#, r#"{"chapter": 1, "verse": 1, "word": 2}"#),
+        ] {
+            assert!(library.add_marks(format!("[{}]", mark("c", from, to)).as_bytes()).is_err());
+        }
+        assert!(
+            library
+                .add_marks(
+                    format!(
+                        "[{}]",
+                        mark("c", r#"{"chapter": 1, "verse": 1, "word": 3}"#, r#"{"chapter": 1, "verse": 1}"#)
+                    )
+                    .as_bytes()
+                )
+                .is_ok()
+        );
+        assert!(library.add_marks(br#"[{"id": "d"}]"#).is_err());
+        library.remove_marks(&["a".into()]);
+        assert_eq!(library.marks().iter().map(|mark| mark.id.as_str()).collect::<Vec<_>>(), ["b", "c"]);
+        library.clear_marks();
+        assert!(library.marks().is_empty());
     }
 }

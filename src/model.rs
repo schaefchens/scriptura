@@ -107,6 +107,52 @@ pub struct Target {
     pub to: Option<u32>,
 }
 
+/// A mark a host keeps on a book: words or verses of it, by where they stand – never by their
+/// text – with how it is drawn and a note. Readers draw it over the text wherever the book shows,
+/// in every layout, report a tap on it by its id, and open its note where the mark ends.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct Mark {
+    /// Unique among the marks of a library.
+    pub id: String,
+    /// The book, by id, whose words it marks.
+    pub book: String,
+    /// From a word, or a whole verse, to another, both included.
+    pub from: MarkEnd,
+    pub to: MarkEnd,
+    /// A color behind the words: one the reader's palette names, such as "yellow", or any color.
+    #[serde(default)]
+    pub highlight: Option<String>,
+    /// A line under the words, in a color named or given the same way.
+    #[serde(default)]
+    pub underline: Option<String>,
+    /// Its note, in runs as an edition's notes have them; none without. A sign where the mark
+    /// ends opens it.
+    #[serde(default)]
+    pub note: Vec<NoteRun>,
+}
+
+/// An end of a mark: a word of a verse, by its index among the verse's words, or the whole verse,
+/// without one.
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq)]
+pub struct MarkEnd {
+    pub chapter: u32,
+    pub verse: u32,
+    #[serde(default)]
+    pub word: Option<u32>,
+}
+
+impl MarkEnd {
+    /// Where a mark starts, in the order of the words: the word, or the verse's first.
+    pub(crate) fn start(&self) -> (u32, u32, u32) {
+        (self.chapter, self.verse, self.word.unwrap_or(0))
+    }
+
+    /// Where it ends: the word, or the verse's last.
+    pub(crate) fn end(&self) -> (u32, u32, u32) {
+        (self.chapter, self.verse, self.word.unwrap_or(u32::MAX))
+    }
+}
+
 /// A chapter read aloud: its audio, and where each of its verses and their words start in it, in
 /// milliseconds. A word ends where the next starts, and a verse where the next verse does, or with
 /// the audio: there are no end times. What precedes the first verse, such as a heading read or an

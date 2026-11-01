@@ -1,4 +1,4 @@
-import type { BookInfo, Passage, RecordingInfo, WordPosition } from '@schaefchens/scriptura';
+import type { BookInfo, Mark, MarkInfo, NoteRun, Passage, RecordingInfo, Target, WordPosition } from '@schaefchens/scriptura';
 
 import init, { Library as Core, type Speech as CoreSpeech } from './generated/scriptura_wasm.js';
 
@@ -25,7 +25,16 @@ export type Block = {
   notes: NoteMark[];
   /** What opens the chapter, set large over the paragraph's first lines: in running text, where the passage reads the chapter from its start. */
   dropCap: { letterStart: number; letterEnd: number } | null;
+  /** The page's marks on its verses, each as the range of its words here. */
+  marks: PlacedMark[];
 };
+
+/**
+ * A mark in a paragraph: the words of it the paragraph holds, as their range in the paragraph's text – a verse's number and the
+ * notes' marks left out – how it is drawn, and its note where the mark ends, if it has one: a sign there opens it. See the core's
+ * PlacedMark.
+ */
+export type PlacedMark = { id: string; start: number; end: number; highlight: string | null; underline: string | null; note: NoteRun[] | null };
 
 /**
  * A note's mark in a paragraph – its range in the text, on which verse – and the note it opens: a
@@ -41,15 +50,7 @@ export type NoteMark = {
   runs: NoteRun[];
 };
 
-/**
- * A run of a note's text: its role, if it has one – "origin", "quotation", "emphasis", "label"; "number" and "preview" for the verses
- * the note refers to, which follow its runs after a line break where the library holds their book – its language, where it isn't
- * the book's, and the verses it refers to.
- */
-export type NoteRun = { text: string; role?: string | null; language?: string | null; target?: Target | null };
-
-/** Verses a note refers to: by their book's USFM code, chapter, and verse – to `to` – or the whole chapter. */
-export type Target = { book: string; chapter: number; verse?: number | null; to?: number | null };
+export type { NoteRun, Target };
 
 /** Text for a voice, in one language: a chapter's heading, or verses of a passage's book without their numbers. See the core's Utterance. */
 export type Utterance = {
@@ -106,13 +107,13 @@ export async function loadScriptura(url?: string | URL) {
 const bytesOf = (json: string | ArrayBuffer | Uint8Array) =>
   typeof json === 'string' ? new TextEncoder().encode(json) : json instanceof Uint8Array ? json : new Uint8Array(json);
 
-/** What changed in a library: its books, or its recordings. */
-export type LibraryChange = 'books' | 'recordings';
+/** What changed in a library: its books, its recordings, or its marks. */
+export type LibraryChange = 'books' | 'recordings' | 'marks';
 
 /**
- * The books a page has added, the recordings of their chapters, and passages of them as paragraphs. On the web, their text is the
- * page's anyway. Its readers follow its changes: new books lay them out anew, and what they still had to read goes with the books or
- * recordings that change.
+ * The books a page has added, the recordings of their chapters, the page's marks on their words, and passages of them as paragraphs.
+ * On the web, their text is the page's anyway. Its readers follow its changes: new books lay them out anew, new marks are drawn at
+ * once, and what they still had to read goes with the books or recordings that change.
  */
 export class Library {
   private core = new Core();
@@ -178,6 +179,32 @@ export class Library {
   clear() {
     this.core.clear();
     this.changed('books');
+  }
+
+  /**
+   * Adds marks – the page's, with their notes – each replacing one of the same id, and returns their ids: readers draw them at once. A
+   * mark that ends before it starts is refused.
+   */
+  addMarks(marks: Mark[] | string): string[] {
+    const json = typeof marks === 'string' ? marks : JSON.stringify(marks);
+    const ids = this.core.addMarks(new TextEncoder().encode(json));
+    this.changed('marks');
+    return ids;
+  }
+
+  removeMarks(ids: string[]) {
+    this.core.removeMarks(ids);
+    this.changed('marks');
+  }
+
+  clearMarks() {
+    this.core.clearMarks();
+    this.changed('marks');
+  }
+
+  /** What the marks are: which words of which book each marks and how, and whether it has a note. */
+  marks(): MarkInfo[] {
+    return JSON.parse(this.core.marksJson());
   }
 
   private changed(change: LibraryChange) {

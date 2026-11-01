@@ -1,6 +1,6 @@
 import fonts from './fonts.json';
 
-export { CONTRASTS, type Palette, palette, ROLE_COLORS, type Theme } from './palette';
+export { CONTRASTS, MARK_COLORS, type Palette, palette, ROLE_COLORS, type Theme } from './palette';
 
 /** A whole book, one chapter of it, or a verse range in that chapter. */
 export type Passage = { book: string; chapter?: number; from?: number; to?: number };
@@ -27,6 +27,61 @@ export type RecordingInfo = { id: string; voice: string; name?: string | null; b
  * one read along with it) and its place in the scripture. Never its text.
  */
 export type WordPosition = { passage: number; book: string; chapter: number; verse: number; word: number };
+
+/** An end of a mark or a selection: a word of a verse, by its index among the verse's words, or the whole verse, without one. */
+export type MarkEnd = { chapter: number; verse: number; word?: number };
+
+/**
+ * Words or verses selected in a reader – by a long press and a drag, by a screen reader, or by
+ * select() – in which passage and book, from a word, or a whole verse, to another, both included.
+ * Never their text.
+ */
+export type Selection = { passage: number; book: string; from: MarkEnd; to: MarkEnd };
+
+/** A tap on marked words: the marks there, by id, and the word tapped, which the tap reaches as any tap does. */
+export type MarkTap = WordPosition & { ids: string[] };
+
+/**
+ * A mark an app keeps on a book: words or verses of it, by where they stand – never by their text
+ * – with how it is drawn and a note. Readers draw it over the text wherever the book shows, in
+ * every layout, report a tap on it by its id, and open its note where the mark ends.
+ */
+export type Mark = {
+  /** Unique among the marks of a library. */
+  id: string;
+  /** The book, by id, whose words it marks. */
+  book: string;
+  /** From a word, or a whole verse, to another, both included. */
+  from: MarkEnd;
+  to: MarkEnd;
+  /** A color behind the words: one the palette names – yellow, green, blue, pink – or any color. */
+  highlight?: string;
+  /** A line under the words, in a color named or given the same way. */
+  underline?: string;
+  /** Its note, in runs as an edition's notes have them. A sign where the mark ends opens it. */
+  note?: NoteRun[];
+};
+
+/** A mark as a list shows it: which words of which book it marks and how, and whether it has a note – not the note itself. */
+export type MarkInfo = {
+  id: string;
+  book: string;
+  from: MarkEnd;
+  to: MarkEnd;
+  highlight?: string | null;
+  underline?: string | null;
+  note: boolean;
+};
+
+/**
+ * A run of a note's text: its role, if it has one – "origin" (the verse the note is on, as it names it), "quotation", "emphasis",
+ * "label"; "number" and "preview" for the verses the note refers to, which follow its runs after a line break where the library
+ * holds their book – its language, where it isn't the book's, and the verses it refers to.
+ */
+export type NoteRun = { text: string; role?: string | null; language?: string | null; target?: Target | null };
+
+/** Verses a note refers to: by their book's USFM code, chapter, and verse – to `to` – or the whole chapter. */
+export type Target = { book: string; chapter: number; verse?: number | null; to?: number | null };
 
 /** One step through the words. */
 export type MoveStep = 'word+1' | 'word-1' | 'word+10' | 'word-10' | 'verse+1' | 'verse-1';
@@ -72,9 +127,20 @@ export type Voice = { id: string; name: string; language: string; quality?: stri
 /**
  * The reader's colors. Text takes the color of its role, where it has one: "number" (a verse
  * number), "heading", "note" (a note's mark, and a reference in a note), "noteText" (a note shown in
- * full), "origin" (the verse a note names), "ketiv" (a word as written where another is read) or a tajweed rule. A palette() is one.
+ * full), "origin" (the verse a note names), "ketiv" (a word as written where another is read) or a tajweed rule. A mark names its
+ * colors – "yellow", say – and takes its fill from `marks` and its underline's color from `markLines`; a name neither has is a
+ * color itself. The word the voice is at is drawn in `highlight`, over the marks; the selection behind the text in `selection`. A
+ * palette() is one.
  */
-export type ReaderColors = { background: string; text: string; highlight: string; roles: Record<string, string> };
+export type ReaderColors = {
+  background: string;
+  text: string;
+  highlight: string;
+  selection?: string;
+  marks?: Record<string, string>;
+  markLines?: Record<string, string>;
+  roles: Record<string, string>;
+};
 
 /** What the reader shows, and how, on every platform. */
 export type ReaderOptions = {

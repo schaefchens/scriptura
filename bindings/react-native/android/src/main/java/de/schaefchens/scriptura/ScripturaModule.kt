@@ -3,14 +3,20 @@ package de.schaefchens.scriptura
 import android.graphics.Color
 import android.net.Uri
 import de.schaefchens.scriptura.core.BooksException
+import de.schaefchens.scriptura.core.MarkEnd
+import de.schaefchens.scriptura.core.MarksException
 import de.schaefchens.scriptura.core.RecordingsException
 import de.schaefchens.scriptura.core.addBooks
+import de.schaefchens.scriptura.core.addMarks
 import de.schaefchens.scriptura.core.addRecordings
 import de.schaefchens.scriptura.core.books
 import de.schaefchens.scriptura.core.clearBooks
+import de.schaefchens.scriptura.core.clearMarks
 import de.schaefchens.scriptura.core.clearRecordings
+import de.schaefchens.scriptura.core.marks
 import de.schaefchens.scriptura.core.recordings
 import de.schaefchens.scriptura.core.removeBooks
+import de.schaefchens.scriptura.core.removeMarks
 import de.schaefchens.scriptura.core.removeRecordings
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.CodedException
@@ -50,11 +56,33 @@ class NowPlayingRecord : Record {
   @Field val subtitle: String? = null
 }
 
-/** The reader's colors. Text takes the color of its role, if it has one: a verse number, a heading, a tajweed rule. */
+/** An end of a selection, as JS passes it: a word of a verse, or the whole verse, without one. */
+class MarkEndRecord : Record {
+  @Field val chapter: Int = 0
+  @Field val verse: Int = 0
+  @Field val word: Int? = null
+}
+
+/** Words or verses to select, as JS passes them: where they stand, never their text. */
+class SelectionRecord : Record {
+  @Field val passage: Int = 0
+  @Field val book: String = ""
+  @Field val from: MarkEndRecord = MarkEndRecord()
+  @Field val to: MarkEndRecord = MarkEndRecord()
+}
+
+/**
+ * The reader's colors. Text takes the color of its role, if it has one: a verse number, a heading, a
+ * tajweed rule. A mark names its colors: its fill is looked up in [marks], its line's in [markLines];
+ * a name neither has is a color itself. The words selected are drawn in [selection].
+ */
 class ReaderColors : Record {
   @Field val background: Color? = null
   @Field val text: Color? = null
   @Field val highlight: Color? = null
+  @Field val selection: Color? = null
+  @Field val marks: Map<String, Color> = emptyMap()
+  @Field val markLines: Map<String, Color> = emptyMap()
   @Field val roles: Map<String, Color> = emptyMap()
 }
 
@@ -114,6 +142,37 @@ class ScripturaModule : Module() {
       ReaderView.recordingsChanged()
     }.runOnQueue(Queues.MAIN)
 
+    // The host's marks on the books' words, with their notes, read here too: readers draw them at once,
+    // their layout kept. JS learns where they stand, not their notes.
+    AsyncFunction("addMarks") { source: BooksSource ->
+      val ids = try {
+        addMarks(bytesOf(source))
+      } catch (error: MarksException) {
+        throw CodedException("ERR_SCRIPTURA_MARKS", error.message, error)
+      }
+      ReaderView.marksChanged()
+      ids
+    }.runOnQueue(Queues.MAIN)
+
+    Function("marks") {
+      marks().map {
+        mapOf(
+          "id" to it.id, "book" to it.book, "from" to endOf(it.from), "to" to endOf(it.to), "highlight" to it.highlight, "underline" to it.underline,
+          "note" to it.note,
+        )
+      }
+    }
+
+    AsyncFunction("removeMarks") { ids: List<String> ->
+      removeMarks(ids)
+      ReaderView.marksChanged()
+    }.runOnQueue(Queues.MAIN)
+
+    AsyncFunction("clearMarks") {
+      clearMarks()
+      ReaderView.marksChanged()
+    }.runOnQueue(Queues.MAIN)
+
     // The voices that can read aloud: their names and languages.
     AsyncFunction("speechVoices") { promise: Promise ->
       val context = appContext.reactContext ?: return@AsyncFunction promise.resolve(emptyList<Any>())
@@ -121,7 +180,7 @@ class ScripturaModule : Module() {
     }
 
     View(ReaderView::class) {
-      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference")
+      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap")
 
       Prop("passages") { view: ReaderView, passages: List<PassageRecord>? ->
         view.passages = passages ?: emptyList()
@@ -213,6 +272,10 @@ class ScripturaModule : Module() {
         val density = view.resources.displayMetrics.density
         view.tap((x * density).toFloat(), (y * density).toFloat())
       }
+      // Words or verses selected, as a long press and a drag would select them; or nothing.
+      AsyncFunction("select") { view: ReaderView, selection: SelectionRecord? ->
+        view.selectWords(selection)
+      }.runOnQueue(Queues.MAIN)
       // What a screen reader finds, so that can be checked without one.
       AsyncFunction("accessibilityElementsInSight") { view: ReaderView ->
         view.accessibilityElementsInSight()
@@ -231,6 +294,9 @@ class ScripturaModule : Module() {
     val stream = if (uri.scheme == null) java.io.File(uri.toString()).inputStream() else context.contentResolver.openInputStream(uri)
     return stream?.use { it.readBytes() } ?: throw CodedException("ERR_SCRIPTURA_BOOKS", "Can't read $uri", null)
   }
+
+  /** An end of a mark as JS sees it. */
+  private fun endOf(end: MarkEnd) = mapOf("chapter" to end.chapter.toInt(), "verse" to end.verse.toInt(), "word" to end.word?.toInt())
 
   /** Where recordings came from, for the audio they name relative to it: the app's folder of them, or a file's. */
   private fun baseOf(source: BooksSource): String? {

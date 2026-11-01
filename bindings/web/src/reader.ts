@@ -1,7 +1,7 @@
-import type { LaidOut, MoveStep, ReaderColors, ReaderOptions, ReferenceTarget, SpeechChange, WordPosition } from '@schaefchens/scriptura';
+import type { LaidOut, MarkEnd, MarkTap, MoveStep, NoteRun, ReaderColors, ReaderOptions, ReferenceTarget, Selection as SelectedPlaces, SpeechChange, WordPosition } from '@schaefchens/scriptura';
 import { palette } from '@schaefchens/scriptura';
 
-import type { Block, Library, NoteMark, Target } from './library';
+import type { Block, Library, LibraryChange, NoteMark, PlacedMark, Target } from './library';
 import { ReadAloud } from './readAloud';
 
 export type WebReaderOptions = ReaderOptions & {
@@ -12,6 +12,14 @@ export type WebReaderOptions = ReaderOptions & {
   onSpeechChange?: (change: SpeechChange) => void;
   /** A cross reference followed to verses the reader doesn't show: for the page to show them, if the library holds their book. */
   onReference?: (target: ReferenceTarget) => void;
+  /**
+   * The words or verses the page's selection covers in the reader – by a drag, a double click, a long press on a touch screen, a
+   * screen reader's commands, or select() – or none, as it goes: where they stand, never their text. Reading aloud goes on from the
+   * word marked, as before.
+   */
+  onSelectionChange?: (selection: SelectedPlaces | null) => void;
+  /** A tap on marked words: the marks there, by id, and the word, which the tap reaches as any tap does. A mark's sign opens its note instead. */
+  onMarkTap?: (tap: MarkTap) => void;
 };
 
 export type WebReader = {
@@ -36,6 +44,11 @@ export type WebReader = {
   refresh(): void;
   /** Turns to the next or previous page, or a screen down or up. */
   turn(forward: boolean): void;
+  /**
+   * Selects words or verses, as a drag would – from a word, or a verse's first, to a word, or a verse's last – or nothing: the page's
+   * selection, reported through onSelectionChange like any.
+   */
+  select(selection: SelectedPlaces | null): void;
   destroy(): void;
 };
 
@@ -52,6 +65,12 @@ const INSET = 12;
 /** How long after the last scroll by hand, in milliseconds, the reader follows the voice again when its word is in sight. */
 const HAND_SETTLES = 700;
 const SCROLL_KEYS = new Set(['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' ']);
+/** A pointer held this long, in milliseconds, is no tap: the browser's long press, which selects. */
+const LONG_PRESS = 500;
+/** The sign of a mark's note, where the mark ends, and what screen readers call it; and what they read where a mark starts. */
+const SIGN = '✎';
+const NOTE_LABEL = 'Note';
+const MARKED = 'Marked. ';
 const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVoices' | 'nowPlaying' | 'dropCapFont'>> = {
   fontSize: 28,
   paging: 'scroll',
@@ -93,13 +112,14 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   const content = document.createElement('div');
   const live = document.createElement('div');
   const highlightStyle = document.createElement('style');
-  root.className = 'scriptura';
+  const marksStyle = document.createElement('style');
+  root.className = `scriptura scriptura-${id}`;
   root.tabIndex = 0;
   content.className = 'scriptura-content';
   live.className = 'scriptura-live';
   live.setAttribute('aria-live', 'polite');
   root.append(content, live);
-  element.append(root, highlightStyle);
+  element.append(root, highlightStyle, marksStyle);
 
   let blocks: Block[] = [];
   let paragraphs: HTMLElement[] = [];
@@ -133,16 +153,22 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   /** Fonts waited for, once each: until they come, others stand in and are measured instead. */
   const awaited = new Set<string>();
   const highlightName = `scriptura-word-${id}`;
+  /** The marks' highlights, by name, one per look. */
+  let markNames: string[] = [];
+  /** The selection as last reported, so only changes are. */
+  let reportedSelection = 'null';
 
   function render() {
     const started = performance.now();
     const { library, passages, fontSize, versePerLine, companions, parallel, colors } = options;
-    // The same passages in another layout keep the reader at the word it was at, and the word it
-    // marked; if a word is gone, as a book is no longer read along, the last before it still there.
+    // The same passages in another layout keep the reader at the word it was at, the word it
+    // marked, and the words selected; if a word is gone, as a book is no longer read along, the
+    // last before it still there.
     const staying = JSON.stringify(passages) === shownPassages;
     const kept = staying ? words : [];
     const anchorAt = staying ? wordInSight() : undefined;
     const marked = staying && current !== undefined ? words[current].place : undefined;
+    const selected = staying ? selectionOfPage() : null;
     if (!staying) readAloud.stop();
     shownPassages = JSON.stringify(passages);
     closeNote();
@@ -183,7 +209,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     root.style.background = colors.background;
     root.style.color = colors.text;
     root.dataset.paging = options.paging;
-    highlightStyle.textContent = `::highlight(${highlightName}) { background-color: ${colors.highlight}; }`;
+    highlightStyle.textContent = `::highlight(${highlightName}) { background-color: ${colors.highlight}; }
+      ${colors.selection ? `.scriptura-${id} ::selection { background-color: ${colors.selection}; }` : ''}`;
     layout = arrange(sectionsOf(along, sideBySide), rightToLeft);
 
     indices = new Map(words.map((word, index) => [key(word.place), index]));
@@ -192,6 +219,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       current = indices.get(key(marked));
       highlight();
     }
+    drawMarks();
     // Other books read along or other recordings change what is read, and a new rate how: the voice goes on from the word it is at. A
     // recording takes a new rate as it plays.
     const read = JSON.stringify([companions, options.speakAlong, options.recordedVoices]);
@@ -205,14 +233,15 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     showInControls(readAloud.state);
     if (anchor !== undefined) showWord(anchor, 'top');
     else goTo(0);
+    if (selected) setSelection(selected);
     const time = performance.now() - started;
     options.onLaidOut?.({ pages: options.paging === 'pages' ? pageCount : 0, milliseconds: time, all: time });
   }
 
   /**
    * A block as a paragraph in its language and direction, its runs colored by their roles, each
-   * note's mark a button that opens it, and the drop cap – the first letter – set large; and its
-   * text's pieces.
+   * note's mark a button that opens it, the drop cap – the first letter – set large, and the signs
+   * of the marks' notes where they end; and its text's pieces.
    */
   function paragraph(block: Block, index: number, size: number, spacing: number, indent: number, numberColumn: number): [HTMLElement, Piece[]] {
     const element = document.createElement('p');
@@ -238,6 +267,37 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     const blockPieces: Piece[] = [];
     let start = 0;
     const drop = block.dropCap;
+    /**
+     * Text from `at` on in the paragraph's text, as text nodes in `holder` – cut where a mark with a
+     * note ends, for its sign, and where a mark starts, for the word screen readers read there,
+     * which nothing shows.
+     */
+    const emit = (text: string, holder: Node, at: number) => {
+      const end = at + text.length;
+      if (text.length === 0) {
+        const node = document.createTextNode('');
+        holder.appendChild(node);
+        blockPieces.push({ node, start: at, length: 0 });
+        return;
+      }
+      const starts = block.marks.filter((mark) => at < mark.start && mark.start < end).map((mark) => mark.start);
+      const ends = block.marks.filter((mark) => mark.note && at < mark.end && mark.end <= end).map((mark) => mark.end);
+      const cuts = [...new Set([...starts, ...ends, end])].sort((a, b) => a - b);
+      if (block.marks.some((mark) => mark.start === at)) holder.appendChild(hiddenText(MARKED));
+      let from = at;
+      for (const cut of cuts) {
+        if (cut > from) {
+          const node = document.createTextNode(text.slice(from - at, cut - at));
+          holder.appendChild(node);
+          blockPieces.push({ node, start: from, length: cut - from });
+        }
+        for (const mark of block.marks) {
+          if (mark.note && mark.end === cut && cut > at) holder.appendChild(sign(index, mark.id));
+        }
+        if (cut < end && block.marks.some((mark) => mark.start === cut)) holder.appendChild(hiddenText(MARKED));
+        from = cut;
+      }
+    };
     block.segments.forEach(({ text, role }, at) => {
       // A hanging number's tab becomes the width of the number column.
       const shown = hangs && at === 0 ? text.slice(0, -1) : text;
@@ -275,19 +335,60 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
         for (const [piece, holder] of [[before, parent], [letter, cap], [after, parent]] as const) {
           if (holder === cap) parent.append(cap);
           if (!piece) continue;
-          const node = document.createTextNode(piece);
-          holder.append(node);
-          blockPieces.push({ node, start, length: piece.length });
+          emit(piece, holder, start);
           start += piece.length;
         }
         return;
       }
-      const node = document.createTextNode(shown);
-      parent.append(node);
-      blockPieces.push({ node, start, length: text.length });
+      emit(shown, parent, start);
       start += text.length;
     });
     return [element, blockPieces];
+  }
+
+  /** The sign of a mark's note, where the mark ends: a button that opens the note, named for screen readers. */
+  function sign(block: number, mark: string) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'scriptura-mark scriptura-sign';
+    button.style.color = options.colors.roles.note ?? '';
+    button.dataset.block = String(block);
+    button.dataset.mark = mark;
+    button.setAttribute('aria-label', NOTE_LABEL);
+    button.textContent = SIGN;
+    return button;
+  }
+
+  /**
+   * Draws the marks as highlights of the page, over the words of each: filled in its color, and
+   * underlined in its line's – one highlight per look, below the word the voice is at.
+   */
+  function drawMarks() {
+    for (const name of markNames) CSS.highlights?.delete(name);
+    markNames = [];
+    if (!('highlights' in CSS)) return;
+    const looks = new Map<string, { fill?: string; line?: string; ranges: Range[] }>();
+    blocks.forEach((block, index) => {
+      for (const mark of block.marks) {
+        const fill = mark.highlight ? colorOf(mark.highlight, options.colors.marks) : undefined;
+        const line = mark.underline ? colorOf(mark.underline, options.colors.markLines) : undefined;
+        const range = drawnRange(index, mark.start, mark.end);
+        if ((!fill && !line) || !range) continue;
+        const look = `${fill ?? ''}|${line ?? ''}`;
+        const entry = looks.get(look) ?? { fill, line, ranges: [] };
+        entry.ranges.push(range);
+        looks.set(look, entry);
+      }
+    });
+    let rules = '';
+    [...looks.values()].forEach(({ fill, line, ranges }, at) => {
+      const name = `scriptura-marks-${id}-${at}`;
+      CSS.highlights.set(name, new Highlight(...ranges));
+      markNames.push(name);
+      const styles = [fill && `background-color: ${fill};`, line && `text-decoration: underline ${line} 2px;`].filter(Boolean).join(' ');
+      rules += `::highlight(${name}) { ${styles} }\n`;
+    });
+    marksStyle.textContent = rules;
   }
 
   /**
@@ -312,6 +413,22 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   /** A note as screen readers announce its mark: "Footnote 1", "Cross reference a". */
   const describe = (note: NoteMark) => `${NOTE_NAMES[note.kind] ?? 'Note'} ${note.mark}`;
 
+  /** What a note's mark, or a mark's sign, opens: the note's runs, what it is called, and the verse it stands in. */
+  type Opening = { runs: NoteRun[]; label: string; chapter: number; verse: number };
+
+  function openingOf(mark: HTMLElement): [Block, Opening] | undefined {
+    const block = blocks[Number(mark.dataset.block)];
+    if (!block) return undefined;
+    if (mark.dataset.mark !== undefined) {
+      const placed = block.marks.find((candidate) => candidate.id === mark.dataset.mark);
+      const last = placed && block.words.findLast((word) => word.end <= placed.end);
+      if (!placed?.note || !last) return undefined;
+      return [block, { runs: placed.note, label: NOTE_LABEL, chapter: last.chapter, verse: last.verse }];
+    }
+    const note = block.notes[Number(mark.dataset.note)];
+    return note && [block, { runs: note.runs, label: describe(note), chapter: note.chapter, verse: note.verse }];
+  }
+
   /**
    * Opens a note at its mark – below the mark's line, or above it where there is no room below –
    * as a dialog in the paragraph's font, its runs as they are: the verse it names, quotations and
@@ -320,13 +437,13 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
    */
   function openNote(mark: HTMLElement) {
     closeNote();
-    const block = blocks[Number(mark.dataset.block)];
-    const note = block?.notes[Number(mark.dataset.note)];
-    if (!block || !note) return;
+    const opening = openingOf(mark);
+    if (!opening) return;
+    const [block, note] = opening;
     const dialog = document.createElement('div');
     dialog.className = 'scriptura-note';
     dialog.setAttribute('role', 'dialog');
-    dialog.setAttribute('aria-label', describe(note));
+    dialog.setAttribute('aria-label', note.label);
     dialog.tabIndex = -1;
     dialog.dir = block.direction;
     dialog.lang = block.language;
@@ -398,7 +515,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
    * the note's book, or else in another – or, if not, tells the page, with the library's book of
    * them, if it holds one.
    */
-  function followReference(target: Target, note: NoteMark, block: Block) {
+  function followReference(target: Target, note: Opening, block: Block) {
     const books = library.books();
     const work = books.find((book) => book.id === block.book)?.work;
     const editions = books.filter((book) => book.code === target.book);
@@ -654,20 +771,38 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   }
 
   /** The range of a word in the page. */
-  function rangeOf(word: Word) {
+  const rangeOf = (word: Word) => rangeBetween(word.block, word.start, word.end);
+
+  /**
+   * The range of a part of a paragraph's text as it is drawn over – highlighted or marked – without
+   * a drop cap's letter: it stands apart, over two lines, and isn't drawn over, as on iOS and Android.
+   * None if nothing else is left.
+   */
+  function drawnRange(block: number, start: number, end: number) {
+    const drop = blocks[block].dropCap;
+    const from = drop && start >= drop.letterStart && start < drop.letterEnd ? drop.letterEnd : start;
+    return from < end ? rangeBetween(block, from, end) : undefined;
+  }
+
+  /** The range in the page of a part of a paragraph's text. */
+  function rangeBetween(block: number, start: number, end: number) {
     const range = document.createRange();
-    const [startNode, startOffset] = position(word.block, word.start);
-    const [endNode, endOffset] = position(word.block, word.end);
+    const [startNode, startOffset] = position(block, start);
+    const [endNode, endOffset] = position(block, end, true);
     range.setStart(startNode, startOffset);
     range.setEnd(endNode, endOffset);
     return range;
   }
 
-  /** Where an offset in a paragraph's text is in the page. */
-  function position(block: number, offset: number): [Text, number] {
+  /**
+   * Where an offset in a paragraph's text is in the page: at the start of the piece it starts, or as
+   * the `end` of a range, at the end of the piece it ends – so that a range stops before what the
+   * page sets between them, such as the sign of a mark's note.
+   */
+  function position(block: number, offset: number, end = false): [Text, number] {
     const blockPieces = pieces[block];
-    const piece = blockPieces.findLast((candidate) => candidate.start <= offset) ?? blockPieces[0];
-    return [piece.node, Math.min(offset - piece.start, piece.node.length)];
+    const piece = blockPieces.findLast((candidate) => (end ? candidate.start < offset : candidate.start <= offset)) ?? blockPieces[0];
+    return [piece.node, Math.max(0, Math.min(offset - piece.start, piece.node.length))];
   }
 
   /** The word at a point in the page, if a paragraph holds one there. */
@@ -775,8 +910,84 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
 
   function highlight() {
     if (!('highlights' in CSS)) return;
-    if (current === undefined) CSS.highlights.delete(highlightName);
-    else CSS.highlights.set(highlightName, new Highlight(rangeOf(words[current])));
+    const range = current === undefined ? undefined : drawnRange(words[current].block, words[current].start, words[current].end);
+    if (!range) return CSS.highlights.delete(highlightName);
+    // Over the marks, so the word the voice is at shows on a marked verse.
+    const word = new Highlight(range);
+    word.priority = 1;
+    CSS.highlights.set(highlightName, word);
+  }
+
+  /**
+   * The words the page's selection covers, if it lies in this reader – of the first word's passage
+   * and book, where it runs on into another: from the first word, or its verse where the selection
+   * starts at its first word, to the last, or its verse. None where it covers no word.
+   */
+  function selectionOfPage(): SelectedPlaces | null {
+    const selected = document.getSelection();
+    if (!selected || selected.rangeCount === 0 || selected.isCollapsed || words.length === 0) return null;
+    const range = selected.getRangeAt(0);
+    if (!root.contains(range.commonAncestorContainer)) return null;
+    // The words are in the page's order: the first that ends after the selection starts, and the last that starts before it ends.
+    const first = lowest((index) => range.compareBoundaryPoints(Range.END_TO_START, rangeOf(words[index])) < 0);
+    let last = lowest((index) => range.compareBoundaryPoints(Range.START_TO_END, rangeOf(words[index])) <= 0) - 1;
+    if (first >= words.length || last < first) return null;
+    const { passage, book } = words[first].place;
+    while (words[last].place.passage !== passage || words[last].place.book !== book) last--;
+    return { passage, book, from: endOf(first, true), to: endOf(last, false) };
+  }
+
+  /** The least index of a word for which `holds` holds – it holds from some word on – or the number of words. */
+  function lowest(holds: (index: number) => boolean) {
+    let [low, high] = [0, words.length];
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (holds(middle)) high = middle;
+      else low = middle + 1;
+    }
+    return low;
+  }
+
+  /** A word as an end of a selection: its verse, where the word is the verse's first or last, as asked; else the word itself. */
+  function endOf(index: number, first: boolean): MarkEnd {
+    const { place } = words[index];
+    const next = words[index + 1];
+    const whole = first ? place.index === 0 : next === undefined || !sameVerse(next.place, place);
+    return whole ? { chapter: place.chapter, verse: place.verse } : { chapter: place.chapter, verse: place.verse, word: place.index };
+  }
+
+  function selectionChanged() {
+    const selection = selectionOfPage();
+    const reported = JSON.stringify(selection);
+    if (reported === reportedSelection) return;
+    reportedSelection = reported;
+    options.onSelectionChange?.(selection);
+  }
+
+  /** Selects words or verses as a drag would – from a word, or a verse's first, to a word, or a verse's last – or nothing. */
+  function setSelection(selection: SelectedPlaces | null) {
+    const selected = document.getSelection();
+    if (!selected) return;
+    if (!selection) {
+      if (selectionOfPage()) selected.removeAllRanges();
+      return;
+    }
+    const inBook = (word: Word) => word.place.passage === selection.passage && word.place.book === selection.book;
+    const first = words.findIndex((word) => inBook(word) && compare(word.place, selection.from, false) >= 0);
+    const last = words.findLastIndex((word) => inBook(word) && compare(word.place, selection.to, true) <= 0);
+    if (first < 0 || last < first) return;
+    const range = document.createRange();
+    range.setStart(...position(words[first].block, words[first].start));
+    range.setEnd(...position(words[last].block, words[last].end, true));
+    selected.removeAllRanges();
+    selected.addRange(range);
+  }
+
+  /** The marks on a word, by id – those whose words it is among – reported with the word. */
+  function reportMarkTap(index: number) {
+    const word = words[index];
+    const ids = blocks[word.block].marks.filter((mark) => mark.start <= word.start && word.end <= mark.end).map((mark) => mark.id);
+    if (ids.length > 0) options.onMarkTap?.({ ids, ...positionOf(word.place) });
   }
 
   /** Whether a word is in sight: on the page shown, or in one endless scroll, wholly in view. */
@@ -831,7 +1042,6 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   function move(step: MoveStep) {
     if (words.length === 0) return;
     if (current === undefined) return select(0);
-    const sameVerse = (a: Place, b: Place) => a.passage === b.passage && a.book === b.book && a.chapter === b.chapter && a.verse === b.verse;
     const verseStart = (index: number) => {
       let start = index;
       while (start > 0 && sameVerse(words[start - 1].place, words[index].place)) start--;
@@ -853,11 +1063,12 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     select(target < 0 ? current : target);
   }
 
-  // A tap selects the word there; in pages, a swipe or the arrow keys turn them. In one endless
-  // scroll, the browser scrolls: by the wheel, a finger, the keys or the scroll bar.
-  let down: { x: number; y: number } | undefined;
+  // A tap selects the word there; in pages, a finger's swipe or the arrow keys turn them. In one
+  // endless scroll, the browser scrolls: by the wheel, a finger, the keys or the scroll bar. A drag,
+  // a double click or a long press select text, as the browser has it.
+  let down: { x: number; y: number; at: number } | undefined;
   root.addEventListener('pointerdown', (event) => {
-    down = { x: event.clientX, y: event.clientY };
+    down = { x: event.clientX, y: event.clientY, at: performance.now() };
     const area = root.getBoundingClientRect();
     if (event.clientX - area.left >= root.clientLeft + root.clientWidth) scrolledByHand();
   });
@@ -870,11 +1081,11 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   }, { passive: true });
   root.addEventListener('pointerup', (event) => {
     if (!down) return;
-    const [dx, dy] = [event.clientX - down.x, event.clientY - down.y];
+    const [dx, dy, held] = [event.clientX - down.x, event.clientY - down.y, performance.now() - down.at];
     down = undefined;
     const target = event.target instanceof Element ? event.target : null;
     if (opened && target && opened.note.contains(target)) return;
-    if (Math.hypot(dx, dy) < 8) {
+    if (Math.hypot(dx, dy) < 8 && held < LONG_PRESS) {
       const mark = target?.closest<HTMLElement>('.scriptura-mark');
       if (mark) {
         if (opened?.mark === mark) closeNote();
@@ -883,8 +1094,11 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       }
       closeNote();
       const index = wordAt(event.clientX, event.clientY);
-      if (index !== undefined) select(index);
-    } else if (layout.kind !== 'scroll' && Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+      if (index !== undefined) {
+        select(index);
+        reportMarkTap(index);
+      }
+    } else if (event.pointerType === 'touch' && layout.kind !== 'scroll' && Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
       // A swipe to the left turns forward; in pages from the right, back.
       turn(dx < 0 !== (layout.rightToLeft ?? false));
     }
@@ -940,10 +1154,13 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     if (document.visibilityState === 'hidden' && !options.nowPlaying && readAloud.state === 'speaking') readAloud.pause(readingStart());
   };
   document.addEventListener('visibilitychange', hidden);
+  document.addEventListener('selectionchange', selectionChanged);
 
-  // New books lay the text out anew; what was still to be read goes with the books or recordings that change.
+  // New books lay the text out anew, and new marks are drawn, the reading on; what was still to be
+  // read goes with the books or recordings that change.
   let library = options.library;
-  const followed = (change: 'books' | 'recordings') => {
+  const followed = (change: LibraryChange) => {
+    if (change === 'marks') return render();
     readAloud.stop();
     if (change === 'books') render();
   };
@@ -980,21 +1197,46 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       render();
     },
     turn,
+    select: setSelection,
     destroy() {
       destroyed = true;
       closeNote();
       unfollow();
       document.removeEventListener('visibilitychange', hidden);
+      document.removeEventListener('selectionchange', selectionChanged);
       readAloud.stop();
       resizes.disconnect();
       CSS.highlights?.delete(highlightName);
+      for (const name of markNames) CSS.highlights?.delete(name);
       root.remove();
       highlightStyle.remove();
+      marksStyle.remove();
     },
   };
 }
 
 const key = ({ passage, book, chapter, verse, index }: Place) => `${passage} ${book} ${chapter}:${verse} ${index}`;
+
+const sameVerse = (a: Place, b: Place) => a.passage === b.passage && a.book === b.book && a.chapter === b.chapter && a.verse === b.verse;
+
+const positionOf = ({ passage, book, chapter, verse, index }: Place): WordPosition => ({ passage, book, chapter, verse, word: index });
+
+/** Where a word stands against an end of a selection: before, at or after it – a whole verse reaching from its first word, as a start, to its last, as an end. */
+function compare(place: Place, end: MarkEnd, last: boolean) {
+  const ends = [end.chapter, end.verse, end.word ?? (last ? Infinity : 0)];
+  return [place.chapter, place.verse, place.index].map((value, at) => Math.sign(value - ends[at])).find((sign) => sign !== 0) ?? 0;
+}
+
+/** A mark's color: the palette's, by the name the mark gives – or the name itself, as a color. */
+const colorOf = (name: string, named: Record<string, string> | undefined) => named?.[name] ?? name;
+
+/** Text screen readers read and nothing shows. */
+function hiddenText(text: string) {
+  const span = document.createElement('span');
+  span.className = 'scriptura-hidden';
+  span.textContent = text;
+  return span;
+}
 
 /** The caret position at a point in the page, as each browser has it. */
 function caretAt(x: number, y: number): { node: Node; offset: number } | undefined {
@@ -1061,10 +1303,12 @@ function injectStyles() {
 .scriptura[data-paging="pages"] { overflow: hidden; }
 .scriptura-content { box-sizing: border-box; }
 .scriptura p { margin-block-start: 0; margin-inline-end: 0; overflow-wrap: break-word; }
-.scriptura-live { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.scriptura-live, .scriptura-hidden { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; user-select: none; }
 .scriptura-mark { all: unset; cursor: pointer; font-size: 0.6em; line-height: 0; vertical-align: super; padding-inline: 0.08em; }
+.scriptura-sign { user-select: none; }
 .scriptura-mark:focus-visible, .scriptura-reference:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .scriptura-drop { float: inline-start; position: relative; margin-inline-end: 0.14em; white-space: nowrap; }
+.scriptura .scriptura-drop::selection { background-color: transparent; }
 .scriptura-note { position: fixed; z-index: 10; box-sizing: border-box; padding: 10px 14px; border-radius: 8px; overflow: auto; outline: none;
   border: 1px solid color-mix(in srgb, currentColor 25%, transparent); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25); }
 .scriptura-reference { all: unset; cursor: pointer; text-decoration: underline; }

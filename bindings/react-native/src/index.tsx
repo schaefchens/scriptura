@@ -1,4 +1,4 @@
-import type { BookInfo, LaidOut, MoveStep, ReaderOptions, RecordingInfo, ReferenceTarget, SpeechChange, Voice, WordPosition } from '@schaefchens/scriptura';
+import type { BookInfo, LaidOut, MarkInfo, MarkTap, MoveStep, ReaderOptions, RecordingInfo, ReferenceTarget, Selection, SpeechChange, Voice, WordPosition } from '@schaefchens/scriptura';
 import { requireNativeModule, requireNativeView } from 'expo';
 import type { Ref } from 'react';
 import type { NativeSyntheticEvent, StyleProp, ViewStyle } from 'react-native';
@@ -14,7 +14,8 @@ export type BooksSource = { uri: string } | { asset: string } | { json: string }
 /**
  * What a screen reader finds in sight: a chapter's heading, or a verse, by where it stands, never
  * its text; its language; and where it is in the reader, in points. A note's mark in a verse is
- * one too, with its mark and kind.
+ * one too, with its mark and kind; so is the sign of a mark's note, with the mark's id. A verse
+ * with marks on it is announced as marked.
  */
 export type AccessibilityElement = {
   passage: number;
@@ -22,7 +23,9 @@ export type AccessibilityElement = {
   chapter: number;
   verse?: number;
   note?: string;
-  kind?: 'footnote' | 'endnote' | 'crossReference';
+  kind?: 'footnote' | 'endnote' | 'crossReference' | 'mark';
+  mark?: string;
+  marked?: boolean;
   language: string;
   frame: [x: number, y: number, width: number, height: number];
 };
@@ -48,6 +51,11 @@ export type ReaderHandle = {
   turn(forward: boolean): Promise<void>;
   /** The same as a tap at that point of the reader, in points: for tests without a finger. */
   tapAt(x: number, y: number): Promise<void>;
+  /**
+   * Selects words or verses, as a long press and a drag would – from a word, or a verse's first, to
+   * a word, or a verse's last – or nothing. Reported through onSelectionChange like any selection.
+   */
+  select(selection: Selection | null): Promise<void>;
   /** For tests without a screen reader. */
   accessibilityElementsInSight(): Promise<AccessibilityElement[]>;
 };
@@ -59,15 +67,25 @@ export type ReaderProps = ReaderOptions & {
   onSpeechChange?: (change: SpeechChange) => void;
   /** A cross reference followed to verses the reader doesn't show: for the app to show them, if the library holds their book. */
   onReference?: (target: ReferenceTarget) => void;
+  /**
+   * The words or verses selected – by a long press and a drag, by a screen reader, or by select() –
+   * or none, as the selection goes: where they stand, never their text. Reading aloud goes on from
+   * the word marked, as before.
+   */
+  onSelectionChange?: (selection: Selection | null) => void;
+  /** A tap on marked words: the marks there, by id, and the word, which the tap reaches as any tap does. A mark's sign opens its note instead. */
+  onMarkTap?: (tap: MarkTap) => void;
   ref?: Ref<ReaderHandle>;
   style?: StyleProp<ViewStyle>;
 };
 
-type NativeProps = Omit<ReaderProps, 'onWordChange' | 'onLaidOut' | 'onSpeechChange' | 'onReference'> & {
+type NativeProps = Omit<ReaderProps, 'onWordChange' | 'onLaidOut' | 'onSpeechChange' | 'onReference' | 'onSelectionChange' | 'onMarkTap'> & {
   onWordChange?: (event: NativeSyntheticEvent<WordPosition>) => void;
   onLaidOut?: (event: NativeSyntheticEvent<LaidOut>) => void;
   onSpeechChange?: (event: NativeSyntheticEvent<SpeechChange>) => void;
   onReference?: (event: NativeSyntheticEvent<ReferenceTarget>) => void;
+  onSelectionChange?: (event: NativeSyntheticEvent<{ selection?: Selection | null }>) => void;
+  onMarkTap?: (event: NativeSyntheticEvent<MarkTap>) => void;
 };
 
 const NativeReader = requireNativeView<NativeProps>('Scriptura');
@@ -76,7 +94,7 @@ const NativeReader = requireNativeView<NativeProps>('Scriptura');
  * Scripture in pages or one endless scroll, laid out with the platform's own text stack: TextKit 2
  * on iOS, Android's text layout. It gets the passages' text itself, from the books added.
  */
-export function Reader({ onWordChange, onLaidOut, onSpeechChange, onReference, ...props }: ReaderProps) {
+export function Reader({ onWordChange, onLaidOut, onSpeechChange, onReference, onSelectionChange, onMarkTap, ...props }: ReaderProps) {
   return (
     <NativeReader
       {...props}
@@ -84,6 +102,8 @@ export function Reader({ onWordChange, onLaidOut, onSpeechChange, onReference, .
       onLaidOut={onLaidOut && (({ nativeEvent }) => onLaidOut(nativeEvent))}
       onSpeechChange={onSpeechChange && (({ nativeEvent }) => onSpeechChange(nativeEvent))}
       onReference={onReference && (({ nativeEvent }) => onReference(nativeEvent))}
+      onSelectionChange={onSelectionChange && (({ nativeEvent }) => onSelectionChange(nativeEvent.selection ?? null))}
+      onMarkTap={onMarkTap && (({ nativeEvent }) => onMarkTap(nativeEvent))}
     />
   );
 }
@@ -97,6 +117,10 @@ type ScripturaModule = {
   recordings(): RecordingInfo[];
   removeRecordings(ids: string[]): Promise<void>;
   clearRecordings(): Promise<void>;
+  addMarks(source: BooksSource): Promise<string[]>;
+  marks(): MarkInfo[];
+  removeMarks(ids: string[]): Promise<void>;
+  clearMarks(): Promise<void>;
   speechVoices(): Promise<Voice[]>;
 };
 
@@ -126,6 +150,22 @@ export const recordings = () => scriptura.recordings();
 export const removeRecordings = (ids: string[]) => scriptura.removeRecordings(ids);
 
 export const clearRecordings = () => scriptura.clearRecordings();
+
+/**
+ * Adds marks – the app's, kept with their notes – each replacing one of the same id, and returns
+ * their ids: a JSON array of marks (see Mark), from a file or an asset, so that a note's text needn't
+ * pass through JS, or from JS. Readers draw them at once, their layout kept. A mark that ends before
+ * it starts is refused.
+ */
+export const addMarks = (source: BooksSource) => scriptura.addMarks(source);
+
+/** The marks added: which words of which book each marks and how, and whether it has a note – not the note itself. */
+export const marks = () => scriptura.marks();
+
+export const removeMarks = (ids: string[]) => scriptura.removeMarks(ids);
+
+/** Removes every mark, as when an app locks. */
+export const clearMarks = () => scriptura.clearMarks();
 
 /** The voices on the device that can read aloud. */
 export const speechVoices = () => scriptura.speechVoices();

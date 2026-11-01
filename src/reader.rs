@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::ops::RangeFrom;
 
 use serde::Serialize;
 
-use crate::model::{Note, NoteRun};
+use crate::model::{Mark, Note, NoteRun};
 use crate::{Book, Chapter, Library, Notes, Options, Reference, Verse, VerseNumbers};
 
 /// A paragraph with its own direction, language and font, from the passage at `passage` in the
@@ -39,6 +40,8 @@ pub struct Block {
     /// What opens the chapter, set large over the paragraph's first lines: in running text, where
     /// the passage reads the chapter from its start.
     pub drop_cap: Option<DropCap>,
+    /// The host's marks on its verses, each as the range of its words here.
+    pub marks: Vec<PlacedMark>,
 }
 
 /// Text, and what it is: "heading", "number" (a verse number), "note" (a note's mark), "noteText"
@@ -99,6 +102,22 @@ pub struct NoteMark {
 pub struct DropCap {
     pub letter_start: u32,
     pub letter_end: u32,
+}
+
+/// A host's mark in a paragraph: the words of it the paragraph holds, as their range in the
+/// paragraph's text in UTF-16 code units – a verse's number and the notes' marks left out – how
+/// it is drawn, and its note, where the mark ends: a sign there opens it. See [`Mark`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlacedMark {
+    pub id: String,
+    pub start: u32,
+    pub end: u32,
+    pub highlight: Option<String>,
+    pub underline: Option<String>,
+    /// The note's runs, in the last paragraph of a passage that holds any of the mark, if it has
+    /// a note; none elsewhere.
+    pub note: Option<Vec<NoteRun>>,
 }
 
 const HEADING: &str = "heading";
@@ -294,6 +313,7 @@ fn heading(book: &Book, chapter: &Chapter, (from, to): (Option<u32>, Option<u32>
         words: Vec::new(),
         notes: Vec::new(),
         drop_cap: None,
+        marks: Vec::new(),
     }
 }
 
@@ -392,6 +412,64 @@ fn paragraph<'a>(
         words: text.words,
         notes: text.notes,
         drop_cap: drop,
+        marks: Vec::new(),
+    }
+}
+
+/// Each mark's words in every paragraph of its book that holds any – from the first of them to
+/// the last – and its note in the last such paragraph of each passage. A mark of a book no
+/// paragraph is from shows nowhere.
+pub(crate) fn place_marks(blocks: &mut [Block], marks: &[Mark]) {
+    let key = |word: &Word| (word.chapter, word.verse, word.index);
+    // The paragraphs of each book that hold words, with the places of their first and last words:
+    // a mark looks only at its book's, and passes over those it has no words in at a glance.
+    type Place = (u32, u32, u32);
+    let mut by_book: HashMap<&str, Vec<(usize, Place, Place)>> = HashMap::new();
+    for (index, block) in blocks.iter().enumerate() {
+        if let (Some(first), Some(last)) = (block.words.first(), block.words.last()) {
+            by_book.entry(block.book.as_str()).or_default().push((index, key(first), key(last)));
+        }
+    }
+    let mut placed: Vec<(usize, PlacedMark)> = Vec::new();
+    for mark in marks {
+        let Some(candidates) = by_book.get(mark.book.as_str()) else { continue };
+        let (from, to) = (mark.from.start(), mark.to.end());
+        // Per passage, the mark's part in the last paragraph that holds any of it.
+        let mut last: Vec<(u32, usize)> = Vec::new();
+        for &(index, first, end) in candidates {
+            if end < from || first > to {
+                continue;
+            }
+            let block = &blocks[index];
+            let start = block.words.partition_point(|word| key(word) < from);
+            let stop = block.words.partition_point(|word| key(word) <= to);
+            if start >= stop {
+                continue;
+            }
+            placed.push((
+                index,
+                PlacedMark {
+                    id: mark.id.clone(),
+                    start: block.words[start].start,
+                    end: block.words[stop - 1].end,
+                    highlight: mark.highlight.clone(),
+                    underline: mark.underline.clone(),
+                    note: None,
+                },
+            ));
+            match last.iter_mut().find(|(passage, _)| *passage == block.passage) {
+                Some(entry) => entry.1 = placed.len() - 1,
+                None => last.push((block.passage, placed.len() - 1)),
+            }
+        }
+        if !mark.note.is_empty() {
+            for (_, at) in last {
+                placed[at].1.note = Some(mark.note.clone());
+            }
+        }
+    }
+    for (index, mark) in placed {
+        blocks[index].marks.push(mark);
     }
 }
 
@@ -981,5 +1059,106 @@ mod tests {
         assert_eq!(initial("بِسْمِ", 0), 2);
         assert_eq!(initial("… nothing", 0), 0);
         assert_eq!(initial("a b", 2), 1);
+    }
+
+    /// The fixtures' editions, with marks added as a host's JSON.
+    fn marked(marks: &str) -> Library {
+        let mut library = Library::new();
+        library.add(include_bytes!("../tests/fixtures/books.json")).unwrap();
+        library.add_marks(marks.as_bytes()).unwrap();
+        library
+    }
+
+    fn placed(
+        library: &Library,
+        book: &str,
+        chapter: Option<u32>,
+        verse_per_line: bool,
+        companions: &[&str],
+    ) -> Vec<Block> {
+        let companions = companions.iter().map(|id| id.to_string()).collect();
+        let options = Options { companions, ..options(verse_per_line) };
+        library.blocks(&[Reference { book: book.into(), chapter, from: None, to: None }], &options)
+    }
+
+    /// A block's marks, each as its id and the text it covers.
+    fn marked_text(block: &Block) -> Vec<(String, String)> {
+        let text = utf16(block);
+        let cut = |mark: &PlacedMark| String::from_utf16(&text[mark.start as usize..mark.end as usize]).unwrap();
+        block.marks.iter().map(|mark| (mark.id.clone(), cut(mark))).collect()
+    }
+
+    const MARKS: &str = r##"[
+      {"id": "fish", "book": "jonah", "from": {"chapter": 1, "verse": 17, "word": 3}, "to": {"chapter": 1, "verse": 17, "word": 4}, "highlight": "yellow"},
+      {"id": "prayer", "book": "jonah", "from": {"chapter": 1, "verse": 17}, "to": {"chapter": 2, "verse": 1}, "underline": "blue",
+       "note": [{"text": "Three days: see "}, {"text": "Matthew 12:40", "target": {"book": "MAT", "chapter": 12, "verse": 40}}]},
+      {"id": "german", "book": "jonah-de", "from": {"chapter": 2, "verse": 1}, "to": {"chapter": 2, "verse": 1, "word": 1}, "highlight": "#FF0000"},
+      {"id": "elsewhere", "book": "psalms", "from": {"chapter": 51, "verse": 1}, "to": {"chapter": 51, "verse": 2}}
+    ]"##;
+
+    const VERSE_17: &str = "Yahweh prepared a huge fish to swallow up Jonah, and Jonah was in the belly of the fish three days and three nights.";
+    const VERSE_2_1: &str = "Then Jonah prayed to Yahweh, his God, out of the fish’s belly.";
+
+    #[test]
+    fn a_mark_covers_its_words_in_every_paragraph_of_its_book() {
+        let library = marked(MARKS);
+        // Running text: chapter 1's paragraph holds the words of 1:17, chapter 2's those of 2:1 –
+        // the verse's number left out – and the note stands where the mark ends.
+        let blocks = placed(&library, "jonah", None, false, &[]);
+        assert_eq!(
+            marked_text(&blocks[1]),
+            [("fish".to_string(), "huge fish".to_string()), ("prayer".to_string(), VERSE_17.to_string())]
+        );
+        assert_eq!(marked_text(&blocks[3]), [("prayer".to_string(), VERSE_2_1.to_string())]);
+        assert!(blocks.iter().all(|block| block.kind != "heading" || block.marks.is_empty()));
+        assert_eq!(blocks[1].marks[0].highlight.as_deref(), Some("yellow"));
+        assert_eq!(blocks[1].marks[1].underline.as_deref(), Some("blue"));
+        assert_eq!(blocks[1].marks[1].note, None);
+        let note = blocks[3].marks[0].note.as_ref().expect("the note where the mark ends");
+        assert_eq!(note[0].text, "Three days: see ");
+        // The verses the note refers to follow, as with an edition's notes.
+        assert_eq!(note.last().unwrap().role.as_deref(), Some("preview"));
+        // A verse per line: each verse's line holds its part; the note goes with the last.
+        let lines = placed(&library, "jonah", None, true, &[]);
+        let with: Vec<(usize, Vec<String>)> = (0..)
+            .zip(&lines)
+            .filter(|(_, block)| !block.marks.is_empty())
+            .map(|(index, block)| (index, block.marks.iter().map(|mark| mark.id.clone()).collect()))
+            .collect();
+        assert_eq!(with, [(3, vec!["fish".to_string(), "prayer".to_string()]), (5, vec!["prayer".to_string()])]);
+        assert_eq!(marked_text(&lines[5]), [("prayer".to_string(), VERSE_2_1.to_string())]);
+        assert!(lines[3].marks[1].note.is_none() && lines[5].marks[0].note.is_some());
+        // Only chapter 2 shown: the mark's note still stands where it ends.
+        let chapter = placed(&library, "jonah", Some(2), false, &[]);
+        assert_eq!(marked_text(&chapter[1]), [("prayer".to_string(), VERSE_2_1.to_string())]);
+        assert!(chapter[1].marks[0].note.is_some());
+        // A mark of a book that isn't shown shows nowhere; a passage of its book has it.
+        assert!(blocks.iter().all(|block| block.marks.iter().all(|mark| mark.id != "elsewhere")));
+        let psalm = placed(&library, "psalms", Some(51), false, &[]);
+        assert_eq!(psalm[1].marks.len(), 1);
+        assert_eq!(psalm[1].marks[0].start, psalm[1].words[0].start);
+        let last = psalm[1].words.iter().rfind(|word| word.verse == 2).unwrap();
+        assert_eq!(psalm[1].marks[0].end, last.end);
+    }
+
+    #[test]
+    fn a_mark_shows_in_the_edition_read_along_too() {
+        let library = marked(MARKS);
+        let blocks = placed(&library, "jonah", Some(2), false, &["jonah-de"]);
+        let german: Vec<_> =
+            blocks.iter().filter(|block| block.book == "jonah-de" && !block.marks.is_empty()).collect();
+        assert_eq!(german.len(), 1);
+        assert_eq!(german[0].column, 1);
+        assert_eq!(marked_text(german[0]), [("german".to_string(), "Und Jona".to_string())]);
+        assert_eq!(german[0].marks[0].highlight.as_deref(), Some("#FF0000"));
+        let english: Vec<_> = blocks.iter().filter(|block| block.book == "jonah" && !block.marks.is_empty()).collect();
+        assert_eq!(english.len(), 1);
+        assert_eq!(marked_text(english[0]), [("prayer".to_string(), VERSE_2_1.to_string())]);
+        assert!(english[0].marks[0].note.is_some());
+        // The same marks, paragraph by paragraph, as a reader asks for them anew.
+        let options = Options { companions: vec!["jonah-de".into()], ..options(false) };
+        let again =
+            library.marks_in(&[Reference { book: "jonah".into(), chapter: Some(2), from: None, to: None }], &options);
+        assert_eq!(again, blocks.iter().map(|block| block.marks.clone()).collect::<Vec<_>>());
     }
 }

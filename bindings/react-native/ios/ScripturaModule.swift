@@ -32,12 +32,31 @@ struct NowPlayingRecord: Record {
   @Field var subtitle: String?
 }
 
+/// An end of a selection, as JS passes it: a word of a verse, or the whole verse, without one.
+struct MarkEndRecord: Record {
+  @Field var chapter: Int = 0
+  @Field var verse: Int = 0
+  @Field var word: Int?
+}
+
+/// Words or verses to select, as JS passes them: where they stand, never their text.
+struct SelectionRecord: Record {
+  @Field var passage: Int = 0
+  @Field var book: String = ""
+  @Field var from: MarkEndRecord = MarkEndRecord()
+  @Field var to: MarkEndRecord = MarkEndRecord()
+}
+
 /// The reader's colors. Text takes the color of its role, if it has one: a verse number, a heading,
-/// a tajweed rule.
+/// a tajweed rule. A mark names its colors: its fill is looked up in `marks`, its underline's color
+/// in `markLines`; a name neither has is a color itself. The selection is drawn in `selection`.
 struct ReaderColors: Record {
   @Field var background: UIColor = .white
   @Field var text: UIColor = .black
   @Field var highlight: UIColor = UIColor(red: 1, green: 0.88, blue: 0.51, alpha: 1)
+  @Field var selection: UIColor = UIColor(red: 0x64 / 255, green: 0xB5 / 255, blue: 0xF6 / 255, alpha: 1)
+  @Field var marks: [String: UIColor] = [:]
+  @Field var markLines: [String: UIColor] = [:]
   @Field var roles: [String: UIColor] = [:]
 }
 
@@ -91,13 +110,38 @@ public class ScripturaModule: Module {
       Self.recordingsChanged()
     }
 
+    // The host's marks on the books' words, with their notes, read here too: readers draw them at
+    // once, their layout kept. JS learns where they stand, not their notes.
+    AsyncFunction("addMarks") { (source: BooksSource) throws -> [String] in
+      let ids = try addMarks(json: try Self.data(of: source))
+      Self.marksChanged()
+      return ids
+    }
+
+    Function("marks") {
+      marks().map { mark in
+        ["id": mark.id, "book": mark.book, "from": Self.end(mark.from), "to": Self.end(mark.to),
+         "highlight": mark.highlight, "underline": mark.underline, "note": mark.note]
+      }
+    }
+
+    AsyncFunction("removeMarks") { (ids: [String]) in
+      removeMarks(ids: ids)
+      Self.marksChanged()
+    }
+
+    AsyncFunction("clearMarks") {
+      clearMarks()
+      Self.marksChanged()
+    }
+
     // The voices that can read aloud: their identifiers, names and languages.
     AsyncFunction("speechVoices") {
       ReadAloud.voiceList()
     }
 
     View(ReaderView.self) {
-      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference")
+      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap")
 
       Prop("passages") { (view: ReaderView, passages: [PassageRecord]?) in
         view.passages = passages ?? []
@@ -189,6 +233,10 @@ public class ScripturaModule: Module {
       AsyncFunction("tapAt") { (view: ReaderView, x: Double, y: Double) in
         view.tap(at: CGPoint(x: x, y: y))
       }
+      // Words or verses selected, as a long press and a drag would select them; or nothing.
+      AsyncFunction("select") { (view: ReaderView, selection: SelectionRecord?) in
+        view.select(selection)
+      }
       // What a screen reader finds, so that can be checked without one.
       AsyncFunction("accessibilityElementsInSight") { (view: ReaderView) in
         view.accessibilityElementsInSight()
@@ -240,5 +288,16 @@ public class ScripturaModule: Module {
     DispatchQueue.main.async {
       NotificationCenter.default.post(name: ReaderView.recordingsChanged, object: nil)
     }
+  }
+
+  private static func marksChanged() {
+    DispatchQueue.main.async {
+      NotificationCenter.default.post(name: ReaderView.marksChanged, object: nil)
+    }
+  }
+
+  /// An end of a mark as JS sees it.
+  private static func end(_ end: MarkEnd) -> [String: Any] {
+    ["chapter": end.chapter, "verse": end.verse, "word": end.word as Any]
   }
 }

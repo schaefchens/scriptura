@@ -5,4 +5,6 @@
   <item name="scriptura_previous_word" type="id" />
   <item name="scriptura_next_verse" type="id" />
   <item name="scriptura_previous_verse" type="id" />
+  <item name="scriptura_select_verse" type="id" />
+  <item name="scriptura_extend_selection" type="id" />
 </resources>

@@ -47,6 +47,24 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     let rightToLeft: Bool
   }
 
+  /// A host's mark as it is drawn over the text: its range, a fill behind its words, a line under
+  /// them, and the sign of its note after its last word, which is tapped to open the note.
+  struct Decoration {
+    let range: NSRange
+    let fill: UIColor?
+    let line: UIColor?
+    let sign: Sign?
+    let rightToLeft: Bool
+  }
+
+  /// The sign of a mark's note: what it is, drawn small and raised in a color, after words of `size`.
+  struct Sign {
+    let id: String
+    let text: String
+    let color: UIColor
+    let size: CGFloat
+  }
+
   /// The text as last given; until it is laid out, the one before it stays in sight.
   private(set) var text = NSAttributedString()
   /// The character the reader is at: a word it was brought to, or during and after a scroll by hand,
@@ -72,6 +90,10 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   private var requestedSize = CGSize.zero
   private var generation = 0
   private var highlighted: NSRange?
+  /// The marks drawn over the text, and the words selected, behind it: a range per paragraph.
+  private var decorations: [Decoration] = []
+  private var selection: [NSRange] = []
+  private var selectionColor = UIColor.systemBlue.withAlphaComponent(0.4)
   /// A character to bring into sight once the text is laid out that far.
   private var pendingSight: Int?
   /// The views in sight, by page – or in one endless scroll, by part.
@@ -81,6 +103,13 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   var onTap: ((Int) -> Void)?
   /// A tap where no character is.
   var onTapElsewhere: (() -> Void)?
+  /// A tap on the sign of a mark's note, by the mark's id.
+  var onTapSign: ((String) -> Void)?
+  /// A long press on a character, or beside the text; then, the finger still down, each character it
+  /// moves over; and the finger lifting. The text doesn't scroll meanwhile.
+  var onLongPress: ((Int?) -> Void)?
+  var onDrag: ((Int?) -> Void)?
+  var onRelease: (() -> Void)?
   /// A scroll the reader asked for, to bring something into sight, has come to rest.
   var onSettled: (() -> Void)?
   /// A scroll or a page turn by hand begins – or by a screen reader, or by turn(forward:).
@@ -101,7 +130,13 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     super.init(frame: frame)
     showsHorizontalScrollIndicator = false
     delegate = self
-    addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+    let tap = UITapGestureRecognizer(target: self, action: #selector(tapped))
+    let press = UILongPressGestureRecognizer(target: self, action: #selector(pressed))
+    press.minimumPressDuration = 0.45
+    // A finger lifting after a long press is no tap.
+    tap.require(toFail: press)
+    addGestureRecognizer(tap)
+    addGestureRecognizer(press)
   }
 
   required init?(coder: NSCoder) {
@@ -126,6 +161,8 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     isPagingEnabled = !continuous
     showsVerticalScrollIndicator = continuous
     highlighted = nil
+    decorations = []
+    selection = []
     pendingSight = nil
     transform = rightToLeft ? CGAffineTransform(scaleX: -1, y: 1) : .identity
     // A layout under way is of the text before.
@@ -499,6 +536,7 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
       view.transform = transform
       view.highlight(highlighted, color: highlightColor)
       addSubview(view)
+      view.decorate(decorations, selection: selection, color: selectionColor)
       return view
     }
   }
@@ -523,6 +561,30 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   func highlight(_ range: NSRange?) {
     highlighted = range
     views.values.joined().forEach { $0.highlight(range, color: highlightColor) }
+  }
+
+  /// Draws the marks over the text, wherever it shows, and the selection – in `color` – behind it.
+  func decorate(_ decorations: [Decoration], selection: [NSRange], color: UIColor) {
+    self.decorations = decorations
+    self.selection = selection
+    selectionColor = color
+    guard layout.text === text else { return }
+    views.values.joined().forEach { $0.decorate(decorations, selection: selection, color: color) }
+  }
+
+  /// Draws the selection over the text in `ranges`, or none, the marks as they are.
+  func select(_ ranges: [NSRange]) {
+    decorate(decorations, selection: ranges, color: selectionColor)
+  }
+
+  /// The sign of a mark's note at a point in this view's content, by the mark's id, if a part in
+  /// sight draws one there or near it.
+  func sign(at point: CGPoint) -> String? {
+    guard layout.text === text else { return nil }
+    for view in views.values.joined() {
+      if let id = view.sign(at: view.convert(point, from: self)) { return id }
+    }
+    return nil
   }
 
   /// The character at a point in this view's content, if a part holds one there – or a little way
@@ -714,10 +776,30 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   }
 
   @objc private func tapped(_ gesture: UITapGestureRecognizer) {
-    if let index = characterIndex(at: gesture.location(in: self)) {
+    let point = gesture.location(in: self)
+    if let id = sign(at: point) {
+      onTapSign?(id)
+    } else if let index = characterIndex(at: point) {
       onTap?(index)
     } else {
       onTapElsewhere?()
+    }
+  }
+
+  /// A long press, and the finger dragging on from it: the text stays put under it meanwhile.
+  @objc private func pressed(_ gesture: UILongPressGestureRecognizer) {
+    let index = characterIndex(at: gesture.location(in: self))
+    switch gesture.state {
+    case .began:
+      isScrollEnabled = false
+      onLongPress?(index)
+    case .changed:
+      onDrag?(index)
+    case .ended, .cancelled, .failed:
+      isScrollEnabled = true
+      onRelease?()
+    default:
+      break
     }
   }
 }
@@ -827,10 +909,15 @@ private func distance(from point: CGPoint, to rect: CGRect) -> CGFloat {
 }
 
 /// A part's text, in a text view of its own, and the part. A drop cap in it has its space kept clear
-/// and its glyphs drawn in a view of their own.
+/// and its glyphs drawn in a view of their own. The marks' fills and lines and the selection are
+/// drawn in a view behind the text – the word the voice is at, a background of the text itself, shows
+/// over them – and the marks' signs in one over it.
 private final class PartView: UITextView {
   let part: Part
   var range: NSRange { part.range }
+  private let underlay = DecorationView(reach: 0)
+  /// A mark's sign at a line's end may stand a little past the part.
+  private let overlay = DecorationView(reach: 24)
 
   init(frame: CGRect, text: NSAttributedString, part: Part, dropCaps: [DropCapDraw]) {
     self.part = part
@@ -840,15 +927,27 @@ private final class PartView: UITextView {
     isScrollEnabled = false
     isUserInteractionEnabled = false
     backgroundColor = .clear
+    clipsToBounds = false
     textContainerInset = .zero
     textContainer.lineFragmentPadding = 0
     textContainer.exclusionPaths = dropCaps.map { UIBezierPath(rect: $0.rect) }
     attributedText = text
+    insertSubview(underlay, at: 0)
     dropCaps.forEach { addSubview(DropCapView($0)) }
+    addSubview(overlay)
   }
 
   required init?(coder: NSCoder) {
     fatalError("not used from a storyboard")
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    // The text's own views come as they are needed: behind them, and over them, still.
+    underlay.frame = bounds
+    overlay.frame = bounds.insetBy(dx: -overlay.reach, dy: -overlay.reach)
+    sendSubviewToBack(underlay)
+    bringSubviewToFront(overlay)
   }
 
   /// Highlights the part of `range`, in the whole text, that falls in this part.
@@ -857,6 +956,162 @@ private final class PartView: UITextView {
     guard let overlap = whole?.intersection(range) else { return }
     let local = NSRange(location: overlap.location - range.location, length: overlap.length)
     textStorage.addAttribute(.backgroundColor, value: color, range: local)
+  }
+
+  /// Draws the parts of the marks, and of the selection, that fall in this part: each mark's fill
+  /// on every line its words take, its line a little under their baselines, and its sign after its
+  /// last word – before it, in a right-to-left paragraph – raised like a note's mark.
+  func decorate(_ decorations: [PagedText.Decoration], selection: [NSRange], color: UIColor) {
+    var fills: [DecorationView.Fill] = []
+    var signs: [DecorationView.SignDraw] = []
+    for decoration in decorations {
+      guard let overlap = decoration.range.intersection(range), overlap.length > 0 else { continue }
+      let lines = lines(of: NSRange(location: overlap.location - range.location, length: overlap.length))
+      for line in lines {
+        if let fill = decoration.fill {
+          fills.append(DecorationView.Fill(rect: line.frame, color: fill))
+        }
+        if let under = decoration.line {
+          let y = line.frame.minY + line.baseline + 2
+          fills.append(DecorationView.Fill(rect: CGRect(x: line.frame.minX, y: y, width: line.frame.width, height: 2), color: under))
+        }
+      }
+      // The sign stands where the mark ends, in the part that holds its last word: small and raised,
+      // as a note's mark is.
+      if let sign = decoration.sign, let last = lines.last, NSMaxRange(overlap) == NSMaxRange(decoration.range) {
+        let font = UIFont.systemFont(ofSize: sign.size * 0.6)
+        let text = NSAttributedString(string: sign.text, attributes: [.font: font, .foregroundColor: sign.color])
+        let size = text.size()
+        let x = decoration.rightToLeft ? last.frame.minX - 1 - size.width : last.frame.maxX + 1
+        let y = last.frame.minY + last.baseline - sign.size * 0.33 - font.ascender
+        signs.append(DecorationView.SignDraw(id: sign.id, rect: CGRect(origin: CGPoint(x: x, y: y), size: size), text: text))
+      }
+    }
+    for selected in selection {
+      guard let overlap = selected.intersection(range), overlap.length > 0 else { continue }
+      for line in lines(of: NSRange(location: overlap.location - range.location, length: overlap.length)) {
+        fills.append(DecorationView.Fill(rect: line.frame, color: color))
+      }
+    }
+    underlay.fills = fills
+    overlay.signs = signs
+  }
+
+  /// The sign drawn at a point in this view, or near it, by its mark's id.
+  func sign(at point: CGPoint) -> String? {
+    overlay.signs.first { $0.rect.insetBy(dx: -8, dy: -6).contains(point) }?.id
+  }
+
+  /// The lines the characters in `local` – a range in this part's text – stand on: each line's
+  /// rectangle over them, without the spaces at its ends, and its baseline from the rectangle's top,
+  /// in this view's coordinates.
+  private func lines(of local: NSRange) -> [(frame: CGRect, baseline: CGFloat)] {
+    var lines: [(frame: CGRect, baseline: CGFloat)] = []
+    for segment in segments(of: local) {
+      let trimmed = trimmed(segment.range)
+      guard trimmed.length > 0 else { continue }
+      let pieces = trimmed == segment.range ? [(segment.frame, segment.baseline)] : segments(of: trimmed).map { ($0.frame, $0.baseline) }
+      for (frame, baseline) in pieces {
+        // A line given twice – as TextKit gives a part's last line, the range running on past it – is
+        // drawn once: a fill drawn twice would come out darker.
+        let same = lines.firstIndex { abs($0.frame.minY - frame.minY) < 0.5 && $0.frame.maxX >= frame.minX && frame.maxX >= $0.frame.minX }
+        if let same {
+          lines[same].frame = lines[same].frame.union(frame)
+        } else {
+          lines.append((frame, baseline))
+        }
+      }
+    }
+    return lines
+  }
+
+  /// The pieces the characters in `local` are laid out in – a line's, or in text of both directions,
+  /// a run's – with their ranges in this part's text.
+  private func segments(of local: NSRange) -> [(range: NSRange, frame: CGRect, baseline: CGFloat)] {
+    guard let manager = textLayoutManager,
+          let start = manager.location(manager.documentRange.location, offsetBy: local.location),
+          let end = manager.location(start, offsetBy: local.length),
+          let textRange = NSTextRange(location: start, end: end)
+    else { return [] }
+    manager.ensureLayout(for: textRange)
+    let origin = manager.documentRange.location
+    var segments: [(NSRange, CGRect, CGFloat)] = []
+    manager.enumerateTextSegments(in: textRange, type: .standard, options: []) { range, frame, baseline, _ in
+      let found = range.map { NSRange(location: manager.offset(from: origin, to: $0.location), length: manager.offset(from: $0.location, to: $0.endLocation)) }
+      segments.append((found ?? local, frame.offsetBy(dx: textContainerInset.left, dy: textContainerInset.top), baseline))
+      return true
+    }
+    return segments
+  }
+
+  /// A range of this part's text without the spaces at its ends.
+  private func trimmed(_ range: NSRange) -> NSRange {
+    let string = textStorage.string as NSString
+    let isSpace = { (index: Int) in Unicode.Scalar(string.character(at: index)).map(CharacterSet.whitespacesAndNewlines.contains) ?? false }
+    var (start, end) = (range.location, NSMaxRange(range))
+    while start < end, isSpace(start) { start += 1 }
+    while end > start, isSpace(end - 1) { end -= 1 }
+    return NSRange(location: start, length: end - start)
+  }
+}
+
+/// What is drawn around a part's text: fills – a mark's, its line, the selection – or the signs of
+/// the marks' notes.
+private final class DecorationView: UIView {
+  struct Fill {
+    let rect: CGRect
+    let color: UIColor
+  }
+
+  /// A sign where it is drawn, by its mark's id.
+  struct SignDraw {
+    let id: String
+    let rect: CGRect
+    let text: NSAttributedString
+  }
+
+  var fills: [Fill] = [] { didSet { setNeedsDisplay() } }
+  var signs: [SignDraw] = [] { didSet { setNeedsDisplay() } }
+  /// How far it reaches past its part on every side; what it draws is placed in the part's coordinates.
+  let reach: CGFloat
+
+  init(reach: CGFloat) {
+    self.reach = reach
+    super.init(frame: .zero)
+    isOpaque = false
+    backgroundColor = .clear
+    isUserInteractionEnabled = false
+    isAccessibilityElement = false
+    contentMode = .redraw
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("not used from a storyboard")
+  }
+
+  override func draw(_ rect: CGRect) {
+    guard let context = UIGraphicsGetCurrentContext() else { return }
+    context.translateBy(x: reach, y: reach)
+    // Each color as one shape: where the lines of a fill meet or overlap, it is drawn once – without
+    // a seam, and a see-through selection no darker there.
+    var shapes: [(color: UIColor, path: CGMutablePath)] = []
+    for fill in fills {
+      if let shape = shapes.first(where: { $0.color == fill.color }) {
+        shape.path.addRect(fill.rect)
+      } else {
+        let path = CGMutablePath()
+        path.addRect(fill.rect)
+        shapes.append((fill.color, path))
+      }
+    }
+    for (color, path) in shapes {
+      context.addPath(path)
+      context.setFillColor(color.cgColor)
+      context.fillPath(using: .winding)
+    }
+    for sign in signs {
+      sign.text.draw(at: sign.rect.origin)
+    }
   }
 }
 
