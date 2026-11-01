@@ -31,6 +31,22 @@ export type WordPosition = { passage: number; book: string; chapter: number; ver
 /** One step through the words. */
 export type MoveStep = 'word+1' | 'word-1' | 'word+10' | 'word-10' | 'verse+1' | 'verse-1';
 
+/**
+ * A cross reference followed to verses the reader doesn't show, for the app to show them: their
+ * book by its USFM code, their chapter, and their verse – to `to`, for a range – or none, for the
+ * whole chapter; and `book`, the library's book of that code, if it holds one – of the same work,
+ * where it has it – or null, where it doesn't. `from` is the verse the reference stands in. Verses
+ * the reader shows it jumps to itself.
+ */
+export type ReferenceTarget = {
+  book: string | null;
+  code: string;
+  chapter: number;
+  verse?: number;
+  to?: number;
+  from: { passage: number; book: string; chapter: number; verse: number };
+};
+
 /** What the reader's voice does: it speaks, it paused, or it stopped – at the end, by stop(), or as the passages changed. */
 export type SpeechChange = {
   state: 'speaking' | 'paused' | 'stopped';
@@ -55,8 +71,8 @@ export type Voice = { id: string; name: string; language: string; quality?: stri
 
 /**
  * The reader's colors. Text takes the color of its role, where it has one: "number" (a verse
- * number), "heading", "ketiv" (a word as written where another is read) or a tajweed rule.
- * A palette() is one.
+ * number), "heading", "note" (a note's mark, and a reference in a note), "noteText" (a note shown in
+ * full), "origin" (the verse a note names), "ketiv" (a word as written where another is read) or a tajweed rule. A palette() is one.
  */
 export type ReaderColors = { background: string; text: string; highlight: string; roles: Record<string, string> };
 
@@ -82,6 +98,20 @@ export type ReaderOptions = {
   versePerLine?: boolean;
   /** Other editions of the passages' books, by id, read along verse by verse. */
   companions?: string[];
+  /**
+   * The books' notes – footnotes, endnotes and cross references – each as a small raised mark in
+   * the text where it stands, numbered or lettered through the chapter ('marks', the default); or
+   * shown in full there, in brackets after the mark ('inline'); or left out ('none'). A tap on a
+   * mark opens the note there; a cross reference's verses it jumps to, or reports (onReference).
+   */
+  notes?: 'marks' | 'inline' | 'none';
+  /** Chapters in running text open with a drop cap: the first letter of the text set large over two lines, the first verse without its number. On by default. */
+  dropCaps?: boolean;
+  /**
+   * A font family for the drop cap's letter, such as one of ornamental initials the app brings
+   * like its other fonts; letters it lacks, as Hebrew's and Arabic's, are set in the text's font.
+   */
+  dropCapFont?: string;
   /** Read along inline (a verse, then the same verse in each companion) or side by side, a column each. */
   parallel?: 'inline' | 'columns';
   /** For reading aloud, a voice per language, by id; otherwise the device's for each. */

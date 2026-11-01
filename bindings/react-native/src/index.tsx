@@ -1,4 +1,4 @@
-import type { BookInfo, LaidOut, MoveStep, ReaderOptions, RecordingInfo, SpeechChange, Voice, WordPosition } from '@schaefchens/scriptura';
+import type { BookInfo, LaidOut, MoveStep, ReaderOptions, RecordingInfo, ReferenceTarget, SpeechChange, Voice, WordPosition } from '@schaefchens/scriptura';
 import { requireNativeModule, requireNativeView } from 'expo';
 import type { Ref } from 'react';
 import type { NativeSyntheticEvent, StyleProp, ViewStyle } from 'react-native';
@@ -13,13 +13,16 @@ export type BooksSource = { uri: string } | { asset: string } | { json: string }
 
 /**
  * What a screen reader finds in sight: a chapter's heading, or a verse, by where it stands, never
- * its text; its language; and where it is in the reader, in points.
+ * its text; its language; and where it is in the reader, in points. A note's mark in a verse is
+ * one too, with its mark and kind.
  */
 export type AccessibilityElement = {
   passage: number;
   book: string;
   chapter: number;
   verse?: number;
+  note?: string;
+  kind?: 'footnote' | 'endnote' | 'crossReference';
   language: string;
   frame: [x: number, y: number, width: number, height: number];
 };
@@ -54,14 +57,17 @@ export type ReaderProps = ReaderOptions & {
   onWordChange?: (position: WordPosition) => void;
   onLaidOut?: (time: LaidOut) => void;
   onSpeechChange?: (change: SpeechChange) => void;
+  /** A cross reference followed to verses the reader doesn't show: for the app to show them, if the library holds their book. */
+  onReference?: (target: ReferenceTarget) => void;
   ref?: Ref<ReaderHandle>;
   style?: StyleProp<ViewStyle>;
 };
 
-type NativeProps = Omit<ReaderProps, 'onWordChange' | 'onLaidOut' | 'onSpeechChange'> & {
+type NativeProps = Omit<ReaderProps, 'onWordChange' | 'onLaidOut' | 'onSpeechChange' | 'onReference'> & {
   onWordChange?: (event: NativeSyntheticEvent<WordPosition>) => void;
   onLaidOut?: (event: NativeSyntheticEvent<LaidOut>) => void;
   onSpeechChange?: (event: NativeSyntheticEvent<SpeechChange>) => void;
+  onReference?: (event: NativeSyntheticEvent<ReferenceTarget>) => void;
 };
 
 const NativeReader = requireNativeView<NativeProps>('Scriptura');
@@ -70,13 +76,14 @@ const NativeReader = requireNativeView<NativeProps>('Scriptura');
  * Scripture in pages or one endless scroll, laid out with the platform's own text stack: TextKit 2
  * on iOS, Android's text layout. It gets the passages' text itself, from the books added.
  */
-export function Reader({ onWordChange, onLaidOut, onSpeechChange, ...props }: ReaderProps) {
+export function Reader({ onWordChange, onLaidOut, onSpeechChange, onReference, ...props }: ReaderProps) {
   return (
     <NativeReader
       {...props}
       onWordChange={onWordChange && (({ nativeEvent }) => onWordChange(nativeEvent))}
       onLaidOut={onLaidOut && (({ nativeEvent }) => onLaidOut(nativeEvent))}
       onSpeechChange={onSpeechChange && (({ nativeEvent }) => onSpeechChange(nativeEvent))}
+      onReference={onReference && (({ nativeEvent }) => onReference(nativeEvent))}
     />
   );
 }

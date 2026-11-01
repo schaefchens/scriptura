@@ -1,6 +1,12 @@
 {
   "books": "public/texts/books.json",
   "fonts": "public/fonts",
+  "extraFonts": [
+    {
+      "family": "CinzelDecorative-Regular",
+      "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/cinzeldecorative/CinzelDecorative-Regular.ttf"
+    }
+  ],
   "bibles": [
     {
       "usfm": "https://ebible.org/Scriptures/eng-web_usfm.zip",

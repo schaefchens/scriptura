@@ -8,6 +8,7 @@ import {
   palette,
   Reader,
   type ReaderHandle,
+  type ReferenceTarget,
   SCRIPT_FONTS,
   type SpeechChange,
   type WordPosition,
@@ -44,6 +45,13 @@ export default function App() {
   // Chapters with a recording of this voice are played from it; the rest, or all with none, the device's voices read.
   const [recited, setRecited] = useState<string>();
   const [goTo, setGoTo] = useState('2:1');
+  // Notes as marks that open where they stand, shown in full there, or left out.
+  const [notes, setNotes] = useState<'marks' | 'inline' | 'none'>('marks');
+  // Drop caps: none, the first letter in the text's font, or in a font of ornamental initials the app bundles.
+  const [dropCaps, setDropCaps] = useState<'off' | 'on' | 'ornate'>('on');
+  // A cross reference to a book the library doesn't hold; and a verse to jump to once its book shows.
+  const [missing, setMissing] = useState<string>();
+  const pending = useRef<WordPosition>(undefined);
   const reader = useRef<ReaderHandle>(null);
 
   // The books and recordings the app bundles, read natively: their text never passes through JS.
@@ -74,6 +82,20 @@ export default function App() {
   };
   // Each change tells what is new; while the voice speaks, what it told before still holds.
   const onSpeechChange = (change: SpeechChange) => setSpeech((last) => (change.state === 'speaking' ? { ...last, ...change } : change));
+  // A cross reference the reader couldn't follow itself: its book shown, if the library holds it, and the verse jumped to.
+  const onReference = (target: ReferenceTarget) => {
+    const where = `${target.code} ${target.chapter}${target.verse ? `:${target.verse}` : ''}`;
+    if (!target.book) return setMissing(`${where} – the library holds no such book`);
+    setMissing(undefined);
+    pending.current = { passage: 0, book: target.book, chapter: target.chapter, verse: target.verse ?? 1, word: 0 };
+    setBook(target.book);
+  };
+  // Once the book shows: the native reader lays it out first.
+  useEffect(() => {
+    if (pending.current?.book !== book) return;
+    const timer = setTimeout(() => reader.current?.jump(pending.current!).then(() => (pending.current = undefined)), 300);
+    return () => clearTimeout(timer);
+  }, [book]);
 
   const button = (label: string, onPress: () => void, selectedButton = false) => (
     <Pressable key={label} onPress={onPress} style={[styles.button, { borderColor: colors.border }, selectedButton && { backgroundColor: colors.text }]}>
@@ -93,6 +115,8 @@ export default function App() {
           {button(paging === 'scroll' ? 'Pages' : 'Scroll', () => setPaging(paging === 'scroll' ? 'pages' : 'scroll'))}
           {button(dark ? 'Light' : 'Dark', () => setDark(!dark))}
           {button(versePerLine ? 'Running text' : 'Verse per line', () => setVersePerLine(!versePerLine))}
+          {button({ marks: 'Notes as marks', inline: 'Notes inline', none: 'No notes' }[notes], () => setNotes({ marks: 'inline', inline: 'none', none: 'marks' }[notes] as typeof notes))}
+          {button({ off: 'No drop caps', on: 'Drop caps', ornate: 'Ornate drop caps' }[dropCaps], () => setDropCaps({ off: 'on', on: 'ornate', ornate: 'off' }[dropCaps] as typeof dropCaps))}
           {editions.map(({ id, work }) => button(work, () => toggle(id), along.includes(id)))}
           {along.length > 0 && button(parallel === 'inline' ? 'Side by side' : 'Inline', () => setParallel(parallel === 'inline' ? 'columns' : 'inline'))}
           {along.length > 0 && button('Speak along', () => setSpeakAlong(!speakAlong), speakAlong)}
@@ -111,6 +135,7 @@ export default function App() {
         </View>
         <Text style={[styles.position, { color: colors.text }]}>
           {position ? `‎${title(position.book)}‎ ${position.chapter}:${position.verse} · word ${position.word + 1}` : 'Tap a word'}
+          {missing ? ` · ${missing}` : ''}
           {speech.state === 'speaking' && speech.recording ? ` · ${voiceNames.get(speech.recording)}` : ''}
           {speech.firstSound !== undefined && ` · first sound after ${Math.round(speech.firstSound)} ms`}
           {speech.unvoiced?.length ? ` · no voice for ${speech.unvoiced.join(', ')}` : ''}
@@ -127,11 +152,15 @@ export default function App() {
           versePerLine={versePerLine}
           companions={along}
           parallel={parallel}
+          notes={notes}
+          dropCaps={dropCaps !== 'off'}
+          dropCapFont={dropCaps === 'ornate' ? 'CinzelDecorative-Regular' : undefined}
           speakAlong={speakAlong}
           speechRate={rate}
           recordedVoices={recited ? [recited] : []}
           onWordChange={setPosition}
           onSpeechChange={onSpeechChange}
+          onReference={onReference}
         />
         <Text style={[styles.sources, { color: colors.secondary }]}>
           World English Bible, Luther 1912 and Smith & Van Dyck, public domain; the Westminster Leningrad Codex from the Open

@@ -2,7 +2,7 @@
 //! the shapes below, with camelCase names. The import tool, `bindings/js/import.mjs`, writes books
 //! from USFM, OSIS and Tanzil's text, and recordings from recitations whose words were timed.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// A book of a scripture in one edition: a book of the Bible in one translation, or a surah.
 #[derive(Deserialize, Debug)]
@@ -63,6 +63,48 @@ pub struct Verse {
     /// The text in runs, each with its role, if it has one: "ketiv" for a word as written where
     /// another is read, or a tajweed rule. The reader colors a run by its role.
     pub runs: Vec<(String, Option<String>)>,
+    /// The edition's notes on the verse, each where it stands in the verse's text.
+    #[serde(default)]
+    pub notes: Vec<Note>,
+}
+
+/// A note on a verse, as the edition has it: a footnote, an endnote or a cross reference. The
+/// reader shows its mark in the text where it stands, and opens the note there.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+pub struct Note {
+    /// "footnote", "endnote" or "crossReference".
+    pub kind: String,
+    /// Its mark, as the edition numbers or letters its notes: "1", "a", "٣". A mark is no word.
+    pub mark: String,
+    /// Where it stands: after this many UTF-16 code units of the verse's text, as the runs have it.
+    pub at: u32,
+    pub runs: Vec<NoteRun>,
+}
+
+/// A run of a note's text, and what it is: its role, if it has one – "origin" (the verse the note
+/// is on, as the note names it), "quotation" (words of the text), "emphasis", "label" – its
+/// language, where it isn't the book's, and the verse it refers to, where it is a reference.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct NoteRun {
+    pub text: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub target: Option<Target>,
+}
+
+/// A verse a note refers to: its book by USFM code, which the book's editions share, its chapter,
+/// and its verse, or verses up to `to` – the whole chapter, without a verse.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct Target {
+    pub book: String,
+    pub chapter: u32,
+    #[serde(default)]
+    pub verse: Option<u32>,
+    #[serde(default)]
+    pub to: Option<u32>,
 }
 
 /// A chapter read aloud: its audio, and where each of its verses and their words start in it, in

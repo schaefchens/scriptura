@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::reader::words_of;
-use crate::{Block, Book, Library, Options, Recording, Reference, VerseNumbers, Word};
+use crate::{Block, Book, Library, Notes, Options, Recording, Reference, VerseNumbers, Word};
 
 /// Where a word stands: in which passage of a request, in which book – the passage's, or one read
 /// along with it – and where in the scripture: its chapter, its verse, and which word of the verse.
@@ -126,7 +126,14 @@ impl Speech {
         from: Option<&Place>,
         recorded: Option<&[String]>,
     ) -> Speech {
-        let options = Options { font_size: 1.0, verse_per_line: false, companions: companions.to_vec() };
+        // Without the notes' marks and drop caps: only the words are spoken, and they stay the same.
+        let options = Options {
+            font_size: 1.0,
+            verse_per_line: false,
+            companions: companions.to_vec(),
+            notes: Notes::None,
+            drop_caps: false,
+        };
         let blocks = library.blocks(references, &options);
         let mut recordings = Recordings { library, voices: recorded, chapters: HashMap::new(), chosen: Vec::new() };
         let mut stretches: Vec<Stretch> = Vec::new();
@@ -497,7 +504,13 @@ mod tests {
     fn the_words_are_the_cores_with_their_places() {
         let blocks = LIBRARY.blocks(
             &[reference("jonah", Some(2), None, None)],
-            &Options { font_size: 28.0, verse_per_line: true, companions: Vec::new() },
+            &Options {
+                font_size: 28.0,
+                verse_per_line: true,
+                companions: Vec::new(),
+                notes: Notes::Marks,
+                drop_caps: true,
+            },
         );
         let spoken = all(speech(&[reference("jonah", Some(2), None, None)], &[], false, None), 4000);
         let words: Vec<(u32, u32, u32, String)> = spoken

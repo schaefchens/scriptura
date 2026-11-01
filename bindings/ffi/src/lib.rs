@@ -75,12 +75,59 @@ pub struct Block {
     pub segments: Vec<Segment>,
     pub verses: Vec<VerseRange>,
     pub words: Vec<Word>,
+    pub notes: Vec<NoteMark>,
+    pub drop_cap: Option<DropCap>,
 }
 
 #[derive(uniffi::Record)]
 pub struct Segment {
     pub text: String,
     pub role: Option<String>,
+}
+
+/// A note's mark in a paragraph, and the note it opens: see `scriptura::NoteMark`.
+#[derive(uniffi::Record)]
+pub struct NoteMark {
+    pub chapter: u32,
+    pub verse: u32,
+    pub start: u32,
+    pub end: u32,
+    pub kind: String,
+    pub mark: String,
+    pub runs: Vec<NoteRun>,
+}
+
+/// A run of a note's text: see `scriptura::NoteRun`.
+#[derive(uniffi::Record)]
+pub struct NoteRun {
+    pub text: String,
+    pub role: Option<String>,
+    pub language: Option<String>,
+    pub target: Option<Target>,
+}
+
+/// A verse a note refers to, by its book's code: see `scriptura::Target`.
+#[derive(uniffi::Record)]
+pub struct Target {
+    pub book: String,
+    pub chapter: u32,
+    pub verse: Option<u32>,
+    pub to: Option<u32>,
+}
+
+/// How notes show in the text: see `scriptura::Notes`.
+#[derive(uniffi::Enum)]
+pub enum Notes {
+    None,
+    Marks,
+    Inline,
+}
+
+/// What opens a chapter, set large: see `scriptura::DropCap`.
+#[derive(uniffi::Record)]
+pub struct DropCap {
+    pub letter_start: u32,
+    pub letter_end: u32,
 }
 
 #[derive(uniffi::Record)]
@@ -265,15 +312,23 @@ pub fn recordings() -> Vec<RecordingInfo> {
     library.recordings().iter().map(info).collect()
 }
 
-/// The passages as paragraphs, read along with `companions`: see `scriptura::Library::blocks`.
+/// The passages as paragraphs, read along with `companions`, with the notes as asked for and drop
+/// caps if asked for: see `scriptura::Library::blocks`.
 #[uniffi::export]
 pub fn reader_blocks(
     references: Vec<Reference>,
     font_size: f64,
     verse_per_line: bool,
     companions: Vec<String>,
+    notes: Notes,
+    drop_caps: bool,
 ) -> Vec<Block> {
-    let options = scriptura::Options { font_size, verse_per_line, companions };
+    let notes = match notes {
+        Notes::None => scriptura::Notes::None,
+        Notes::Marks => scriptura::Notes::Marks,
+        Notes::Inline => scriptura::Notes::Inline,
+    };
+    let options = scriptura::Options { font_size, verse_per_line, companions, notes, drop_caps };
     LIBRARY.read().unwrap().blocks(&core_references(references), &options).into_iter().map(Block::from).collect()
 }
 
@@ -308,6 +363,37 @@ impl From<scriptura::Block> for Block {
                 .map(|scriptura::VerseRange { chapter, verse, start, end }| VerseRange { chapter, verse, start, end })
                 .collect(),
             words: block.words.into_iter().map(Word::from).collect(),
+            notes: block.notes.into_iter().map(NoteMark::from).collect(),
+            drop_cap: block
+                .drop_cap
+                .map(|scriptura::DropCap { letter_start, letter_end }| DropCap { letter_start, letter_end }),
+        }
+    }
+}
+
+impl From<scriptura::NoteMark> for NoteMark {
+    fn from(note: scriptura::NoteMark) -> Self {
+        let runs = (note.runs.into_iter())
+            .map(|scriptura::NoteRun { text, role, language, target }| NoteRun {
+                text,
+                role,
+                language,
+                target: target.map(|scriptura::Target { book, chapter, verse, to }| Target {
+                    book,
+                    chapter,
+                    verse,
+                    to,
+                }),
+            })
+            .collect();
+        NoteMark {
+            chapter: note.chapter,
+            verse: note.verse,
+            start: note.start,
+            end: note.end,
+            kind: note.kind,
+            mark: note.mark,
+            runs,
         }
     }
 }

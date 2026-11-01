@@ -1,7 +1,7 @@
-import type { LaidOut, MoveStep, ReaderColors, ReaderOptions, SpeechChange, WordPosition } from '@schaefchens/scriptura';
+import type { LaidOut, MoveStep, ReaderColors, ReaderOptions, ReferenceTarget, SpeechChange, WordPosition } from '@schaefchens/scriptura';
 import { palette } from '@schaefchens/scriptura';
 
-import type { Block, Library } from './library';
+import type { Block, Library, NoteMark, Target } from './library';
 import { ReadAloud } from './readAloud';
 
 export type WebReaderOptions = ReaderOptions & {
@@ -10,6 +10,8 @@ export type WebReaderOptions = ReaderOptions & {
   onWordChange?: (position: WordPosition) => void;
   onLaidOut?: (time: LaidOut) => void;
   onSpeechChange?: (change: SpeechChange) => void;
+  /** A cross reference followed to verses the reader doesn't show: for the page to show them, if the library holds their book. */
+  onReference?: (target: ReferenceTarget) => void;
 };
 
 export type WebReader = {
@@ -50,7 +52,7 @@ const INSET = 12;
 /** How long after the last scroll by hand, in milliseconds, the reader follows the voice again when its word is in sight. */
 const HAND_SETTLES = 700;
 const SCROLL_KEYS = new Set(['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' ']);
-const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVoices' | 'nowPlaying'>> = {
+const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVoices' | 'nowPlaying' | 'dropCapFont'>> = {
   fontSize: 28,
   paging: 'scroll',
   columns: 1,
@@ -61,10 +63,17 @@ const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVo
   versePerLine: false,
   companions: [],
   parallel: 'inline',
+  notes: 'marks',
+  dropCaps: true,
   voices: {},
   speakAlong: false,
   speechRate: 1,
 };
+/** What a note is called where screen readers announce its mark, and where it opens. */
+const NOTE_NAMES = { footnote: 'Footnote', endnote: 'Endnote', crossReference: 'Cross reference' };
+/** How wide a note opens at most, in pixels, and how much of the reader's height it may take. */
+const NOTE_WIDTH = 360;
+const NOTE_HEIGHT = 0.45;
 
 let readers = 0;
 /** The reader the browser's media controls show, by its number. */
@@ -99,6 +108,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   /** Each word's index in `words`, by where it stands. */
   let indices = new Map<string, number>();
   let current: number | undefined;
+  /** The note open, and the mark it opened at. */
+  let opened: { note: HTMLElement; mark: HTMLElement } | undefined;
   const readAloud = new ReadAloud(
     (part, word) => reached({ passage: part.passage, book: part.book, chapter: word.chapter, verse: word.verse, index: word.index }),
     // While it speaks, with whether the reader follows it. The browser's media controls show it too.
@@ -134,9 +145,11 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     const marked = staying && current !== undefined ? words[current].place : undefined;
     if (!staying) readAloud.stop();
     shownPassages = JSON.stringify(passages);
+    closeNote();
 
-    blocks = library.blocks(passages, { fontSize, versePerLine, companions });
-    const loading = [...new Set(blocks.map(familyOf))].filter((family) => !fontsLoaded(family) && !awaited.has(family));
+    blocks = library.blocks(passages, { fontSize, versePerLine, companions, notes: options.notes, dropCaps: options.dropCaps });
+    const families = [...blocks.map(familyOf), ...(options.dropCapFont ? [`"${options.dropCapFont}"`] : [])];
+    const loading = [...new Set(families)].filter((family) => !fontsLoaded(family) && !awaited.has(family));
     if (loading.length > 0) {
       loading.forEach((family) => awaited.add(family));
       Promise.all(loading.map((family) => document.fonts.load(`16px ${family}`))).then(() => destroyed || render());
@@ -158,7 +171,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       const next = blocks[index + 1];
       const indented = along.has(block.passage) && !sideBySide && block.column > 0 ? indent : 0;
       const spacing = spacingAfter(block, next, along.has(block.passage), sideBySide) * sizes[index];
-      const [element, blockPieces] = paragraph(block, sizes[index], spacing, indented, numberColumn);
+      const [element, blockPieces] = paragraph(block, index, sizes[index], spacing, indented, numberColumn);
       paragraphs.push(element);
       pieces.push(blockPieces);
       for (const word of block.words) {
@@ -196,8 +209,12 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     options.onLaidOut?.({ pages: options.paging === 'pages' ? pageCount : 0, milliseconds: time, all: time });
   }
 
-  /** A block as a paragraph in its language and direction, its runs colored by their roles; and its text's pieces. */
-  function paragraph(block: Block, size: number, spacing: number, indent: number, numberColumn: number): [HTMLElement, Piece[]] {
+  /**
+   * A block as a paragraph in its language and direction, its runs colored by their roles, each
+   * note's mark a button that opens it, and the drop cap – the first letter – set large; and its
+   * text's pieces.
+   */
+  function paragraph(block: Block, index: number, size: number, spacing: number, indent: number, numberColumn: number): [HTMLElement, Piece[]] {
     const element = document.createElement('p');
     element.dir = block.direction;
     element.lang = block.language;
@@ -220,23 +237,180 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     }
     const blockPieces: Piece[] = [];
     let start = 0;
-    block.segments.forEach(({ text, role }, index) => {
+    const drop = block.dropCap;
+    block.segments.forEach(({ text, role }, at) => {
       // A hanging number's tab becomes the width of the number column.
-      const shown = hangs && index === 0 ? text.slice(0, -1) : text;
-      const node = document.createTextNode(shown);
-      if (role || (hangs && index === 0)) {
-        const span = document.createElement('span');
-        if (role) span.style.color = options.colors.roles[role] ?? '';
-        if (hangs && index === 0) Object.assign(span.style, { display: 'inline-block', inlineSize: `${numberColumn}px`, textIndent: '0' });
-        span.append(node);
-        element.append(span);
-      } else {
-        element.append(node);
+      const shown = hangs && at === 0 ? text.slice(0, -1) : text;
+      if (role === 'note') {
+        // A mark is a button that opens its note, named for screen readers; shown in full, the note
+        // stands around it.
+        const note = block.notes.findIndex((candidate) => candidate.start <= start && start < candidate.end);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'scriptura-mark';
+        button.style.color = options.colors.roles.note ?? '';
+        button.dataset.block = String(index);
+        button.dataset.note = String(note);
+        if (note >= 0) button.setAttribute('aria-label', describe(block.notes[note]));
+        const node = document.createTextNode(shown);
+        button.append(node);
+        element.append(button);
+        blockPieces.push({ node, start, length: text.length });
+        start += text.length;
+        return;
       }
+      let parent: HTMLElement = element;
+      if (role || (hangs && at === 0)) {
+        parent = document.createElement('span');
+        if (role) parent.style.color = options.colors.roles[role] ?? '';
+        if (hangs && at === 0) Object.assign(parent.style, { display: 'inline-block', inlineSize: `${numberColumn}px`, textIndent: '0' });
+        element.append(parent);
+      }
+      // The first letter stands large, before the rest of the text.
+      if (drop && start <= drop.letterStart && drop.letterEnd <= start + shown.length && drop.letterEnd > drop.letterStart) {
+        const [before, letter, after] = [shown.slice(0, drop.letterStart - start), shown.slice(drop.letterStart - start, drop.letterEnd - start), shown.slice(drop.letterEnd - start)];
+        const cap = document.createElement('span');
+        cap.className = 'scriptura-drop';
+        Object.assign(cap.style, dropCapStyle(letter, familyOf(block), size));
+        for (const [piece, holder] of [[before, parent], [letter, cap], [after, parent]] as const) {
+          if (holder === cap) parent.append(cap);
+          if (!piece) continue;
+          const node = document.createTextNode(piece);
+          holder.append(node);
+          blockPieces.push({ node, start, length: piece.length });
+          start += piece.length;
+        }
+        return;
+      }
+      const node = document.createTextNode(shown);
+      parent.append(node);
       blockPieces.push({ node, start, length: text.length });
       start += text.length;
     });
     return [element, blockPieces];
+  }
+
+  /**
+   * The first letter, floated at the paragraph's start as tall as two of its lines, sized so a
+   * capital's top stands at the first line's digit height and its baseline on the second line's: a
+   * drop cap. In a font of initials, if one is given and has the letter, the letter's own height
+   * fills the two lines. Browsers set initial-letter only on a ::first-letter.
+   */
+  function dropCapStyle(letter: string, family: string, size: number) {
+    const line = size * lineHeight(family) * options.lineSpacing;
+    const ornate = options.dropCapFont && fontHasGlyph(options.dropCapFont, letter, family);
+    const dropFamily = ornate ? `"${options.dropCapFont}", ${family}` : family;
+    const dropSize = size + line / letterHeight(ornate ? letter : '0', ornate ? dropFamily : family);
+    // A float's line box puts its baseline a half-leading plus the ascent down; the shift takes it
+    // to where the second line's is.
+    const [ascent, descent] = fontBox(family);
+    const shift = line / 2 + ((size - dropSize) * (ascent - descent)) / 2;
+    // A hair short of two lines, so the third line, which starts where the float ends, runs full width.
+    return { fontFamily: dropFamily, fontSize: `${dropSize}px`, lineHeight: `${2 * line}px`, blockSize: `${2 * line - 0.5}px`, top: `${shift}px` };
+  }
+
+  /** A note as screen readers announce its mark: "Footnote 1", "Cross reference a". */
+  const describe = (note: NoteMark) => `${NOTE_NAMES[note.kind] ?? 'Note'} ${note.mark}`;
+
+  /**
+   * Opens a note at its mark – below the mark's line, or above it where there is no room below –
+   * as a dialog in the paragraph's font, its runs as they are: the verse it names, quotations and
+   * emphasis in italics, words in other languages in their fonts, and each reference a button that
+   * follows it. It stays until a tap elsewhere, the mark again, Escape, or a scroll.
+   */
+  function openNote(mark: HTMLElement) {
+    closeNote();
+    const block = blocks[Number(mark.dataset.block)];
+    const note = block?.notes[Number(mark.dataset.note)];
+    if (!block || !note) return;
+    const dialog = document.createElement('div');
+    dialog.className = 'scriptura-note';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-label', describe(note));
+    dialog.tabIndex = -1;
+    dialog.dir = block.direction;
+    dialog.lang = block.language;
+    const { colors } = options;
+    const size = parseFloat(paragraphs[Number(mark.dataset.block)].style.fontSize) || options.fontSize;
+    Object.assign(dialog.style, {
+      fontFamily: familyOf(block),
+      fontSize: `${Math.max(14, Math.round(size * 0.7))}px`,
+      lineHeight: String(lineHeight(familyOf(block)) * 1.15),
+      background: colors.background,
+      color: colors.text,
+      width: `${Math.min(NOTE_WIDTH, root.clientWidth - 2 * options.sideMargin)}px`,
+      maxHeight: `${Math.round(root.clientHeight * NOTE_HEIGHT)}px`,
+    });
+    for (const run of note.runs) {
+      if (run.text === '\n') {
+        dialog.append(document.createElement('br'));
+        continue;
+      }
+      const piece = document.createElement(run.target ? 'button' : 'span');
+      if (run.target) {
+        const target = run.target;
+        (piece as HTMLButtonElement).type = 'button';
+        piece.className = 'scriptura-reference';
+        piece.style.color = colors.roles.note ?? '';
+        piece.addEventListener('click', () => followReference(target, note, block));
+      }
+      if (run.role === 'origin') piece.style.color = colors.roles.origin ?? '';
+      if (run.role === 'quotation' || run.role === 'emphasis') piece.style.fontStyle = 'italic';
+      if (run.language) {
+        piece.lang = run.language;
+        piece.dir = 'auto';
+        const family = options.fonts[run.language];
+        if (family) piece.style.fontFamily = `"${family}", ${familyOf(block)}`;
+      }
+      piece.textContent = run.text;
+      dialog.append(piece);
+    }
+    root.append(dialog);
+    const area = root.getBoundingClientRect();
+    const at = mark.getBoundingClientRect();
+    const height = dialog.offsetHeight;
+    const below = at.bottom + 6 + height <= area.bottom - INSET;
+    const left = Math.min(Math.max(at.left, area.left + options.sideMargin), area.right - options.sideMargin - dialog.offsetWidth);
+    Object.assign(dialog.style, { left: `${Math.max(left, area.left)}px`, top: `${below ? at.bottom + 6 : Math.max(at.top - 6 - height, area.top)}px` });
+    mark.setAttribute('aria-expanded', 'true');
+    opened = { note: dialog, mark };
+    dialog.focus({ preventScroll: true });
+  }
+
+  function closeNote() {
+    if (!opened) return;
+    const { note, mark } = opened;
+    opened = undefined;
+    const focused = note.contains(document.activeElement);
+    note.remove();
+    mark.removeAttribute('aria-expanded');
+    if (focused && mark.isConnected) mark.focus({ preventScroll: true });
+  }
+
+  /**
+   * Follows a reference: to the verses it names, if the reader shows them – in the same edition as
+   * the note's book, or else in another – or, if not, tells the page, with the library's book of
+   * them, if it holds one.
+   */
+  function followReference(target: Target, note: NoteMark, block: Block) {
+    const books = library.books();
+    const work = books.find((book) => book.id === block.book)?.work;
+    const editions = books.filter((book) => book.code === target.book);
+    const held = editions.find((book) => book.work === work) ?? editions[0];
+    const codes = new Map(books.map((book) => [book.id, book.code]));
+    const at = (word: Word) => word.place.chapter === target.chapter && (target.verse == null || word.place.verse === target.verse);
+    let index = held ? words.findIndex((word) => word.place.book === held.id && at(word)) : -1;
+    if (index < 0) index = words.findIndex((word) => codes.get(word.place.book) === target.book && at(word));
+    closeNote();
+    if (index >= 0) return select(index);
+    options.onReference?.({
+      book: held?.id ?? null,
+      code: target.book,
+      chapter: target.chapter,
+      verse: target.verse ?? undefined,
+      to: target.to ?? undefined,
+      from: { passage: block.passage, book: block.book, chapter: note.chapter, verse: note.verse },
+    });
   }
 
   type Layout = { kind: 'scroll' } | { kind: 'pages'; rightToLeft: boolean };
@@ -524,6 +698,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
 
   /** Marks a word reached by a tap, a move or a jump. While reading aloud, the voice goes on from it. */
   function select(index: number) {
+    closeNote();
     following = true;
     mark(index);
     live.textContent = rangeOf(words[index]).toString();
@@ -606,14 +781,21 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     return rect.left >= area.left && rect.right <= area.right;
   }
 
-  /** Brings a word into sight: turns to its page, or scrolls it to the top or a third of the way down. */
-  function showWord(index: number, where: 'top' | 'third') {
+  /**
+   * Brings a word into sight: turns to its page, or scrolls it to the top or a third of the way
+   * down. In a scroll, paragraphs out of sight are laid out only as guessed until they come near:
+   * a long way off, the word lands elsewhere at first, so the scroll is checked and set again over
+   * the frames after, until it holds.
+   */
+  function showWord(index: number, where: 'top' | 'third', tries = 6) {
     const rect = rangeOf(words[index]).getBoundingClientRect();
     const area = root.getBoundingClientRect();
     if (layout.kind === 'scroll') {
       if (where === 'third' && rect.top >= area.top && rect.bottom <= area.bottom) return;
       const offset = where === 'top' ? INSET : root.clientHeight / 3;
-      root.scrollTo({ top: root.scrollTop + rect.top - area.top - offset, behavior: where === 'top' ? 'instant' : 'smooth' });
+      const far = Math.abs(rect.top - area.top - offset) > root.clientHeight;
+      root.scrollTo({ top: root.scrollTop + rect.top - area.top - offset, behavior: where === 'top' || far ? 'instant' : 'smooth' });
+      if (far && tries > 0) requestAnimationFrame(() => destroyed || words[index] === undefined || showWord(index, where, tries - 1));
       return;
     }
     // Every page is as wide as the reader, wherever a section's columns run.
@@ -674,15 +856,26 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     if (event.clientX - area.left >= root.clientLeft + root.clientWidth) scrolledByHand();
   });
   root.addEventListener('touchmove', () => scrolledByHand(), { passive: true });
-  // Once the reader no longer follows the voice, every scroll is a hand's, or its gliding on.
+  // Once the reader no longer follows the voice, every scroll is a hand's, or its gliding on. A
+  // note open stands where its mark was: it closes.
   root.addEventListener('scroll', () => {
     if (!following) scrolledAt = performance.now();
+    closeNote();
   }, { passive: true });
   root.addEventListener('pointerup', (event) => {
     if (!down) return;
     const [dx, dy] = [event.clientX - down.x, event.clientY - down.y];
     down = undefined;
+    const target = event.target instanceof Element ? event.target : null;
+    if (opened && target && opened.note.contains(target)) return;
     if (Math.hypot(dx, dy) < 8) {
+      const mark = target?.closest<HTMLElement>('.scriptura-mark');
+      if (mark) {
+        if (opened?.mark === mark) closeNote();
+        else openNote(mark);
+        return;
+      }
+      closeNote();
       const index = wordAt(event.clientX, event.clientY);
       if (index !== undefined) select(index);
     } else if (layout.kind !== 'scroll' && Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
@@ -691,6 +884,10 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     }
   });
   root.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && opened) {
+      event.preventDefault();
+      return closeNote();
+    }
     if (layout.kind === 'scroll') {
       if (SCROLL_KEYS.has(event.key)) scrolledByHand();
       return;
@@ -779,6 +976,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     turn,
     destroy() {
       destroyed = true;
+      closeNote();
       unfollow();
       document.removeEventListener('visibilitychange', hidden);
       readAloud.stop();
@@ -804,7 +1002,7 @@ function caretAt(x: number, y: number): { node: Node; offset: number } | undefin
 
 const canvas = document.createElement('canvas').getContext('2d')!;
 const heights = new Map<string, number>();
-const lineHeights = new Map<string, number>();
+const lineHeights = new Map<string, [number, number]>();
 
 function measure(text: string, family: string, size: number) {
   canvas.font = `${size}px ${family}`;
@@ -813,6 +1011,12 @@ function measure(text: string, family: string, size: number) {
 
 /** Whether the fonts of `family` are loaded – or none need to be – so its letters measure as they show. */
 const fontsLoaded = (family: string) => document.fonts.check(`16px ${family}`);
+
+/** Whether a font the page has loaded, by family, draws `text` itself: set before `fallback`, the text comes out another width than in the fallback alone. */
+function fontHasGlyph(family: string, text: string, fallback: string) {
+  if (!fontsLoaded(`"${family}"`)) return false;
+  return measure(text, `"${family}", ${fallback}`, 100).width !== measure(text, fallback, 100).width;
+}
 
 /** How tall `letter` is drawn in `family`, per pixel of the font's size – in the font the browser takes for it. */
 function letterHeight(letter: string, family: string) {
@@ -826,12 +1030,18 @@ function letterHeight(letter: string, family: string) {
 
 /** A font's own line height, per pixel of its size: as a multiple of it, lines keep each font's spacing, as on iOS and Android. */
 function lineHeight(family: string) {
+  const [ascent, descent] = fontBox(family);
+  return ascent + descent || 1.2;
+}
+
+/** A font's ascent and descent, per pixel of its size, which its line box has above and below the baseline. */
+function fontBox(family: string): [number, number] {
   const known = lineHeights.get(family);
   if (known) return known;
   const metrics = measure('x', family, 100);
-  const height = (metrics.fontBoundingBoxAscent + metrics.fontBoundingBoxDescent) / 100 || 1.2;
-  if (fontsLoaded(family)) lineHeights.set(family, height);
-  return height;
+  const box: [number, number] = [metrics.fontBoundingBoxAscent / 100 || 0.9, metrics.fontBoundingBoxDescent / 100 || 0.3];
+  if (fontsLoaded(family)) lineHeights.set(family, box);
+  return box;
 }
 
 let styled = false;
@@ -846,6 +1056,12 @@ function injectStyles() {
 .scriptura-content { box-sizing: border-box; }
 .scriptura p { margin-block-start: 0; margin-inline-end: 0; overflow-wrap: break-word; }
 .scriptura-live { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.scriptura-mark { all: unset; cursor: pointer; font-size: 0.6em; line-height: 0; vertical-align: super; padding-inline: 0.08em; }
+.scriptura-mark:focus-visible, .scriptura-reference:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.scriptura-drop { float: inline-start; position: relative; margin-inline-end: 0.14em; white-space: nowrap; }
+.scriptura-note { position: fixed; z-index: 10; box-sizing: border-box; padding: 10px 14px; border-radius: 8px; overflow: auto; outline: none;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25); }
+.scriptura-reference { all: unset; cursor: pointer; text-decoration: underline; }
 `;
   document.head.append(style);
 }

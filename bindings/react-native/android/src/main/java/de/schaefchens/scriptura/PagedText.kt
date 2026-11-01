@@ -49,6 +49,30 @@ data class Readable(
 )
 
 /**
+ * A note's mark for screen readers: where it is in the text, where it stands – on which verse,
+ * in which language – its mark and kind, and which of the reader's notes it opens.
+ */
+data class Mark(
+  val start: Int,
+  val end: Int,
+  val passage: Int,
+  val book: String,
+  val chapter: Int,
+  val verse: Int,
+  val text: String,
+  val kind: String,
+  val language: String,
+  val index: Int,
+) {
+  /** What it is called: "Footnote 1", "Cross reference a". */
+  val label get() = "${KINDS[kind] ?: "Note"} $text"
+
+  companion object {
+    val KINDS = mapOf("footnote" to "Footnote", "endnote" to "Endnote", "crossReference" to "Cross reference")
+  }
+}
+
+/**
  * Paragraphs of the text, from [start] to [end], that stand side by side with others: in a row, in a
  * column of it, and whether they are headings, which go on a page only with the row after them.
  */
@@ -92,8 +116,11 @@ class TextFormat(
  * page.
  */
 class PagedText(context: Context) : View(context) {
-  /** A tapped character, by its offset in the text. */
-  var onTap: ((Int) -> Unit)? = null
+  /** A tap: the offset of the character there, or none where no text is. */
+  var onTap: ((Int?) -> Unit)? = null
+
+  /** A screen reader's tap on a note's mark, by the note's index. */
+  var onMarkTap: ((Int) -> Unit)? = null
 
   /** The first pages show. */
   var onFirstPages: (() -> Unit)? = null
@@ -125,6 +152,9 @@ class PagedText(context: Context) : View(context) {
 
   /** What screen readers read, in the text's order. */
   var readables: List<Readable> = emptyList()
+
+  /** The notes' marks, in the text's order: named where screen readers read them, and buttons of their own. */
+  var marks: List<Mark> = emptyList()
 
   var highlightColor: Int
     get() = highlightPaint.color
@@ -205,7 +235,7 @@ class PagedText(context: Context) : View(context) {
     }
 
     override fun onSingleTapUp(event: MotionEvent): Boolean {
-      offsetAt(event.x, event.y)?.let { onTap?.invoke(it) }
+      onTap?.invoke(offsetAt(event.x, event.y))
       return true
     }
   })
@@ -375,6 +405,30 @@ class PagedText(context: Context) : View(context) {
     return layout.getOffsetForHorizontal(line, pointX - place.left)
   }
 
+  /** Where the text from [start] to [end] shows, in this view's pixels, if it does: within its line, in the column that shows it. */
+  fun rectOf(start: Int, end: Int): Rect? {
+    val shown = shown?.takeIf { it.text === text } ?: return null
+    if (start >= shown.end && !shown.complete) return null
+    val place = shown.placeOf(start) ?: return null
+    val line = place.layout.getLineForOffset(start)
+    if (line < place.firstLine || line >= place.endLine) return null
+    val pageLeft = if (shown.format.continuous) 0 else shown.scrollXOf(place.page)
+    return glyphRect(place, start, end, pageLeft).apply { offset(-scrollX, -scrollY) }
+  }
+
+  /** Where the text from [start] to [end], on one line of [place], shows in the content: on a page [pageLeft] from its left. */
+  private fun glyphRect(place: Place, start: Int, end: Int, pageLeft: Int): Rect {
+    val layout = place.layout
+    val line = layout.getLineForOffset(start)
+    val origin = inset + place.top - layout.getLineTop(place.firstLine)
+    val left = pageLeft + place.left
+    val (from, to) = layout.getPrimaryHorizontal(start) to layout.getPrimaryHorizontal(end)
+    return Rect(
+      (left + minOf(from, to)).toInt(), (origin + layout.getLineTop(line)).toInt(),
+      (left + maxOf(from, to)).toInt(), (origin + layout.getLineBottom(line)).toInt(),
+    )
+  }
+
   /** Highlights the text from [start] to [end]. */
   fun highlight(start: Int, end: Int) {
     highlight = start..end
@@ -507,7 +561,10 @@ class PagedText(context: Context) : View(context) {
 
   override fun dispatchHoverEvent(event: MotionEvent) = screenReaders.dispatchHoverEvent(event) || super.dispatchHoverEvent(event)
 
-  /** Each heading and verse in sight, cut to the columns it shows in, and where that is in the content. */
+  /**
+   * Each heading and verse in sight, cut to the columns it shows in, and where that is in the
+   * content; and each note's mark in sight, a button of its own, before the verse it is in.
+   */
   private fun updatePieces() {
     val shown = shown
     pieces = if (shown == null || shown.text !== text) emptyList() else buildList {
@@ -519,9 +576,16 @@ class PagedText(context: Context) : View(context) {
         val left = pageLeft + place.left
         val origin = inset + place.top - layout.getLineTop(place.firstLine)
         var index = readables.firstEndingAfter(from)
+        var mark = marks.indexOfFirst { it.end > from }.takeIf { it >= 0 } ?: marks.size
         while (index < readables.size && readables[index].start < to) {
           val readable = readables[index++]
           val (start, end) = maxOf(readable.start, from) to minOf(readable.end, to)
+          while (mark < marks.size && marks[mark].start < end) {
+            val found = marks[mark++]
+            // A mark is narrow: its node reaches a little beyond it, for a finger exploring by touch.
+            val bounds = glyphRect(place, found.start, found.end, pageLeft).apply { inset(-(6 * resources.displayMetrics.density).toInt(), 0) }
+            if (found.start >= start) add(Piece(readable, found.start, found.end, bounds, found))
+          }
           val bounds = Rect(
             left.toInt(), (origin + layout.getLineTop(layout.getLineForOffset(start))).toInt(),
             (left + place.width).toInt(), (origin + layout.getLineBottom(layout.getLineForOffset(maxOf(end - 1, start)))).toInt(),
@@ -546,17 +610,36 @@ class PagedText(context: Context) : View(context) {
     screenReaders.invalidateRoot()
   }
 
-  /** The headings and verses in sight, as JS may see them: where they stand and where they are, in dp, but not their text. */
+  /** The headings, verses and notes' marks in sight, as JS may see them: where they stand and where they are, in dp, but not their text. */
   fun accessibilityElementsInSight(): List<Map<String, Any?>> {
     val density = resources.displayMetrics.density
     return pieces.map { piece ->
       val bounds = Rect(piece.bounds).apply { offset(-scrollX, -scrollY) }
-      mapOf(
-        "passage" to piece.readable.passage, "book" to piece.readable.book, "chapter" to piece.readable.chapter, "verse" to piece.readable.verse,
-        "language" to piece.readable.language,
-        "frame" to listOf(bounds.left, bounds.top, bounds.width(), bounds.height()).map { (it / density * 10).roundToInt() / 10.0 },
-      )
+      val frame = listOf(bounds.left, bounds.top, bounds.width(), bounds.height()).map { (it / density * 10).roundToInt() / 10.0 }
+      val mark = piece.mark
+      if (mark != null) {
+        mapOf(
+          "passage" to mark.passage, "book" to mark.book, "chapter" to mark.chapter, "verse" to mark.verse, "note" to mark.text, "kind" to mark.kind,
+          "language" to mark.language, "frame" to frame,
+        )
+      } else {
+        mapOf(
+          "passage" to piece.readable.passage, "book" to piece.readable.book, "chapter" to piece.readable.chapter, "verse" to piece.readable.verse,
+          "language" to piece.readable.language, "frame" to frame,
+        )
+      }
     }
+  }
+
+  /** A piece's text as a screen reader reads it: each note's mark in it named where it stands, as ", footnote 1, "; a note shown in full is read as it stands. */
+  private fun spoken(piece: Piece): String {
+    val builder = StringBuilder(text.subSequence(piece.start, piece.end).toString())
+    for (mark in marks.asReversed()) {
+      if (mark.start >= piece.start && mark.end <= piece.end && mark.end - mark.start == mark.text.length) {
+        builder.replace(mark.start - piece.start, mark.end - piece.start, ", ${mark.label.lowercase()}, ")
+      }
+    }
+    return builder.toString()
   }
 
   /** A section laid out at its column's [width]: all of it, or the first part, up to [end]. */
@@ -617,7 +700,7 @@ class PagedText(context: Context) : View(context) {
         val place = Place(layout, 0, layout.lineCount, 0, format.margin, top, section.width)
         return Placed(listOf(place), first, top + place.height)
       }
-      val starts = columnStarts(layout, 0, layout.lineCount)
+      val starts = columnStarts(layout, 0, layout.lineCount, kept(section))
       val columns = format.columns
       val places = (0 until starts.size - 1).map { Place(layout, starts[it], starts[it + 1], first + it / columns, left(it % columns, columns, section.width), 0, section.width) }
       return Placed(places, first + (places.size + columns - 1) / columns, top)
@@ -667,7 +750,7 @@ class PagedText(context: Context) : View(context) {
         // Cut between lines: on this page below what stands on it, then on pages of their own.
         var pages = 1
         for ((cell, cellLines) in row.cells.zip(row.lines)) {
-          val starts = columnStarts(layout, cellLines.first, cellLines.second, pageHeight - top)
+          val starts = columnStarts(layout, cellLines.first, cellLines.second, kept(section), pageHeight - top)
           for (piece in 0 until starts.size - 1) places += Place(layout, starts[piece], starts[piece + 1], page + piece, left(cell.column, columns, section.width), if (piece == 0) top else 0, section.width)
           pages = maxOf(pages, starts.size - 1)
         }
@@ -680,11 +763,18 @@ class PagedText(context: Context) : View(context) {
       return Placed(places, if (format.continuous || top == 0) page else page + 1, top)
     }
 
+    /** The lines that must not start a column: the second line of each drop cap, which stays with the first. */
+    private fun kept(section: LaidSection): Set<Int> {
+      val spans = text.getSpans(section.section.start, section.section.end, DropCapSpan::class.java)
+      return spans.map { section.layout.getLineForOffset(text.getSpanStart(it)) + 1 }.toSet()
+    }
+
     /**
      * Where columns a page tall start – the first [first] tall – a layout's lines from [from] to before
-     * [to] cut wherever the next would overflow one; and after the last, [to].
+     * [to] cut wherever the next would overflow one, though never before a line in [kept]; and after
+     * the last, [to].
      */
-    private fun columnStarts(layout: StaticLayout, from: Int, to: Int, first: Int = (height - 2 * inset).toInt()): MutableList<Int> {
+    private fun columnStarts(layout: StaticLayout, from: Int, to: Int, kept: Set<Int>, first: Int = (height - 2 * inset).toInt()): MutableList<Int> {
       val columnHeight = (height - 2 * inset).toInt()
       val starts = mutableListOf(from)
       while (starts.last() < to) {
@@ -692,6 +782,7 @@ class PagedText(context: Context) : View(context) {
         val bottom = layout.getLineTop(start) + if (start == from) first else columnHeight
         var end = layout.getLineForVertical(bottom)
         if (layout.getLineBottom(end) <= bottom) end++
+        if (end in kept && end > start + 1) end--
         starts += maxOf(end, start + 1).coerceAtMost(to)
       }
       return starts
@@ -739,12 +830,15 @@ class PagedText(context: Context) : View(context) {
     val height get() = layout.getLineTop(endLine) - layout.getLineTop(firstLine)
   }
 
-  /** A heading or verse in sight, cut to one column, and where it is in the content. */
-  private class Piece(val readable: Readable, val start: Int, val end: Int, val bounds: Rect)
+  /** A heading or verse in sight, cut to one column, and where it is in the content – or a note's mark in a verse. */
+  private class Piece(val readable: Readable, val start: Int, val end: Int, val bounds: Rect, val mark: Mark? = null)
 
   private inner class ScreenReaders : ExploreByTouchHelper(this@PagedText) {
     override fun getVirtualViewAt(x: Float, y: Float): Int {
-      val index = pieces.indexOfFirst { it.bounds.contains((x + scrollX).toInt(), (y + scrollY).toInt()) }
+      val (atX, atY) = (x + scrollX).toInt() to (y + scrollY).toInt()
+      // A mark before the verse it is in.
+      val mark = pieces.indexOfFirst { it.mark != null && it.bounds.contains(atX, atY) }
+      val index = if (mark >= 0) mark else pieces.indexOfFirst { it.bounds.contains(atX, atY) }
       return if (index >= 0) index else INVALID_ID
     }
 
@@ -759,8 +853,18 @@ class PagedText(context: Context) : View(context) {
         node.setBoundsInParent(Rect())
         return
       }
-      // TalkBack reads a piece with the voice of its language.
-      node.text = SpannableString(text.subSequence(piece.start, piece.end).toString()).apply {
+      val mark = piece.mark
+      if (mark != null) {
+        // A note's mark is a button that opens it.
+        node.className = "android.widget.Button"
+        node.text = mark.label
+        node.setBoundsInParent(piece.bounds)
+        node.isClickable = true
+        node.addAction(AccessibilityActionCompat.ACTION_CLICK)
+        return
+      }
+      // TalkBack reads a piece with the voice of its language, and each note's mark by name.
+      node.text = SpannableString(spoken(piece)).apply {
         setSpan(LocaleSpan(Locale.forLanguageTag(piece.readable.language)), 0, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
       }
       node.setBoundsInParent(piece.bounds)
@@ -771,6 +875,11 @@ class PagedText(context: Context) : View(context) {
 
     override fun onPerformActionForVirtualView(id: Int, action: Int, arguments: Bundle?): Boolean {
       val piece = pieces.getOrNull(id) ?: return false
+      if (piece.mark != null) {
+        if (action != AccessibilityNodeInfoCompat.ACTION_CLICK) return false
+        onMarkTap?.invoke(piece.mark.index)
+        return true
+      }
       val step = MOVES.firstOrNull { it.first == action }?.third ?: return false
       onAccessibilityMove?.invoke(step, piece.readable)
       return true

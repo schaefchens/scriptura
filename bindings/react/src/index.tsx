@@ -42,13 +42,14 @@ export function Reader({ ref, className, style, ...options }: ReaderProps) {
   const made = useRef(false);
   const latest = useRef(options);
   latest.current = options;
-  const { library, onWordChange: _word, onLaidOut: _laidOut, onSpeechChange: _speech, ...shown } = options;
+  const { library, onWordChange: _word, onLaidOut: _laidOut, onSpeechChange: _speech, onReference: _reference, ...shown } = options;
   const shownKey = JSON.stringify(shown);
   const withCallbacks = (): WebReaderOptions => ({
     ...latest.current,
     onWordChange: (position) => latest.current.onWordChange?.(position),
     onLaidOut: (time) => latest.current.onLaidOut?.(time),
     onSpeechChange: (change) => latest.current.onSpeechChange?.(change),
+    onReference: (target) => latest.current.onReference?.(target),
   });
 
   useEffect(() => {

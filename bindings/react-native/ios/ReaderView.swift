@@ -8,7 +8,8 @@ import UIKit
 /// word by word or jumped to; JS learns only where the current word stands, never its text. It
 /// reads aloud – chapters with recordings from them, the rest with the device's voices – from the
 /// word it is at, and marks each word as it is said, keeping it in sight – unless it was scrolled
-/// away from it by hand.
+/// away from it by hand. The books' notes stand in the text as marks, each opening where it stands;
+/// a cross reference's verses it jumps to, or tells JS of. Chapters open with a drop cap.
 class ReaderView: ExpoView {
   /// Posted as the host adds or removes books: every reader shows what the library now holds.
   static let booksChanged = Notification.Name("ScripturaBooksChanged")
@@ -30,6 +31,13 @@ class ReaderView: ExpoView {
   /// in each, or "columns", side by side.
   var companions: [String] = []
   var parallel = "inline"
+  /// The books' notes as marks in the text, each opening where it stands; and chapters opening with
+  /// a drop cap – their first letter set large, in the font the app names for it, if that font has
+  /// the letter, such as one of ornamental initials.
+  /// "marks", "inline" or "none".
+  var notes = "marks"
+  var dropCaps = true
+  var dropCapFont: String?
   /// A voice per language for reading aloud, by identifier; otherwise the device's for it.
   var voices: [String: String] = [:]
   /// Read aloud, each verse is followed by the same verse in each book read along; otherwise only
@@ -47,12 +55,23 @@ class ReaderView: ExpoView {
   let onWordChange = EventDispatcher()
   let onLaidOut = EventDispatcher()
   let onSpeechChange = EventDispatcher()
+  /// A cross reference followed to verses the reader doesn't show: the app may.
+  let onReference = EventDispatcher()
 
   private let pages = PagedText()
   private var words: [ReaderWord] = []
   /// Each word's index in `words`, by where it stands.
   private var indices: [WordPlace: Int] = [:]
   private var current: Int?
+  /// The paragraphs shown, and the notes' marks in them, in the text's order.
+  private var paragraphs: [Paragraph] = []
+  private var marks: [ReaderNote] = []
+  /// The note open, by its mark's index, the verses its links refer to, and what VoiceOver was on
+  /// when it opened.
+  private let noteView = NoteView()
+  private var openNote: Int?
+  private var openLinks: [Target] = []
+  private var openedFrom: Any?
   private let readAloud = ReadAloud()
   /// Whether the word the voice comes to is brought into sight: not after a scroll by hand away
   /// from it, until it is in sight again.
@@ -87,7 +106,11 @@ class ReaderView: ExpoView {
     readAloud.onWord = { [weak self] place in self?.reached(place) }
     readAloud.onChange = { [weak self] change in self?.speechChanged(change) }
     pages.onScrollByHand = { [weak self] in self?.scrolledByHand() }
+    pages.onTapElsewhere = { [weak self] in self?.closeNote() }
+    noteView.onLink = { [weak self] url in self?.followLink(url) }
+    noteView.onEscape = { [weak self] in self?.closeNote() }
     addSubview(pages)
+    addSubview(noteView)
     let center = NotificationCenter.default
     observers = [
       center.addObserver(forName: Self.booksChanged, object: nil, queue: .main) { [weak self] _ in
@@ -119,10 +142,14 @@ class ReaderView: ExpoView {
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    pages.frame = bounds
+    if pages.frame != bounds {
+      pages.frame = bounds
+      closeNote()
+    }
   }
 
   func render() {
+    closeNote()
     renderStarted = CACurrentMediaTime()
     firstShown = nil
     reportPending = true
@@ -142,17 +169,20 @@ class ReaderView: ExpoView {
       readAloud.stop()
     }
     shownReferences = references
-    let paragraphs = readerBlocks(references: references, fontSize: fontSize, versePerLine: versePerLine, companions: companions).map {
-      Paragraph($0, colors: colors, fontSize: fontSize(for: $0))
-    }
+    let shownNotes: Notes = notes == "none" ? .none : notes == "inline" ? .inline : .marks
+    let blocks = readerBlocks(references: references, fontSize: fontSize, versePerLine: versePerLine, companions: companions, notes: shownNotes, dropCaps: dropCaps)
+    let paragraphs = blocks.map { Paragraph($0, colors: colors, fontSize: fontSize(for: $0)) }
     // The passages read along with other books, in rows.
     let along = Set(paragraphs.filter { $0.column > 0 }.map(\.passage))
     let sideBySide = parallel == "columns" && !along.isEmpty
     let text = NSMutableAttributedString()
     var paragraphRanges: [NSRange] = []
     var readables: [Readable] = []
+    var dropCapSpecs: [PagedText.DropCapSpec] = []
     words = []
+    marks = []
     current = nil
+    self.paragraphs = paragraphs
     let numberColumn = numberColumnWidth(paragraphs)
     for (index, paragraph) in paragraphs.enumerated() {
       let font = font(of: paragraph)
@@ -160,15 +190,30 @@ class ReaderView: ExpoView {
       let style = style(of: paragraph, before: next, numberColumn: numberColumn, along: along.contains(paragraph.passage), sideBySide: sideBySide)
       let start = text.length
       var attributes: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: style]
+      // A note's mark is small and raised; it doesn't make the line taller.
+      let markAttributes: [NSAttributedString.Key: Any] = [
+        .font: font.withSize(paragraph.fontSize * 0.6), .baselineOffset: paragraph.fontSize * 0.33, .paragraphStyle: style,
+      ]
       for run in paragraph.runs {
         attributes[.foregroundColor] = run.color ?? colors.text
-        text.append(NSAttributedString(string: run.text, attributes: attributes))
+        if run.role == "note" {
+          text.append(NSAttributedString(string: run.text, attributes: markAttributes.merging([.foregroundColor: run.color ?? colors.text]) { $1 }))
+        } else {
+          text.append(NSAttributedString(string: run.text, attributes: attributes))
+        }
       }
       let range = NSRange(location: start, length: text.length - start)
-      readables += paragraph.readables(at: range, firstWord: words.count)
+      let firstMark = marks.count
+      marks += paragraph.notes.map { note in
+        ReaderNote(paragraph: index, note: note, range: NSRange(location: start + Int(note.start), length: Int(note.end - note.start)))
+      }
+      readables += paragraph.readables(at: range, firstWord: words.count, firstMark: firstMark)
       words += paragraph.words.map { word in
         ReaderWord(place: WordPlace(passage: paragraph.passage, book: paragraph.book, chapter: word.chapter, verse: word.verse, index: word.index),
                    range: NSRange(location: start + Int(word.start), length: Int(word.end - word.start)))
+      }
+      if let dropCap = paragraph.dropCap, let spec = dropCapSpec(dropCap, of: paragraph, at: range, in: text, font: font) {
+        dropCapSpecs.append(spec)
       }
       paragraphRanges.append(range)
       if index < paragraphs.count - 1 {
@@ -186,7 +231,7 @@ class ReaderView: ExpoView {
     let whole = [PagedText.Section(range: NSRange(location: 0, length: text.length), cells: [])]
     let sections = sideBySide ? Self.sections(of: paragraphs, at: paragraphRanges, along: along) : whole
     // Unchangeable, as it is laid out on other threads.
-    pages.show(NSAttributedString(attributedString: text), background: colors.background, columns: columns, sections: sections,
+    pages.show(NSAttributedString(attributedString: text), background: colors.background, columns: columns, sections: sections, dropCaps: dropCapSpecs,
                rightToLeft: rightToLeft, continuous: paging != "pages", margin: margin, from: anchor)
     pages.accessibilityElements = Readable.namingChapters(readables).map { ReadableElement(reader: self, pages: pages, readable: $0) }
     if let marked, let index = indices[marked] {
@@ -203,6 +248,71 @@ class ReaderView: ExpoView {
     rateAs = speechRate
     readAloud.inAppSession = nowPlaying != nil
     showNowPlaying(readAloud.state)
+  }
+
+  /// A chapter's drop cap: the first letter of its text set large over the first two lines of the
+  /// paragraph, laid out at `range` in `text`. The letter stays in the text, where VoiceOver and
+  /// the words find it, but invisible and without advance – in its font: TextKit takes a line's
+  /// height from its first character's – and is drawn large instead: in the paragraph's font, so
+  /// large that a digit's top would stand at the first line's digit height and its baseline on the
+  /// second line's; or in the app's font for initials, if it has the letter, sized by the letter's
+  /// own height, so an ornament fills the two lines. Nothing, for a letter the text doesn't hold.
+  private func dropCapSpec(_ dropCap: DropCap, of paragraph: Paragraph, at range: NSRange, in text: NSMutableAttributedString, font: UIFont) -> PagedText.DropCapSpec? {
+    let letterRange = NSRange(location: range.location + Int(dropCap.letterStart), length: Int(dropCap.letterEnd - dropCap.letterStart))
+    guard letterRange.length > 0, NSMaxRange(letterRange) <= NSMaxRange(range) else { return nil }
+    text.addAttribute(.foregroundColor, value: UIColor.clear, range: letterRange)
+    let string = text.string as NSString
+    var at = letterRange.location
+    while at < NSMaxRange(letterRange) {
+      // Each character with its marks, kerned back by its own width.
+      let cluster = string.rangeOfComposedCharacterSequence(at: at)
+      let width = (string.substring(with: cluster) as NSString).size(withAttributes: [.font: font]).width
+      text.addAttribute(.kern, value: -width, range: NSRange(location: cluster.location, length: 1))
+      at = NSMaxRange(cluster)
+    }
+    let letter = string.substring(with: letterRange)
+    let advance = font.lineHeight * lineSpacing
+    var family = paragraph.fontFamily ?? fonts[paragraph.language]
+    var measured = font
+    if let initials = dropCapFont, let initialsFont = UIFont(name: initials, size: 100), Self.has(letter, initialsFont) {
+      family = initials
+      measured = initialsFont
+    }
+    // A letter's marks above it, such as an Arabic vowel, count too: they stay within the two lines.
+    let (above, below) = Self.reach(of: letter, in: measured)
+    let height = family == dropCapFont ? above : max(letterHeight("0", in: font), above)
+    var dropFont = self.font(family: family, size: paragraph.fontSize + advance / height)
+    // What reaches below the baseline – a Hebrew letter's points, an initial's tail – must stay
+    // within the second line: if it wouldn't, the letter is set smaller, from the first line's digit
+    // height down to the second line's bottom, its baseline lifted by what hangs below it.
+    let room = advance - font.ascender * lineSpacing
+    var lift: CGFloat = 0
+    if below * dropFont.pointSize > room {
+      let top = paragraph.fontSize * letterHeight("0", in: font)
+      dropFont = self.font(family: family, size: (top + advance + room) / (above + below))
+      lift = below * dropFont.pointSize - room
+    }
+    let width = (letter as NSString).size(withAttributes: [.font: dropFont]).width + paragraph.fontSize * 0.14
+    return PagedText.DropCapSpec(range: range, text: letter, font: dropFont, color: colors.text, width: width.rounded(.up),
+                                 height: 2 * advance - 1, lineAdvance: advance, baselineLift: lift, rightToLeft: paragraph.rightToLeft)
+  }
+
+  /// How far the glyphs of `letter` reach above and below the baseline in `font`, per point of its size.
+  private static func reach(of letter: String, in font: UIFont) -> (above: Double, below: Double) {
+    var characters = Array(letter.utf16)
+    var glyphs = [CGGlyph](repeating: 0, count: characters.count)
+    CTFontGetGlyphsForCharacters(font, &characters, &glyphs, characters.count)
+    let bounds = CTFontGetBoundingRectsForGlyphs(font, .horizontal, glyphs, nil, glyphs.count)
+    let size = Double(font.pointSize)
+    return (max(Double(bounds.maxY) / size, 0.1), max(-Double(bounds.minY) / size, 0))
+  }
+
+  /// Whether a font has a glyph of its own for the first character of `letter`.
+  private static func has(_ letter: String, _ font: UIFont) -> Bool {
+    guard let first = letter.first else { return false }
+    var characters = Array(String(first).utf16)
+    var glyphs = [CGGlyph](repeating: 0, count: characters.count)
+    return CTFontGetGlyphsForCharacters(font, &characters, &glyphs, characters.count)
   }
 
   /// A paragraph's font: its own, or the one the app brings for its language, or the system's.
@@ -363,23 +473,153 @@ class ReaderView: ExpoView {
     }
   }
 
-  /// The headings and verses VoiceOver finds in sight: where they stand and where they are, in
-  /// this view's points, but not their text, which JS never gets.
+  /// VoiceOver's actions opening the notes of a verse, from the element it is on.
+  fileprivate func noteActions(for notes: [Int], from element: Any) -> [UIAccessibilityCustomAction] {
+    notes.map { index in
+      UIAccessibilityCustomAction(name: Self.name(of: marks[index].note)) { [weak self] _ in
+        self?.openNote(index, from: element)
+        return true
+      }
+    }
+  }
+
+  /// A note as VoiceOver names it: "Footnote 1", "Cross reference a".
+  fileprivate static func name(of note: NoteMark) -> String {
+    let kind = ["footnote": "Footnote", "endnote": "Endnote", "crossReference": "Cross reference"][note.kind] ?? "Note"
+    return "\(kind) \(note.mark)"
+  }
+
+  /// The headings and verses VoiceOver finds in sight, and the notes' marks: where they stand and
+  /// where they are, in this view's points, but not their text, which JS never gets.
   func accessibilityElementsInSight() -> [[String: Any]] {
     guard let elements = pages.accessibilityElements as? [ReadableElement] else { return [] }
     let sight = screenRect(bounds, in: self)
-    return elements.compactMap { element in
-      let frame = element.accessibilityFrame
-      guard frame.intersects(sight) else { return nil }
+    let frame = { (frame: CGRect) -> [Double] in
       let local = frame.offsetBy(dx: -sight.minX, dy: -sight.minY)
+      return [local.minX, local.minY, local.width, local.height].map { (value: CGFloat) -> Double in Double((value * 10).rounded() / 10) }
+    }
+    let readables: [[String: Any]] = elements.compactMap { (element: ReadableElement) -> [String: Any]? in
+      guard element.accessibilityFrame.intersects(sight) else { return nil }
       var found: [String: Any] = [
         "passage": element.readable.passage, "book": element.readable.book, "chapter": element.readable.chapter,
-        "language": element.readable.language,
-        "frame": [local.minX, local.minY, local.width, local.height].map { ($0 * 10).rounded() / 10 },
+        "language": element.readable.language, "frame": frame(element.accessibilityFrame),
       ]
       found["verse"] = element.readable.verse
       return found
     }
+    let notes: [[String: Any]] = marks.compactMap { (mark: ReaderNote) -> [String: Any]? in
+      guard let rect = pages.rect(for: mark.range) else { return nil }
+      let shown = screenRect(rect, in: pages)
+      guard shown.intersects(sight) else { return nil }
+      let paragraph = paragraphs[mark.paragraph]
+      return [
+        "passage": paragraph.passage, "book": paragraph.book, "chapter": mark.note.chapter, "verse": mark.note.verse,
+        "note": mark.note.mark, "kind": mark.note.kind, "language": paragraph.language, "frame": frame(shown),
+      ]
+    }
+    return readables + notes
+  }
+
+  /// Opens a note – a footnote's text, a cross reference's verses – where its mark stands, and
+  /// tells VoiceOver; `from` is what VoiceOver was on. The mark is brought into sight first.
+  fileprivate func openNote(_ index: Int, from element: Any? = nil) {
+    closeNote()
+    let mark = marks[index]
+    pages.show(characterAt: mark.range.location)
+    guard let rect = pages.rect(for: mark.range) else { return }
+    let paragraph = paragraphs[mark.paragraph]
+    var links: [Target] = []
+    let text = noteText(mark.note, in: paragraph, links: &links)
+    openNote = index
+    openLinks = links
+    openedFrom = element
+    let area = bounds.insetBy(dx: margin, dy: 12)
+    noteView.show(text, at: convert(rect, from: pages), in: area, maxWidth: 360, maxHeight: (bounds.height * 0.45).rounded(),
+                  background: colors.background, border: colors.text.withAlphaComponent(0.25), linkColor: colors.roles["note"] ?? colors.text)
+    UIAccessibility.post(notification: .screenChanged, argument: noteView.textView)
+  }
+
+  private func closeNote() {
+    guard openNote != nil else { return }
+    openNote = nil
+    openLinks = []
+    noteView.isHidden = true
+    if UIAccessibility.isVoiceOverRunning {
+      UIAccessibility.post(notification: .layoutChanged, argument: openedFrom ?? pages)
+    }
+    openedFrom = nil
+  }
+
+  /// A note's runs as text in the paragraph's font, a little smaller: the verse it names in its
+  /// color, quotations and emphasis in italics, words in other languages in their fonts, and the
+  /// verses it refers to as links, numbered in `links`.
+  private func noteText(_ note: NoteMark, in paragraph: Paragraph, links: inout [Target]) -> NSAttributedString {
+    let size = max(14, paragraph.fontSize * 0.7)
+    let font = font(family: paragraph.fontFamily ?? fonts[paragraph.language], size: size)
+    let style = NSMutableParagraphStyle()
+    style.baseWritingDirection = paragraph.rightToLeft ? .rightToLeft : .leftToRight
+    style.alignment = .natural
+    let text = NSMutableAttributedString()
+    for run in note.runs {
+      var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: colors.text, .paragraphStyle: style]
+      if run.role == "origin" {
+        attributes[.foregroundColor] = colors.roles["origin"] ?? colors.text.withAlphaComponent(0.6)
+      }
+      if run.role == "quotation" || run.role == "emphasis", let italic = font.fontDescriptor.withSymbolicTraits(.traitItalic) {
+        // The font's own italic, if it has one; not another font's.
+        let italicFont = UIFont(descriptor: italic, size: size)
+        if italicFont.familyName == font.familyName {
+          attributes[.font] = italicFont
+        }
+      }
+      if let language = run.language {
+        attributes[.font] = self.font(family: fonts[language], size: size)
+        attributes[.accessibilitySpeechLanguage] = language
+      }
+      if let target = run.target {
+        attributes[.link] = URL(string: "scriptura://reference/\(links.count)")!
+        links.append(target)
+      }
+      text.append(NSAttributedString(string: run.text, attributes: attributes))
+    }
+    return text
+  }
+
+  private func followLink(_ url: URL) {
+    guard url.host == "reference", let index = Int(url.lastPathComponent), index < openLinks.count, let open = openNote else { return }
+    followReference(openLinks[index], from: marks[open])
+  }
+
+  /// Follows a reference: to the verses it names, if the reader shows them – in the same edition as
+  /// the note's book, or else in another – or, if not, tells JS, with the library's book of them, if
+  /// it holds one.
+  private func followReference(_ target: Target, from mark: ReaderNote) {
+    let paragraph = paragraphs[mark.paragraph]
+    let library = books()
+    let work = library.first { $0.id == paragraph.book }?.work
+    let editions = library.filter { $0.code == target.book }
+    let held = editions.first { $0.work == work } ?? editions.first
+    let codes = Dictionary(library.compactMap { book in book.code.map { (book.id, $0) } }, uniquingKeysWith: { first, _ in first })
+    let at = { (word: ReaderWord) in word.place.chapter == target.chapter && target.verse.map { $0 == word.place.verse } ?? true }
+    var index = held.flatMap { held in words.firstIndex { $0.place.book == held.id && at($0) } }
+    if index == nil {
+      index = words.firstIndex { codes[$0.place.book] == target.book && at($0) }
+    }
+    closeNote()
+    if let index {
+      return select(index)
+    }
+    var event: [String: Any] = [
+      "book": held?.id ?? NSNull(), "code": target.book, "chapter": target.chapter,
+      "from": ["passage": paragraph.passage, "book": paragraph.book, "chapter": mark.note.chapter, "verse": mark.note.verse],
+    ]
+    if let verse = target.verse {
+      event["verse"] = verse
+    }
+    if let to = target.to {
+      event["to"] = to
+    }
+    onReference(event)
   }
 
   /// Brings the reader to a word by where it stands and marks it, as a tap would – or if its verse
@@ -448,7 +688,14 @@ class ReaderView: ExpoView {
     pages.characterIndex(at: pages.convert(point, from: self)).map(selectWord(atCharacter:))
   }
 
+  /// A tap on a note's mark opens the note, or closes it if it is the one open; a tap on a word
+  /// selects it.
   private func selectWord(atCharacter offset: Int) {
+    if let note = marks.firstIndex(where: { $0.range.location <= offset && offset <= NSMaxRange($0.range) }) {
+      openNote == note ? closeNote() : openNote(note)
+      return
+    }
+    closeNote()
     if let index = words.firstIndex(where: { $0.range.location <= offset && offset <= NSMaxRange($0.range) }) {
       select(index)
     }
@@ -456,10 +703,17 @@ class ReaderView: ExpoView {
 
   /// Marks a word reached by a tap, a move or a jump. While reading aloud, the voice goes on from it.
   private func select(_ index: Int) {
+    closeNote()
     following = true
     mark(index)
     if UIAccessibility.isVoiceOverRunning {
-      UIAccessibility.post(notification: .announcement, argument: (pages.text.string as NSString).substring(with: words[index].range))
+      // Without a note's mark within it.
+      let range = words[index].range
+      var spoken = (pages.text.string as NSString).substring(with: range)
+      for mark in marks.reversed() where mark.range.location > range.location && NSMaxRange(mark.range) < NSMaxRange(range) {
+        spoken = (spoken as NSString).replacingCharacters(in: NSRange(location: mark.range.location - range.location, length: mark.range.length), with: "")
+      }
+      UIAccessibility.post(notification: .announcement, argument: spoken)
     }
     if readAloud.state == "speaking" {
       play()
@@ -477,8 +731,10 @@ class ReaderView: ExpoView {
     mark(index, show: following)
   }
 
-  /// While the voice reads, a scroll by hand leaves it be: the reader no longer follows it.
+  /// While the voice reads, a scroll by hand leaves it be: the reader no longer follows it. A note
+  /// open stands where its mark was: it closes.
   private func scrolledByHand() {
+    closeNote()
     if readAloud.state == "speaking" {
       setFollowing(false)
     }
@@ -516,6 +772,10 @@ class ReaderView: ExpoView {
     let word = words[index]
     pages.highlight(word.range)
     if show {
+      // The text moving on under a note open leaves the note behind: it closes.
+      if !pages.isInSight(characterAt: word.range.location) {
+        closeNote()
+      }
       pages.show(characterAt: word.range.location)
     }
     current = index
@@ -530,11 +790,18 @@ class ReaderView: ExpoView {
   }
 
   // VoiceOver reads heading by heading and verse by verse, each in its own language, with actions
-  // to move through the words.
+  // to move through the words and to open the notes; a note open comes first.
   override var accessibilityElements: [Any]? {
-    get { [pages] }
+    get { noteView.isHidden ? [pages] : [noteView, pages] }
     set {}
   }
+}
+
+/// A note's mark in the reader's text: in which paragraph, and where in the text.
+private struct ReaderNote {
+  let paragraph: Int
+  let note: NoteMark
+  let range: NSRange
 }
 
 /// A word of the reader's text: where it stands in the scripture, and where it is in the text.
@@ -562,6 +829,7 @@ struct WordPlace: Hashable {
 private struct Paragraph {
   struct Run {
     let text: String
+    let role: String?
     let color: UIColor?
   }
 
@@ -579,6 +847,8 @@ private struct Paragraph {
   let runs: [Run]
   let verses: [VerseRange]
   let words: [Word]
+  let notes: [NoteMark]
+  let dropCap: DropCap?
 
   init(_ block: Block, colors: ReaderColors, fontSize: Double) {
     passage = block.passage
@@ -590,32 +860,45 @@ private struct Paragraph {
     language = block.language
     fontFamily = block.fontFamily
     self.fontSize = fontSize
-    runs = block.segments.map { Run(text: $0.text, color: $0.role.flatMap { colors.roles[$0] }) }
+    runs = block.segments.map { Run(text: $0.text, role: $0.role, color: $0.role.flatMap { colors.roles[$0] }) }
     verses = block.verses
     words = block.words
+    notes = block.notes
+    dropCap = block.dropCap
   }
 
   /// A verse line whose number comes first, followed by a tab: the number hangs before the text.
   var numberHangs: Bool { kind == "verse" && runs.first?.text.hasSuffix("\t") == true }
 
-  /// What VoiceOver reads of it, laid out at `range`: the heading, or each verse.
-  func readables(at range: NSRange, firstWord: Int) -> [Readable] {
+  /// What VoiceOver reads of it, laid out at `range`: the heading, or each verse, with the marks in
+  /// it – the paragraph's notes count on from `firstMark` in the reader's.
+  func readables(at range: NSRange, firstWord: Int, firstMark: Int) -> [Readable] {
     if kind == "heading" {
-      return [Readable(range: range, language: language, passage: passage, book: book, chapter: 0, verse: nil, firstWord: firstWord)]
+      return [Readable(range: range, language: language, passage: passage, book: book, chapter: 0, verse: nil, firstWord: firstWord, marks: [])]
     }
     // Verses and words both run in the text's order: each verse's first word is found walking on.
     var word = 0
     return verses.map { verse in
       while word < words.count && words[word].start < verse.start { word += 1 }
+      let marks = notes.enumerated().filter { verse.start <= $0.element.start && $0.element.end <= verse.end }.map { offset, note in
+        Readable.Mark(index: firstMark + offset, range: NSRange(location: range.location + Int(note.start), length: Int(note.end - note.start)), note: note)
+      }
       return Readable(range: NSRange(location: range.location + Int(verse.start), length: Int(verse.end - verse.start)),
-                      language: language, passage: passage, book: book, chapter: verse.chapter, verse: verse.verse, firstWord: firstWord + word)
+                      language: language, passage: passage, book: book, chapter: verse.chapter, verse: verse.verse, firstWord: firstWord + word, marks: marks)
     }
   }
 }
 
 /// A heading or a verse for VoiceOver: where it is in the text, in which language, where it stands
-/// in the scripture – a heading in the chapter it opens – and its first word.
+/// in the scripture – a heading in the chapter it opens – its first word, and the notes' marks in it.
 private struct Readable {
+  /// A note's mark in a verse: its index in the reader's marks, its range in the text, and the note.
+  struct Mark {
+    let index: Int
+    let range: NSRange
+    let note: NoteMark
+  }
+
   let range: NSRange
   let language: String
   let passage: UInt32
@@ -623,6 +906,7 @@ private struct Readable {
   var chapter: UInt32
   let verse: UInt32?
   let firstWord: Int
+  let marks: [Mark]
 
   /// Each heading takes the chapter of the next verse of its book.
   static func namingChapters(_ readables: [Readable]) -> [Readable] {
@@ -659,7 +943,13 @@ private final class ReadableElement: UIAccessibilityElement {
   override var accessibilityAttributedLabel: NSAttributedString? {
     get {
       guard let pages else { return nil }
-      let text = (pages.text.string as NSString).substring(with: readable.range)
+      var text = (pages.text.string as NSString).substring(with: readable.range)
+      // Each note's mark is announced for what it is: ", footnote 1, "; a note shown in full is
+      // read as it stands.
+      for mark in readable.marks.reversed() where mark.range.length == mark.note.mark.utf16.count {
+        let local = NSRange(location: mark.range.location - readable.range.location, length: mark.range.length)
+        text = (text as NSString).replacingCharacters(in: local, with: ", \(ReaderView.name(of: mark.note).lowercased()), ")
+      }
       return NSAttributedString(string: text, attributes: [.accessibilitySpeechLanguage: readable.language])
     }
     set {}
@@ -676,7 +966,7 @@ private final class ReadableElement: UIAccessibilityElement {
   }
 
   override var accessibilityCustomActions: [UIAccessibilityCustomAction]? {
-    get { reader?.moveActions(from: readable.firstWord) }
+    get { (reader?.moveActions(from: readable.firstWord) ?? []) + (reader?.noteActions(for: readable.marks.map(\.index), from: self) ?? []) }
     set {}
   }
 

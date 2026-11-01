@@ -121,7 +121,7 @@ class ScripturaModule : Module() {
     }
 
     View(ReaderView::class) {
-      Events("onWordChange", "onLaidOut", "onSpeechChange")
+      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference")
 
       Prop("passages") { view: ReaderView, passages: List<PassageRecord>? ->
         view.passages = passages ?: emptyList()
@@ -158,6 +158,15 @@ class ScripturaModule : Module() {
       }
       Prop("parallel", "inline") { view: ReaderView, parallel: String ->
         view.parallel = parallel
+      }
+      Prop("notes") { view: ReaderView, notes: String? ->
+        view.notes = notes ?: "marks"
+      }
+      Prop("dropCaps") { view: ReaderView, dropCaps: Boolean? ->
+        view.dropCaps = dropCaps ?: true
+      }
+      Prop("dropCapFont") { view: ReaderView, dropCapFont: String? ->
+        view.dropCapFont = dropCapFont
       }
       Prop("voices") { view: ReaderView, voices: Map<String, String>? ->
         view.voices = voices ?: emptyMap()

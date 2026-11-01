@@ -21,7 +21,31 @@ export type Block = {
   /** Ranges in the block's text in UTF-16 code units, as JS counts them. */
   verses: { chapter: number; verse: number; start: number; end: number }[];
   words: { chapter: number; verse: number; index: number; start: number; end: number }[];
+  /** The notes on its verses, each at its mark in the text, which opens it. See the core's NoteMark. */
+  notes: NoteMark[];
+  /** What opens the chapter, set large over the paragraph's first lines: in running text, where the passage reads the chapter from its start. */
+  dropCap: { letterStart: number; letterEnd: number } | null;
 };
+
+/**
+ * A note's mark in a paragraph – its range in the text, on which verse – and the note it opens: a
+ * footnote, an endnote or a cross reference, as runs, some of which refer to verses.
+ */
+export type NoteMark = {
+  chapter: number;
+  verse: number;
+  start: number;
+  end: number;
+  kind: 'footnote' | 'endnote' | 'crossReference';
+  mark: string;
+  runs: NoteRun[];
+};
+
+/** A run of a note's text: its role, if it has one – "origin", "quotation", "emphasis", "label" – its language, where it isn't the book's, and the verses it refers to. */
+export type NoteRun = { text: string; role?: string | null; language?: string | null; target?: Target | null };
+
+/** Verses a note refers to: by their book's USFM code, chapter, and verse – to `to` – or the whole chapter. */
+export type Target = { book: string; chapter: number; verse?: number | null; to?: number | null };
 
 /** Text for a voice, in one language: a chapter's heading, or verses of a passage's book without their numbers. See the core's Utterance. */
 export type Utterance = {
@@ -162,7 +186,7 @@ export class Library {
   }
 
   /** The passages as paragraphs, read along with `companions`. */
-  blocks(passages: Passage[], options: { fontSize: number; versePerLine?: boolean; companions?: string[] }): Block[] {
+  blocks(passages: Passage[], options: { fontSize: number; versePerLine?: boolean; companions?: string[]; notes?: 'marks' | 'inline' | 'none'; dropCaps?: boolean }): Block[] {
     return JSON.parse(this.core.blocksJson(JSON.stringify(passages), JSON.stringify(options)));
   }
 

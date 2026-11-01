@@ -52,6 +52,18 @@ struct Options {
     verse_per_line: bool,
     #[serde(default)]
     companions: Vec<String>,
+    #[serde(default = "marks")]
+    notes: String,
+    #[serde(default = "yes")]
+    drop_caps: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn marks() -> String {
+    "marks".into()
 }
 
 #[derive(Deserialize)]
@@ -134,11 +146,17 @@ impl Library {
     }
 
     /// The passages – a JSON array of references – as paragraphs, in JSON. `options` is JSON too:
-    /// fontSize, versePerLine and companions.
+    /// fontSize, versePerLine and companions, how the notes show (notes: "marks", "inline" or
+    /// "none"; marks by default) and whether drop caps are wanted (dropCaps: by default they are).
     #[wasm_bindgen(js_name = blocksJson)]
     pub fn blocks_json(&self, references: &str, options: &str) -> Result<String, JsError> {
-        let Options { font_size, verse_per_line, companions } = serde_json::from_str(options)?;
-        let options = scriptura::Options { font_size, verse_per_line, companions };
+        let Options { font_size, verse_per_line, companions, notes, drop_caps } = serde_json::from_str(options)?;
+        let notes = match notes.as_str() {
+            "none" => scriptura::Notes::None,
+            "inline" => scriptura::Notes::Inline,
+            _ => scriptura::Notes::Marks,
+        };
+        let options = scriptura::Options { font_size, verse_per_line, companions, notes, drop_caps };
         Ok(serde_json::to_string(&self.0.blocks(&parse_references(references)?, &options))?)
     }
 

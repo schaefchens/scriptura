@@ -7,11 +7,12 @@ import {
   palette,
   Reader,
   type ReaderHandle,
+  type ReferenceTarget,
   SCRIPT_FONTS,
   type SpeechChange,
   type WordPosition,
 } from '@schaefchens/scriptura-react';
-import { StrictMode, useMemo, useRef, useState } from 'react';
+import { StrictMode, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 
 // The books, recordings and fonts the import tool fetched: npm run texts.
@@ -20,6 +21,9 @@ const library = new Library();
 await library.fetch('/texts/books.json');
 await library.fetchRecordings('/recordings/recordings.json');
 addScriptFonts('/fonts/');
+// A font of ornamental initials for the drop caps, Cinzel Decorative (OFL), fetched with the others.
+const ORNATE_FONT = 'CinzelDecorative-Regular';
+document.fonts.add(new FontFace(ORNATE_FONT, `url(/fonts/${ORNATE_FONT}.ttf)`));
 
 /** Passages of several books on one page: those read along each in rows, the surah as it is. */
 const SIGN_OF_JONAH: Passage[] = [
@@ -56,6 +60,13 @@ function App() {
   const [speakAlong, setSpeakAlong] = useState(false);
   const [rate, setRate] = useState(1);
   const [goTo, setGoTo] = useState('2:1');
+  // Notes as marks that open where they stand, shown in full there, or left out.
+  const [notes, setNotes] = useState<'marks' | 'inline' | 'none'>('marks');
+  // Drop caps: none, the first letter in the text's font, or in the font of ornamental initials.
+  const [dropCaps, setDropCaps] = useState<'off' | 'on' | 'ornate'>('on');
+  // A cross reference to a book the library doesn't hold; and a verse to jump to once its book shows.
+  const [missing, setMissing] = useState<string>();
+  const pending = useRef<WordPosition>(undefined);
   const reader = useRef<ReaderHandle>(null);
 
   const passages = useMemo(() => (book === 'sign' ? SIGN_OF_JONAH : [{ book }]), [book]);
@@ -73,6 +84,18 @@ function App() {
   };
   // Each change tells what is new; while the voice speaks, what it told before still holds.
   const onSpeechChange = (change: SpeechChange) => setSpeech((last) => (change.state === 'speaking' ? { ...last, ...change } : change));
+  // A cross reference the reader couldn't follow itself: its book shown, if the library holds it, and the verse jumped to.
+  const onReference = (target: ReferenceTarget) => {
+    const where = `${target.code} ${target.chapter}${target.verse ? `:${target.verse}` : ''}`;
+    if (!target.book) return setMissing(`${where} – the library holds no such book`);
+    setMissing(undefined);
+    pending.current = { passage: 0, book: target.book, chapter: target.chapter, verse: target.verse ?? 1, word: 0 };
+    setBook(target.book);
+  };
+  useEffect(() => {
+    if (pending.current?.book === book) reader.current?.jump(pending.current);
+    pending.current = undefined;
+  }, [book]);
 
   return (
     <main style={{ background: colors.background, color: colors.text }}>
@@ -88,6 +111,12 @@ function App() {
         <button onClick={() => setPaging(paging === 'scroll' ? 'pages' : 'scroll')}>{paging === 'scroll' ? 'Pages' : 'Scroll'}</button>
         <button onClick={() => setDark(!dark)}>{dark ? 'Light' : 'Dark'}</button>
         <button onClick={() => setVersePerLine(!versePerLine)}>{versePerLine ? 'Running text' : 'Verse per line'}</button>
+        <button onClick={() => setNotes({ marks: 'inline', inline: 'none', none: 'marks' }[notes] as typeof notes)}>
+          {{ marks: 'Notes as marks', inline: 'Notes inline', none: 'No notes' }[notes]}
+        </button>
+        <button onClick={() => setDropCaps({ off: 'on', on: 'ornate', ornate: 'off' }[dropCaps] as typeof dropCaps)}>
+          {{ off: 'No drop caps', on: 'Drop caps', ornate: 'Ornate drop caps' }[dropCaps]}
+        </button>
         {editions.map(({ id, title, work }) => (
           <label key={id}>
             <input type="checkbox" checked={along.includes(id)} onChange={() => toggle(id)} /> {passages.length > 1 ? `${title} · ${work}` : work}
@@ -123,6 +152,7 @@ function App() {
         {speech.state === 'speaking' && speech.following === false && <button onClick={() => reader.current?.follow()}>Back to the voice</button>}
         <output dir="auto">
           {position ? `${title(position.book)}‎ ${position.chapter}:${position.verse} · word ${position.word + 1}` : 'Tap a word'}
+          {missing && ` · ${missing}`}
           {speech.state === 'speaking' && speech.recording && ` · ${voiceNames.get(speech.recording)}`}
           {speech.firstSound !== undefined && ` · first sound after ${Math.round(speech.firstSound)} ms`}
           {speech.unvoiced?.length ? ` · no voice for ${speech.unvoiced.join(', ')}` : ''}
@@ -141,11 +171,15 @@ function App() {
         versePerLine={versePerLine}
         companions={along}
         parallel={parallel}
+        notes={notes}
+        dropCaps={dropCaps !== 'off'}
+        dropCapFont={dropCaps === 'ornate' ? ORNATE_FONT : undefined}
         speakAlong={speakAlong}
         speechRate={rate}
         recordedVoices={recited ? [recited] : []}
         onWordChange={setPosition}
         onSpeechChange={onSpeechChange}
+        onReference={onReference}
       />
       <footer>
         World English Bible, Luther 1912 and Smith &amp; Van Dyck, public domain; the Westminster Leningrad Codex from the{' '}

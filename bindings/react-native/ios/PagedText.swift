@@ -29,6 +29,24 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     let cells: [Cell]
   }
 
+  /// A drop cap: a chapter's number and first letter set large at the start of a paragraph, over its
+  /// first two lines. The paragraph's range, the glyphs to draw, in which font and color, the space
+  /// they take on the paragraph's leading side – its width with the gap after it, and its height –
+  /// and how far the paragraph's lines advance, for a paragraph of a single line.
+  struct DropCapSpec {
+    let range: NSRange
+    let text: String
+    let font: UIFont
+    let color: UIColor
+    let width: CGFloat
+    let height: CGFloat
+    let lineAdvance: CGFloat
+    /// How far above the second line's baseline the letter's baseline sits: for a letter with
+    /// something hanging below it, so that stays within the second line.
+    let baselineLift: CGFloat
+    let rightToLeft: Bool
+  }
+
   /// The text as last given; until it is laid out, the one before it stays in sight.
   private(set) var text = NSAttributedString()
   /// The character the reader is at: a word it was brought to, or during and after a scroll by hand,
@@ -39,6 +57,7 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   /// The columns of a page that flowing text runs through.
   private var columns = 1
   private var sections: [Section] = []
+  private var dropCaps: [DropCapSpec] = []
   private var continuous = false
   private var margin: CGFloat = 16
   /// The text's background, which shows with its layout.
@@ -60,6 +79,8 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
 
   /// A tapped character, by its index in the text.
   var onTap: ((Int) -> Void)?
+  /// A tap where no character is.
+  var onTapElsewhere: (() -> Void)?
   /// A scroll or a page turn by hand begins – or by a screen reader, or by turn(forward:).
   var onScrollByHand: (() -> Void)?
   /// The first pages show, before all of the text is laid out.
@@ -90,11 +111,13 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   /// Shows `text` from the character at `anchor` on, in its sections. Right-to-left text such as a
   /// surah opens on the right and runs its pages and columns from the right, as such books do: the
   /// view is mirrored, and each part mirrored back.
-  func show(_ text: NSAttributedString, background: UIColor, columns: Int, sections: [Section], rightToLeft: Bool, continuous: Bool, margin: CGFloat, from anchor: Int) {
+  func show(_ text: NSAttributedString, background: UIColor, columns: Int, sections: [Section], dropCaps: [DropCapSpec], rightToLeft: Bool,
+            continuous: Bool, margin: CGFloat, from anchor: Int) {
     self.text = text
     self.background = background
     self.anchor = anchor
     self.sections = sections
+    self.dropCaps = dropCaps.sorted { $0.range.location < $1.range.location }
     self.columns = continuous ? 1 : max(columns, 1)
     self.continuous = continuous
     self.margin = margin
@@ -145,9 +168,10 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     }
     generation += 1
     let (run, text, background, sections, first) = (generation, text, background, sections, anchor + Self.firstPages)
+    let dropCaps = dropCaps
     linesUnderWay = (text, widths)
     DispatchQueue.global(qos: .userInitiated).async {
-      Self.lines(of: text, sections: sections, widths: widths, background: background, first: first) { lines in
+      Self.lines(of: text, sections: sections, widths: widths, background: background, first: first, dropCaps: dropCaps) { lines in
         DispatchQueue.main.async { [weak self] in
           guard let self, run == generation else { return }
           if lines.complete {
@@ -162,9 +186,10 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
 
   /// The sections laid out in chunks of whole paragraphs: first those up to `first`, the reader's
   /// place and a little after, then all the others side by side. Each time, all laid out so far is
-  /// handed over.
+  /// handed over. A paragraph with a drop cap starts a chunk of its own, so the drop cap's space is
+  /// at the chunk's top.
   private static func lines(of text: NSAttributedString, sections: [Section], widths: [CGFloat], background: UIColor, first: Int,
-                            deliver: (Lines) -> Void) {
+                            dropCaps: [DropCapSpec], deliver: (Lines) -> Void) {
     let string = text.string as NSString
     var chunks: [(section: Int, range: NSRange)] = []
     for (index, section) in sections.enumerated() {
@@ -174,6 +199,10 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
         if end < NSMaxRange(section.range) {
           // To the end of the paragraph there, without its newline.
           end = min(NSMaxRange(string.paragraphRange(for: NSRange(location: end, length: 0))) - 1, NSMaxRange(section.range))
+        }
+        // Up to the newline before the next drop cap, if one comes sooner.
+        if let next = dropCaps.first(where: { $0.range.location - 1 > start && $0.range.location - 1 < end }) {
+          end = next.range.location - 1
         }
         chunks.append((index, NSRange(location: start, length: end - start)))
         start = end + 1
@@ -189,7 +218,8 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     let layOut = { (indices: Range<Int>) in
       DispatchQueue.concurrentPerform(iterations: indices.count) { offset in
         let (section, range) = chunks[indices.lowerBound + offset]
-        laid[indices.lowerBound + offset] = chunk(of: text, in: range, width: widths[section])
+        let dropCap = dropCaps.first { $0.range.location == range.location }
+        laid[indices.lowerBound + offset] = chunk(of: text, in: range, width: widths[section], dropCap: dropCap)
       }
     }
     let lines = { (count: Int) in
@@ -200,7 +230,13 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
           lines.sections.append(SectionLines(section: section, start: range.location))
         }
         let offset = lines.sections[lines.sections.count - 1].height
-        lines.sections[lines.sections.count - 1].lines += laid[index].lines.map { Line(location: $0.location, top: $0.top + offset, bottom: $0.bottom + offset) }
+        lines.sections[lines.sections.count - 1].lines += laid[index].lines.map {
+          Line(location: $0.location, top: $0.top + offset, bottom: $0.bottom + offset, keepWithPrevious: $0.keepWithPrevious)
+        }
+        if let dropCap = laid[index].dropCap {
+          let top = (laid[index].lines.first?.top ?? 0) + offset
+          lines.sections[lines.sections.count - 1].dropCaps.append(DropCapPlaced(spec: dropCap.spec, top: top, baseline: dropCap.baseline + offset))
+        }
         lines.sections[lines.sections.count - 1].height += laid[index].height
         lines.sections[lines.sections.count - 1].end = NSMaxRange(range)
         lines.end = NSMaxRange(range)
@@ -217,28 +253,48 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   }
 
   /// Whole paragraphs laid out on their own, which TextKit breaks into the lines it does in the whole
-  /// text: where each line starts and stands, from the chunk's top.
-  private static func chunk(of text: NSAttributedString, in range: NSRange, width: CGFloat) -> Chunk {
+  /// text: where each line starts and stands, from the chunk's top. A chunk that opens with a drop
+  /// cap keeps its space clear, and finds the baseline the drop cap stands on: the second line's.
+  private static func chunk(of text: NSAttributedString, in range: NSRange, width: CGFloat, dropCap: DropCapSpec?) -> Chunk {
     let content = NSTextContentStorage()
     let manager = NSTextLayoutManager()
     content.addTextLayoutManager(manager)
     let container = NSTextContainer(size: CGSize(width: width, height: 0))
     container.lineFragmentPadding = 0
+    if let dropCap {
+      container.exclusionPaths = [UIBezierPath(rect: Self.exclusion(of: dropCap, width: width))]
+    }
     manager.textContainer = container
     content.attributedString = text.attributedSubstring(from: range)
     var lines: [Line] = []
+    var baseline: CGFloat?
+    var opening = dropCap != nil
     manager.enumerateTextLayoutFragments(from: content.documentRange.location, options: [.ensuresLayout]) { fragment in
       let paragraphStart = range.location + content.offset(from: content.documentRange.location, to: fragment.rangeInElement.location)
       let fragmentTop = fragment.layoutFragmentFrame.minY
-      for line in fragment.textLineFragments {
+      for (index, line) in fragment.textLineFragments.enumerated() {
         let bounds = line.typographicBounds
-        lines.append(Line(location: paragraphStart + line.characterRange.location, top: fragmentTop + bounds.minY, bottom: fragmentTop + bounds.maxY))
+        // The two lines beside a drop cap stay together.
+        lines.append(Line(location: paragraphStart + line.characterRange.location, top: fragmentTop + bounds.minY, bottom: fragmentTop + bounds.maxY,
+                          keepWithPrevious: opening && index == 1))
+        if opening, index <= 1, let dropCap {
+          // The second line's baseline – or, for a paragraph of one line, a line's advance below the first's.
+          let lineBaseline = fragmentTop + bounds.minY + line.glyphOrigin.y
+          baseline = index == 1 ? lineBaseline : lineBaseline + dropCap.lineAdvance
+        }
       }
+      opening = false
       return true
     }
     // The next chunk's first line stands below this one's last as far as its paragraph's spacing asks.
     let style = range.length > 0 ? text.attribute(.paragraphStyle, at: NSMaxRange(range) - 1, effectiveRange: nil) as? NSParagraphStyle : nil
-    return Chunk(lines: lines, height: (lines.last?.bottom ?? 0) + (style?.paragraphSpacing ?? 0))
+    let placed = dropCap.map { DropCapPlaced(spec: $0, top: 0, baseline: baseline ?? $0.lineAdvance) }
+    return Chunk(lines: lines, height: (lines.last?.bottom ?? 0) + (style?.paragraphSpacing ?? 0), dropCap: placed)
+  }
+
+  /// The space a drop cap takes at the top of a column `width` wide: on the leading side.
+  private static func exclusion(of dropCap: DropCapSpec, width: CGFloat) -> CGRect {
+    CGRect(x: dropCap.rightToLeft ? width - dropCap.width : 0, y: 0, width: dropCap.width, height: dropCap.height)
   }
 
   /// Places the lines laid out so far: each section's on pages of its own – flowing through the
@@ -262,8 +318,8 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     for (index, part) in parts.enumerated() {
       pages[part.page].append(index)
     }
-    use(Layout(text: lines.text, background: lines.background, size: bounds.size, parts: parts, pages: pages,
-               lines: lines.sections.flatMap(\.lines), height: top, end: lines.end, complete: lines.complete))
+    use(Layout(text: lines.text, background: lines.background, size: bounds.size, continuous: continuous, parts: parts, pages: pages,
+               lines: lines.sections.flatMap(\.lines), dropCaps: lines.sections.flatMap(\.dropCaps), height: top, end: lines.end, complete: lines.complete))
   }
 
   private func use(_ layout: Layout) {
@@ -371,16 +427,29 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
 
   /// Lines cut wherever the next would overflow `height` – the first piece's, `first`: where each
   /// piece starts and ends, from `start` to `end`, how far down it is laid out, and how tall it is.
+  /// A line that stays with the one before it – the second beside a drop cap – takes it along.
   private static func pieces(of lines: ArraySlice<Line>, from start: Int, to end: Int, height: CGFloat, first: CGFloat? = nil) -> [Piece] {
     var pieces: [Piece] = []
     var (start, top) = (start, lines.first?.top ?? 0)
     var (bottom, limit) = (top, first ?? height)
-    for line in lines {
+    var index = lines.startIndex
+    while index < lines.endIndex {
+      let line = lines[index]
       if line.bottom - top > limit && line.location > start {
-        pieces.append(Piece(range: NSRange(location: start, length: line.location - start), top: top, height: bottom - top))
-        (start, top, limit) = (line.location, line.top, height)
+        var at = index
+        if line.keepWithPrevious, index > lines.startIndex, lines[index - 1].location > start {
+          at = index - 1
+        }
+        let cut = lines[at]
+        let above = at > lines.startIndex ? lines[at - 1].bottom : top
+        pieces.append(Piece(range: NSRange(location: start, length: cut.location - start), top: top, height: above - top))
+        (start, top, limit) = (cut.location, cut.top, height)
+        bottom = top
+        index = at
+        continue
       }
       bottom = line.bottom
+      index += 1
     }
     pieces.append(Piece(range: NSRange(location: start, length: end - start), top: top, height: bottom - top))
     return pieces
@@ -391,9 +460,10 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     margin + CGFloat(column) * (width + gap)
   }
 
-  /// The pages in sight and next to it, or in one endless scroll the parts a screen around it.
+  /// The pages in sight and next to it, or in one endless scroll the parts a screen around it – as
+  /// the layout shown was cut, which a new way of paging doesn't change until its own layout comes.
   private var wanted: Set<Int> {
-    if continuous {
+    if layout.continuous {
       let sight = (bounds.minY - bounds.height)...(bounds.maxY + bounds.height)
       return Set(layout.parts.indices.filter { sight.overlaps(layout.parts[$0].frame.minY...layout.parts[$0].frame.maxY) })
     }
@@ -415,10 +485,15 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   /// A page's parts: its columns or cells, or in one endless scroll, a part. A part's view is a
   /// little taller than its lines, so rounding never clips the last; the views are transparent.
   private func makeViews(_ page: Int) -> [PartView] {
-    layout.pages[page].map { index in
+    guard layout.pages.indices.contains(page) else { return [] }
+    return layout.pages[page].map { index in
       let part = layout.parts[index]
       let frame = CGRect(origin: part.frame.origin, size: CGSize(width: part.frame.width, height: part.frame.height + Self.inset / 2))
-      let view = PartView(frame: frame, text: textOfPart(part.range), part: part)
+      // The drop caps whose paragraphs start in this part, where they stand in it.
+      let dropCaps = layout.dropCaps.filter { NSLocationInRange($0.spec.range.location, part.range) && $0.top >= part.top - 0.5 }.map {
+        DropCapDraw(spec: $0.spec, rect: Self.exclusion(of: $0.spec, width: part.frame.width).offsetBy(dx: 0, dy: $0.top - part.top), baseline: $0.baseline - part.top)
+      }
+      let view = PartView(frame: frame, text: textOfPart(part.range), part: part, dropCaps: dropCaps)
       view.transform = transform
       view.highlight(highlighted, color: highlightColor)
       addSubview(view)
@@ -457,6 +532,20 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
           let position = view.closestPosition(to: view.convert(point, from: self))
     else { return nil }
     return view.range.location + view.offset(from: view.beginningOfDocument, to: position)
+  }
+
+  /// Where the characters in `range` show in this view's content – on their first line, from the
+  /// first glyph to the last – if a part in sight holds them.
+  func rect(for range: NSRange) -> CGRect? {
+    guard layout.text === text, let view = views.values.joined().first(where: { NSLocationInRange(range.location, $0.range) }) else { return nil }
+    let local = NSRange(location: range.location - view.range.location, length: min(range.length, NSMaxRange(view.range) - range.location))
+    guard let from = view.position(from: view.beginningOfDocument, offset: local.location),
+          let to = view.position(from: from, offset: local.length),
+          let textRange = view.textRange(from: from, to: to)
+    else { return nil }
+    let rect = view.firstRect(for: textRange)
+    guard !rect.isNull, !rect.isInfinite, rect.width.isFinite else { return nil }
+    return convert(rect, from: view)
   }
 
   /// Brings the character at `index` into sight: turns to its page, or in one endless scroll moves
@@ -621,6 +710,8 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   @objc private func tapped(_ gesture: UITapGestureRecognizer) {
     if let index = characterIndex(at: gesture.location(in: self)) {
       onTap?(index)
+    } else {
+      onTapElsewhere?()
     }
   }
 }
@@ -636,19 +727,38 @@ private struct Lines {
 }
 
 /// A section's lines so far, from its top, up to `end`, and how tall they are, the spacing after the
-/// last included.
+/// last included; and its drop caps, placed.
 private struct SectionLines {
   let section: Int
   let start: Int
   var lines: [Line] = []
+  var dropCaps: [DropCapPlaced] = []
   var height: CGFloat = 0
   var end = 0
 }
 
-/// Whole paragraphs laid out on their own: their lines from the top, and how far down the next start.
+/// Whole paragraphs laid out on their own: their lines from the top, how far down the next start,
+/// and the drop cap the chunk opens with, if it does.
 private struct Chunk {
   var lines: [Line] = []
   var height: CGFloat = 0
+  var dropCap: DropCapPlaced?
+}
+
+/// A drop cap laid out: its paragraph's first line's top, and the baseline it stands on, both from
+/// the top of its section – or, as a chunk has it, of the chunk.
+private struct DropCapPlaced {
+  let spec: PagedText.DropCapSpec
+  let top: CGFloat
+  let baseline: CGFloat
+}
+
+/// A drop cap as a part draws it: the space it takes and the baseline it stands on, in the part's
+/// coordinates.
+private struct DropCapDraw {
+  let spec: PagedText.DropCapSpec
+  let rect: CGRect
+  let baseline: CGFloat
 }
 
 /// The text cut into parts, and the parts on each page – in one endless scroll, a part is a page –
@@ -658,9 +768,12 @@ private struct Layout {
   var text = NSAttributedString()
   var background = UIColor.white
   var size = CGSize.zero
+  /// Whether it was cut for one endless scroll, or for pages.
+  var continuous = false
   var parts: [Part] = []
   var pages: [[Int]] = []
   var lines: [Line] = []
+  var dropCaps: [DropCapPlaced] = []
   var height: CGFloat = 0
   var end = 0
   var complete = true
@@ -682,11 +795,13 @@ private struct Piece {
   let height: CGFloat
 }
 
-/// A line of the text: the character it starts with, and how far down it is laid out.
+/// A line of the text: the character it starts with, how far down it is laid out, and whether it
+/// stays in a column with the line before it.
 private struct Line {
   let location: Int
   let top: CGFloat
   let bottom: CGFloat
+  var keepWithPrevious = false
 }
 
 private extension Array {
@@ -705,12 +820,13 @@ private func distance(from point: CGPoint, to rect: CGRect) -> CGFloat {
   hypot(max(rect.minX - point.x, 0, point.x - rect.maxX), max(rect.minY - point.y, 0, point.y - rect.maxY))
 }
 
-/// A part's text, in a text view of its own, and the part.
+/// A part's text, in a text view of its own, and the part. A drop cap in it has its space kept clear
+/// and its glyphs drawn in a view of their own.
 private final class PartView: UITextView {
   let part: Part
   var range: NSRange { part.range }
 
-  init(frame: CGRect, text: NSAttributedString, part: Part) {
+  init(frame: CGRect, text: NSAttributedString, part: Part, dropCaps: [DropCapDraw]) {
     self.part = part
     super.init(frame: frame, textContainer: nil)
     isEditable = false
@@ -720,7 +836,9 @@ private final class PartView: UITextView {
     backgroundColor = .clear
     textContainerInset = .zero
     textContainer.lineFragmentPadding = 0
+    textContainer.exclusionPaths = dropCaps.map { UIBezierPath(rect: $0.rect) }
     attributedText = text
+    dropCaps.forEach { addSubview(DropCapView($0)) }
   }
 
   required init?(coder: NSCoder) {
@@ -733,5 +851,37 @@ private final class PartView: UITextView {
     guard let overlap = whole?.intersection(range) else { return }
     let local = NSRange(location: overlap.location - range.location, length: overlap.length)
     textStorage.addAttribute(.backgroundColor, value: color, range: local)
+  }
+}
+
+/// A drop cap's glyphs: the chapter's number and first letter, drawn with their baseline on the
+/// second line's – on the left, or for right-to-left text on the right, of the space kept for them.
+private final class DropCapView: UIView {
+  private let cap: DropCapDraw
+
+  init(_ cap: DropCapDraw) {
+    self.cap = cap
+    // Room above and below the space, for glyphs that reach past it.
+    let reach = cap.spec.font.pointSize
+    super.init(frame: CGRect(x: cap.rect.minX, y: cap.rect.minY - reach, width: cap.rect.width, height: cap.rect.height + 2 * reach))
+    isOpaque = false
+    backgroundColor = .clear
+    isUserInteractionEnabled = false
+    isAccessibilityElement = false
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("not used from a storyboard")
+  }
+
+  override func draw(_ rect: CGRect) {
+    let style = NSMutableParagraphStyle()
+    style.baseWritingDirection = cap.spec.rightToLeft ? .rightToLeft : .leftToRight
+    let attributes: [NSAttributedString.Key: Any] = [.font: cap.spec.font, .foregroundColor: cap.spec.color, .paragraphStyle: style]
+    let text = cap.spec.text as NSString
+    let width = text.size(withAttributes: attributes).width
+    let x = cap.spec.rightToLeft ? bounds.width - width : 0
+    let baseline = cap.baseline - cap.spec.baselineLift
+    text.draw(at: CGPoint(x: x, y: baseline - cap.rect.minY + cap.spec.font.pointSize - cap.spec.font.ascender), withAttributes: attributes)
   }
 }

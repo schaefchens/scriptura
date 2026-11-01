@@ -19,7 +19,10 @@
 // Bibles come as USFM in a zip, as eBible.org has them, or as OSIS (`"osis": "<base URL>"`, a book
 // as `file` there), as the Open Scriptures Hebrew Bible has them. An edition writing numbers in
 // other digits gives their zero as `digits`, such as 1632 (0x660) for Arabic-Indic; a book can
-// have a `title` the source lacks. Surahs come from Tanzil's text with quran-tajweed's rules laid
+// have a `title` the source lacks. USFM's footnotes, endnotes and cross references come along as
+// each verse's notes, where they stand in its text: footnotes numbered and cross references
+// lettered through each chapter, as the reader marks them. A cross reference's verses are found by
+// the names the edition's own books go by, so the reader can jump to them. Surahs come from Tanzil's text with quran-tajweed's rules laid
 // over it, titled as Tanzil names them. `fonts` fetches the reader's fonts per script, and any
 // `extraFonts` ({ family, url, file? }), named after their PostScript names, so one family name
 // works on iOS, Android and the web.
@@ -95,13 +98,34 @@ function tajweedRuns(text, annotations) {
 const LAYOUT = /^(?:p|pi\d?|pm[cor]?|po|pr|pc|m|mi|nb|b|q\d?|q[mrc]\d?|li\d?|cls)$/;
 // USFM character styles: their markers go, their text stays.
 const CHARACTER_STYLES = 'add|bd|bdit|bk|em|it|k|nd|no|ord|pn|qs|qt|sc|sig|tl|wj';
+// Word markers with their attributes, such as Strong's numbers: only the word stays.
+const WORDS = /\\\+?w ([^|\\]*)(?:\|[^\\]*)?\\\+?w\*/g;
+const NOTE_KINDS = { f: 'footnote', fe: 'endnote', x: 'crossReference' };
+// What a note's markers make of the text after them: the verse it is on, words quoted from the
+// text, a label such as "Greek", or plain text. \\xt holds the verses a cross reference points to.
+const NOTE_ROLES = { fr: 'origin', xo: 'origin', fq: 'quotation', fqa: 'quotation', fk: 'quotation', xq: 'quotation', xk: 'quotation', fl: 'label' };
+// Character styles within notes that keep what they mark: a Hebrew or Greek word, emphasis.
+const NOTE_STYLES = { wh: { language: 'he' }, wg: { language: 'el' }, it: { role: 'emphasis' }, em: { role: 'emphasis' }, bd: { role: 'emphasis' }, bdit: { role: 'emphasis' } };
 
-/** A book's title and chapters from USFM: the verses' text, without notes, headings or layout. */
-function parseUsfm(usfm, digits) {
+/** The letters a through z, then aa, ab and so on: how cross references are marked through a chapter. */
+function letters(count) {
+  let mark = '';
+  for (let n = count; n > 0; n = Math.floor((n - 1) / 26)) mark = String.fromCharCode(96 + ((n - 1) % 26) + 1) + mark;
+  return mark;
+}
+
+/**
+ * A book's title and chapters from USFM: the verses' text, without headings or layout, and each
+ * verse's notes, where they stand in its text. `names` maps the names the edition's books go by
+ * to their codes, for the verses cross references point to.
+ */
+function parseUsfm(usfm, digits, names) {
+  // Each note gives way to a stand-in naming it, so its place in the text is kept while the rest is
+  // cleaned: word attributes and character styles go, their text stays.
+  const notes = [];
   const plain = usfm
-    // Footnotes and cross-references, then word attributes and character styles.
-    .replace(/\\(f|fe|x) .*?\\\1\*/gs, '')
-    .replace(/\\\+?w ([^|\\]*)(?:\|[^\\]*)?\\\+?w\*/g, '$1')
+    .replace(/\\(f|fe|x) (.*?)\\\1\*/gs, (_, marker, body) => `\uE000${notes.push({ kind: NOTE_KINDS[marker], body }) - 1}\uE001`)
+    .replace(WORDS, '$1')
     .replace(new RegExp(`\\\\\\+?(?:${CHARACTER_STYLES})(?: |\\*)`, 'g'), '');
   // What is left are markers, each followed by its text.
   const parts = plain.split(/\\([a-z]+\d*)\s*/);
@@ -122,8 +146,11 @@ function parseUsfm(usfm, digits) {
     } else if (verse && LAYOUT.test(marker)) verse.text += ` ${text}`;
   }
   for (const { verses } of chapters) {
+    // Through a chapter, footnotes and endnotes are numbered, cross references lettered.
+    let numbered = 0;
+    let lettered = 0;
     for (const verse of verses) {
-      const text = verse.text
+      const cleaned = verse.text
         // The SBLGNT's signs for its apparatus, which isn't imported.
         .replace(/[⸀-⸃]/g, '')
         // A translator's note, as the Persian Old Version has one in Psalm 121:1.
@@ -131,11 +158,128 @@ function parseUsfm(usfm, digits) {
         // The edition's own number for a verse it numbers otherwise, as Luther 1912 has "[2:1]"
         // before what English Bibles number Jonah 1:17.
         .replace(/^\s*\[\d+:\d+\]/, '');
-      verse.runs = [[text.replace(/\s+/g, ' ').trim(), null]];
+      const { text, placed } = placeNotes(cleaned);
+      verse.runs = [[text, null]];
+      const own = placed.map(({ index, at }) => {
+        const { kind, body } = notes[index];
+        const mark = kind === 'crossReference' ? letters(++lettered) : inDigits(++numbered, digits);
+        return { kind, mark, at, runs: noteRuns(body, names) };
+      });
+      if (own.length > 0) verse.notes = own;
       delete verse.text;
     }
   }
   return { title, chapters };
+}
+
+/**
+ * A verse's text with its spaces tidied – one between words, none at the ends – and each note's
+ * stand-in taken out: where it stood, in UTF-16 code units of the tidied text. A note after a
+ * space stands before it instead, with the word it follows.
+ */
+function placeNotes(text) {
+  let tidied = '';
+  const placed = [];
+  for (const piece of text.split(/(\uE000\d+\uE001)/)) {
+    const standIn = piece.match(/^\uE000(\d+)\uE001$/);
+    if (standIn) {
+      const at = tidied.length > 0 && tidied.endsWith(' ') ? tidied.length - 1 : tidied.length;
+      placed.push({ index: Number(standIn[1]), at });
+      continue;
+    }
+    let run = piece.replace(/\s+/g, ' ');
+    if (tidied === '' || tidied.endsWith(' ')) run = run.trimStart();
+    tidied += run;
+  }
+  const trimmed = tidied.trimEnd();
+  return { text: trimmed, placed: placed.map(({ index, at }) => ({ index, at: Math.min(at, trimmed.length) })) };
+}
+
+/**
+ * A note's body as runs: its markers give each run its role, character styles within them a
+ * language or emphasis, and the verses a cross reference points to become references. The
+ * caller – the + or - that opens a note – is left out.
+ */
+function noteRuns(body, names) {
+  const runs = [];
+  const styles = [];
+  let role = null;
+  let targets = false;
+  let book;
+  const push = (text, extra = {}) => {
+    const run = { text, ...(role && { role }), ...Object.assign({}, ...styles), ...extra };
+    const last = runs.at(-1);
+    // Runs alike join; spaces run on as they would in the text.
+    if (last && last.role === run.role && last.language === run.language && !last.target && !run.target) last.text += text;
+    else if (text) runs.push(run);
+  };
+  const tokens = body.replace(/^[+\-*?]?\s*/, '').replace(WORDS, '$1').split(/\\(\+?[a-z]+\d*\*?)\s?/);
+  for (let i = 0; i < tokens.length; i++) {
+    if (i % 2 === 1) {
+      const marker = tokens[i];
+      if (marker.startsWith('+')) {
+        if (marker.endsWith('*')) styles.pop();
+        else if (NOTE_STYLES[marker.slice(1)]) styles.push(NOTE_STYLES[marker.slice(1)]);
+      } else if (marker === 'fp') push('\n');
+      else {
+        role = NOTE_ROLES[marker] ?? null;
+        targets = marker === 'xt';
+      }
+      continue;
+    }
+    const text = tokens[i].replace(/\s+/g, ' ');
+    if (!text) continue;
+    if (!targets) {
+      push(text);
+      continue;
+    }
+    // Verses, by the book's name, its chapter and its verse or verses: "Isaiah 7:14; 2 Kings 23:21-23".
+    for (const [piece, item] of text.split(/(;\s*)/).map((part, index) => [part, index % 2 === 0])) {
+      const found = item && piece.match(/^(.*?)((?:\d\s*)?[^\d;,]*?)\s*(\d+)(?::(\d+))?(?:[-–](\d+))?(\s*)$/);
+      if (!found) {
+        push(piece);
+        continue;
+      }
+      const [, before, name, chapter, from, to, after] = found;
+      // "See Job 9:8": the name is the words before the number that name a book.
+      const words = name.trim().split(' ');
+      let code;
+      let lead = '';
+      for (let skip = 0; skip < words.length && !code; skip++) {
+        code = names.get(words.slice(skip).join(' ').toLowerCase());
+        if (!code) lead += `${words[skip]} `;
+      }
+      if (!code && name.trim()) {
+        push(piece);
+        continue;
+      }
+      book = code ?? book;
+      if (!book) {
+        push(piece);
+        continue;
+      }
+      push(`${before}${lead}`);
+      const reference = piece.slice(before.length + lead.length, piece.length - after.length);
+      push(reference, { target: { book, chapter: Number(chapter), ...(from && { verse: Number(from) }), ...(to && { to: Number(to) }) } });
+      push(after);
+    }
+  }
+  if (runs.length > 0) {
+    runs[0].text = runs[0].text.trimStart();
+    runs.at(-1).text = runs.at(-1).text.trimEnd();
+  }
+  return runs.filter(({ text }) => text);
+}
+
+/** The names an edition's books go by – their headers and tables of contents – each to the book's code. */
+function bookNames(usfm) {
+  const names = new Map();
+  for (const file of usfm.split(/(?=\\id )/)) {
+    const code = file.match(/^\\id (\w+)/)?.[1];
+    if (!code) continue;
+    for (const [, name] of file.matchAll(/^\\(?:h|toc[123]) (.+)$/gm)) names.set(name.trim().toLowerCase(), code);
+  }
+  return names;
 }
 
 /** Runs spaced as running text is: one space between words, none at the start or the end. */
@@ -221,10 +365,11 @@ if (config.fonts) {
 const books = [];
 for (const { usfm, osis, work, language, direction, digits, books: wanted } of config.bibles ?? []) {
   const zip = usfm && (await downloadZip(usfm, `${books.length}.zip`));
+  const names = usfm && bookNames(execFileSync('unzip', ['-p', zip, '*.usfm'], { encoding: 'utf8', maxBuffer: 1 << 28 }));
   for (const { id, code, file, title } of wanted) {
     // eBible.org names the files like 33-JONeng-web.usfm.
     const book = usfm
-      ? parseUsfm(execFileSync('unzip', ['-p', zip, `*-${code}*.usfm`], { encoding: 'utf8', maxBuffer: 1 << 28 }), digits)
+      ? parseUsfm(execFileSync('unzip', ['-p', zip, `*-${code}*.usfm`], { encoding: 'utf8', maxBuffer: 1 << 28 }), digits, names)
       : { chapters: parseOsis(await (await download(`${osis}${file}.xml`)).text()) };
     // The book's USFM code, which every edition shares, reads them along.
     books.push({ id, code, title: title ?? book.title, work, direction, language, chapters: book.chapters });

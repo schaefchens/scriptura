@@ -14,8 +14,8 @@ mod speech;
 
 use serde::de::Error as _;
 
-pub use model::{Book, Chapter, RecordedVerse, Recording, Verse, VerseNumbers};
-pub use reader::{Block, Segment, VerseRange, WORD_DEFINITION, Word};
+pub use model::{Book, Chapter, Note, NoteRun, RecordedVerse, Recording, Target, Verse, VerseNumbers};
+pub use reader::{Block, DropCap, NoteMark, Segment, VerseRange, WORD_DEFINITION, Word};
 pub use speech::{Part, Place, Speech, Take, TimedWord, Utterance};
 
 /// A whole book, one chapter of it, or a verse range in that chapter.
@@ -36,6 +36,21 @@ pub struct Options {
     pub verse_per_line: bool,
     /// Other editions of the passages' books, by id, read along with them verse by verse.
     pub companions: Vec<String>,
+    /// How the books' notes – footnotes, endnotes and cross references – show in the text.
+    pub notes: Notes,
+    /// Chapters in running text open with a drop cap: the first letter of the text set large, the
+    /// first verse without its number.
+    pub drop_caps: bool,
+}
+
+/// How notes show in the text: not at all; as marks where they stand, which open them; or in
+/// full, each in brackets where it stands, its mark before its text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Notes {
+    None,
+    #[default]
+    Marks,
+    Inline,
 }
 
 /// The books a host has added, and the recordings of their chapters, in the order added.
@@ -126,8 +141,7 @@ impl Library {
         let mut rows = 0..;
         let mut blocks = Vec::new();
         for (passage, reference) in (0..).zip(references) {
-            let (size, verse_per_line) = (options.font_size, options.verse_per_line);
-            blocks.extend(reader::blocks(self, reference, passage, size, verse_per_line, &companions, &mut rows));
+            blocks.extend(reader::blocks(self, reference, passage, options, &companions, &mut rows));
         }
         blocks
     }
@@ -252,7 +266,13 @@ mod tests {
     #[test]
     fn a_passage_of_a_book_not_held_gives_nothing() {
         let reference = Reference { book: "jonah".into(), chapter: None, from: None, to: None };
-        let options = Options { font_size: 28.0, verse_per_line: false, companions: Vec::new() };
+        let options = Options {
+            font_size: 28.0,
+            verse_per_line: false,
+            companions: Vec::new(),
+            notes: Notes::Marks,
+            drop_caps: true,
+        };
         assert!(Library::new().blocks(&[reference], &options).is_empty());
     }
 }
