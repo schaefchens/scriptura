@@ -10,6 +10,7 @@ import type {
   Selection,
   SelectionFrame,
   SpeechChange,
+  VersePosition,
   Voice,
   WordPosition,
 } from '@schaefchens/scriptura';
@@ -95,11 +96,19 @@ export type ReaderProps = ReaderOptions & {
    * own beside it.
    */
   onSelectionFrame?: (frame: SelectionFrame | null) => void;
+  /**
+   * The verse in sight, as it changes: the verse of the first word on the page, or of the first whole line in sight – as the text is
+   * scrolled or turned, brought somewhere, or laid out anew. For an app's index of books and chapters, or a place to come back to.
+   */
+  onVerseInSight?: (verse: VersePosition) => void;
   ref?: Ref<ReaderHandle>;
   style?: StyleProp<ViewStyle>;
 };
 
-type NativeProps = Omit<ReaderProps, 'onWordChange' | 'onLaidOut' | 'onSpeechChange' | 'onReference' | 'onSelectionChange' | 'onMarkTap' | 'onSelectionFrame'> & {
+type NativeProps = Omit<
+  ReaderProps,
+  'onWordChange' | 'onLaidOut' | 'onSpeechChange' | 'onReference' | 'onSelectionChange' | 'onMarkTap' | 'onSelectionFrame' | 'onVerseInSight'
+> & {
   onWordChange?: (event: NativeSyntheticEvent<WordPosition>) => void;
   onLaidOut?: (event: NativeSyntheticEvent<LaidOut>) => void;
   onSpeechChange?: (event: NativeSyntheticEvent<SpeechChange>) => void;
@@ -107,6 +116,7 @@ type NativeProps = Omit<ReaderProps, 'onWordChange' | 'onLaidOut' | 'onSpeechCha
   onSelectionChange?: (event: NativeSyntheticEvent<{ selection?: Selection | null }>) => void;
   onMarkTap?: (event: NativeSyntheticEvent<MarkTap>) => void;
   onSelectionFrame?: (event: NativeSyntheticEvent<{ frame?: SelectionFrame | null }>) => void;
+  onVerseInSight?: (event: NativeSyntheticEvent<VersePosition>) => void;
 };
 
 const NativeReader = requireNativeView<NativeProps>('Scriptura');
@@ -115,7 +125,7 @@ const NativeReader = requireNativeView<NativeProps>('Scriptura');
  * Scripture in pages or one endless scroll, laid out with the platform's own text stack: TextKit 2
  * on iOS, Android's text layout. It gets the passages' text itself, from the books added.
  */
-export function Reader({ onWordChange, onLaidOut, onSpeechChange, onReference, onSelectionChange, onMarkTap, onSelectionFrame, ...props }: ReaderProps) {
+export function Reader({ onWordChange, onLaidOut, onSpeechChange, onReference, onSelectionChange, onMarkTap, onSelectionFrame, onVerseInSight, ...props }: ReaderProps) {
   return (
     <NativeReader
       {...props}
@@ -126,6 +136,7 @@ export function Reader({ onWordChange, onLaidOut, onSpeechChange, onReference, o
       onSelectionChange={onSelectionChange && (({ nativeEvent }) => onSelectionChange(nativeEvent.selection ?? null))}
       onMarkTap={onMarkTap && (({ nativeEvent }) => onMarkTap(nativeEvent))}
       onSelectionFrame={onSelectionFrame && (({ nativeEvent }) => onSelectionFrame(nativeEvent.frame ?? null))}
+      onVerseInSight={onVerseInSight && (({ nativeEvent }) => onVerseInSight(nativeEvent))}
     />
   );
 }

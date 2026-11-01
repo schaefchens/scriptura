@@ -11,6 +11,7 @@ import type {
   Selection as SelectedPlaces,
   SelectionFrame,
   SpeechChange,
+  VersePosition,
   WordPosition,
 } from '@schaefchens/scriptura';
 import { palette, within } from '@schaefchens/scriptura';
@@ -40,6 +41,11 @@ export type WebReaderOptions = ReaderOptions & {
    * own beside it.
    */
   onSelectionFrame?: (frame: SelectionFrame | null) => void;
+  /**
+   * The verse in sight, as it changes: the verse of the first word on the page, or on the first line in sight – as the text is
+   * scrolled or turned, brought somewhere, or laid out anew. For an app's index of books and chapters, or a place to come back to.
+   */
+  onVerseInSight?: (verse: VersePosition) => void;
 };
 
 export type WebReader = {
@@ -196,6 +202,9 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   let reportedSelection = 'null';
   let reportedFrame = 'null';
   let frameTimer: number | undefined;
+  /** The verse in sight as last reported, so only changes are; and a report of it to come, once the page has drawn. */
+  let reportedVerse = '';
+  let verseFrame: number | undefined;
 
   function render() {
     const started = performance.now();
@@ -273,6 +282,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     else goTo(0);
     if (selected) setSelection(selected);
     frameLater();
+    verseLater();
     const time = performance.now() - started;
     options.onLaidOut?.({ pages: options.paging === 'pages' ? pageCount : 0, milliseconds: time, all: time });
   }
@@ -1062,6 +1072,42 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     return undefined;
   }
 
+  /** The first word in sight: on the page, or on the first line in sight, the first that ends after its start. */
+  function firstWordInSight() {
+    if (words.length === 0) return undefined;
+    const area = root.getBoundingClientRect();
+    const right = content.dir === 'rtl';
+    for (let y = area.top + INSET + 2; y < area.bottom; y += 8) {
+      const caret = caretAt(right ? area.right - options.sideMargin - 2 : area.left + options.sideMargin + 2, y);
+      const block = caret ? pieces.findIndex((blockPieces) => blockPieces.some((piece) => piece.node === caret.node)) : -1;
+      if (!caret || block < 0) continue;
+      const offset = pieces[block].find((piece) => piece.node === caret.node)!.start + caret.offset;
+      const index = lowest((at) => words[at].block > block || (words[at].block === block && words[at].end > offset));
+      if (index < words.length) return index;
+    }
+    return undefined;
+  }
+
+  /**
+   * Tells the app the verse in sight, if it changed, two frames on: in the frame right after the page
+   * changed, the browser finds no text at a point yet.
+   */
+  function verseLater() {
+    if (!options.onVerseInSight || verseFrame !== undefined) return;
+    verseFrame = requestAnimationFrame(() => {
+      verseFrame = requestAnimationFrame(() => {
+        verseFrame = undefined;
+        const index = firstWordInSight();
+        if (index === undefined) return;
+        const { passage, book, chapter, verse } = words[index].place;
+        const key = `${passage} ${book} ${chapter}:${verse}`;
+        if (key === reportedVerse) return;
+        reportedVerse = key;
+        options.onVerseInSight?.({ passage, book, chapter, verse });
+      });
+    });
+  }
+
   /** Marks a word reached by a tap, a move or a jump. While reading aloud, the voice goes on from it. */
   function select(index: number) {
     closeNote();
@@ -1402,6 +1448,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       options.onSelectionFrame?.(null);
     }
     frameLater(150);
+    verseLater();
   }, { passive: true });
   root.addEventListener('pointerup', (event) => {
     const pressedHere = endPress();
@@ -1531,6 +1578,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     destroy() {
       destroyed = true;
       clearTimeout(frameTimer);
+      if (verseFrame !== undefined) cancelAnimationFrame(verseFrame);
       closeNote();
       unfollow();
       document.removeEventListener('visibilitychange', hidden);

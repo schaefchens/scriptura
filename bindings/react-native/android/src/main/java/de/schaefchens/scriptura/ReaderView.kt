@@ -129,6 +129,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
    * moves meanwhile, and whether it is being laid out anew, its words not yet those selected.
    */
   private val onSelectionFrame by EventDispatcher()
+  private val onVerseInSight by EventDispatcher()
   private var reportedFrame = ""
   private var moving = false
   private var rendering = false
@@ -200,6 +201,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   private var anchorWords: IntRange? = null
   private var reportedSelection = ""
 
+  /** The verse in sight as JS last heard of it, so it hears only of changes. */
+  private var reportedVerse = ""
+
   /** What a pen that erases takes its look off: the mark of its look the words selected all lie in – and what it was found for, the words and the style. */
   private var erasing: Pair<String, String?> = "" to null
 
@@ -229,7 +233,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     pages.onRest = {
       moving = false
       reportFrame()
+      reportVerse()
     }
+    pages.onScrolled = ::reportVerse
     addView(pages, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
     // Over the pages, laid out where its mark is; it takes no room in the row.
     addView(noteView, LayoutParams(0, 0))
@@ -976,6 +982,22 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     // A frame of null tells JS there is none; the dispatcher's map type allows no null, its converter does.
     @Suppress("UNCHECKED_CAST")
     onSelectionFrame(mapOf("frame" to frame) as Map<String, Any>)
+  }
+
+  /** Tells JS the verse in sight, if it changed: the verse of the first word on the page, or of the first whole line in sight. */
+  private fun reportVerse() {
+    if (rendering) return
+    val character = pages.characterShown ?: return
+    var (low, high) = 0 to words.size
+    while (low < high) {
+      val middle = (low + high) / 2
+      if (words[middle].end <= character) low = middle + 1 else high = middle
+    }
+    val place = words.getOrNull(low)?.place ?: return
+    val key = "${place.passage} ${place.book} ${place.chapter}:${place.verse}"
+    if (key == reportedVerse) return
+    reportedVerse = key
+    onVerseInSight(mapOf("passage" to place.passage, "book" to place.book, "chapter" to place.chapter, "verse" to place.verse))
   }
 
   /** A rectangle in the pages' pixels as JS takes it: x, y, width and height in dp from this view's top left. */

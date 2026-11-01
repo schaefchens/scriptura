@@ -107,6 +107,8 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   /// – or comes to rest; and a layout is in use, so what is in sight may stand elsewhere.
   var onMove: ((Bool) -> Void)?
   var onShown: (() -> Void)?
+  /// The text moved, by any means, a step: what is in sight may be other text.
+  var onScrolled: (() -> Void)?
   /// Whether the text moves: from a scroll or page turn starting until it comes to rest.
   private(set) var isMoving = false
   /// The first pages show, before all of the text is laid out.
@@ -730,6 +732,12 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     return CGRect(x: part.frame.minX, y: part.frame.minY + top, width: part.frame.width, height: bottom - top)
   }
 
+  /// The first character in sight – on the page, or of the first whole line in sight – once the text
+  /// given is laid out there; none before.
+  var characterShown: Int? {
+    layout.text === text && !layout.parts.isEmpty ? characterInSight : nil
+  }
+
   /// Where the reader is: the first character on the page, or of the first whole line in sight.
   private var characterInSight: Int {
     if continuous {
@@ -781,6 +789,7 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     if isTracking {
       keepAnchor()
     }
+    onScrolled?()
   }
 
   /// Once the finger lifts, the reader is where the text comes to rest.

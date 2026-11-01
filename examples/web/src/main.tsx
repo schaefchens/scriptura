@@ -19,6 +19,7 @@ import {
   spanOf,
   type SpeechChange,
   within,
+  type VersePosition,
   type WordPosition,
 } from '@schaefchens/scriptura-react';
 import { StrictMode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -65,6 +66,8 @@ function App() {
   const [companions, setCompanions] = useState<string[]>([]);
   const [parallel, setParallel] = useState<'inline' | 'columns'>('inline');
   const [position, setPosition] = useState<WordPosition>();
+  // The verse in sight, as the reader scrolls or turns: where an index of books and chapters would stand.
+  const [inSight, setInSight] = useState<VersePosition>();
   const [speech, setSpeech] = useState<SpeechChange>({ state: 'stopped' });
   const [speakAlong, setSpeakAlong] = useState(false);
   const [rate, setRate] = useState(1);
@@ -294,6 +297,7 @@ function App() {
         {speech.state === 'speaking' && speech.following === false && <button onClick={() => reader.current?.follow()}>Back to the voice</button>}
         <output dir="auto">
           {position ? `${title(position.book)}‎ ${position.chapter}:${position.verse} · word ${position.word + 1}` : 'Tap a word'}
+          {inSight && ` · in sight: ${title(inSight.book)}‎ ${inSight.chapter}:${inSight.verse}`}
           {missing && ` · ${missing}`}
           {speech.state === 'speaking' && speech.recording && ` · ${voiceNames.get(speech.recording)}`}
           {speech.firstSound !== undefined && ` · first sound after ${Math.round(speech.firstSound)} ms`}
@@ -325,6 +329,7 @@ function App() {
         speechRate={rate}
         recordedVoices={recited ? [recited] : []}
         onWordChange={setPosition}
+        onVerseInSight={setInSight}
         onSpeechChange={onSpeechChange}
         onReference={onReference}
         // Typing the note moves the page's selection into its field: the words selected stay to be marked. A tap in the text ends them.

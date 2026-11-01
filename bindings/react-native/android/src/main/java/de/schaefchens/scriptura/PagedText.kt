@@ -152,6 +152,9 @@ class PagedText(context: Context) : View(context) {
   var onMove: (() -> Unit)? = null
   var onRest: (() -> Unit)? = null
 
+  /** The text moved, by any means, a step: what is in sight may be other text. */
+  var onScrolled: (() -> Unit)? = null
+
   /** A screen reader's selection of a verse – or, if the second is true, the selection taken on to it. */
   var onAccessibilitySelect: ((Readable, Boolean) -> Unit)? = null
 
@@ -472,6 +475,15 @@ class PagedText(context: Context) : View(context) {
     updatePieces()
     invalidate()
     onRest?.invoke()
+  }
+
+  /** The first character in sight – on the page, or of the first whole line in sight – once the text given is laid out there; none before. */
+  val characterShown: Int?
+    get() = shown?.takeIf { it.text === text }?.let { characterInSight(it) }
+
+  override fun onScrollChanged(left: Int, top: Int, oldLeft: Int, oldTop: Int) {
+    super.onScrollChanged(left, top, oldLeft, oldTop)
+    onScrolled?.invoke()
   }
 
   /** Where the reader is, scrolled to [x] and [y]: the first character on the page, or of the first whole line in sight. */

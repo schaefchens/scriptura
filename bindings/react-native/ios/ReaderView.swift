@@ -78,6 +78,7 @@ class ReaderView: ExpoView {
   let onMarkTap = EventDispatcher()
   /// Where the selection shows, as it settles, for a panel of the app's own beside it; or nowhere.
   let onSelectionFrame = EventDispatcher()
+  let onVerseInSight = EventDispatcher()
 
   private let pages = PagedText()
   private var words: [ReaderWord] = []
@@ -101,6 +102,8 @@ class ReaderView: ExpoView {
   private var shownMarkNotes: MarkNotes = .sign
   /// Where the selection showed as last reported to JS, so that only changes are.
   private var reportedFrame = ""
+  /// The verse in sight as last reported to JS, so that only changes are.
+  private var reportedVerse = ""
   /// The words selected – by a long press and a drag, by VoiceOver or by JS – in one passage's book;
   /// while a finger drags, the words it started from; and the selection as last reported to JS, so
   /// that only changes are.
@@ -161,7 +164,11 @@ class ReaderView: ExpoView {
     pages.onRelease = { [weak self] in self?.endSelection() }
     pages.onSettled = { [weak self] in self?.openPendingNote() }
     pages.onMove = { [weak self] _ in self?.reportFrame() }
-    pages.onShown = { [weak self] in self?.reportFrame() }
+    pages.onShown = { [weak self] in
+      self?.reportFrame()
+      self?.reportVerse()
+    }
+    pages.onScrolled = { [weak self] in self?.reportVerse() }
     noteView.onLink = { [weak self] url in self?.followLink(url) }
     noteView.onEscape = { [weak self] in self?.closeNote() }
     addSubview(pages)
@@ -666,6 +673,23 @@ class ReaderView: ExpoView {
       pieces.prefix { abs($0.midY - rect.midY) < rect.height / 2 }.reduce(rect) { $0.union($1) }
     }
     return (line(first, Array(lines.dropFirst())), line(last, Array(lines.dropLast().reversed())))
+  }
+
+  /// Tells JS the verse in sight, if it changed: the verse of the first word on the page, or of the
+  /// first whole line in sight.
+  private func reportVerse() {
+    guard let character = pages.characterShown else { return }
+    var (low, high) = (0, words.count)
+    while low < high {
+      let middle = (low + high) / 2
+      if NSMaxRange(words[middle].range) <= character { low = middle + 1 } else { high = middle }
+    }
+    guard low < words.count else { return }
+    let place = words[low].place
+    let key = "\(place.passage) \(place.book) \(place.chapter):\(place.verse)"
+    guard key != reportedVerse else { return }
+    reportedVerse = key
+    onVerseInSight(["passage": place.passage, "book": place.book, "chapter": place.chapter, "verse": place.verse])
   }
 
   /// A rectangle as JS gets it: x, y, width and height, to half a point.

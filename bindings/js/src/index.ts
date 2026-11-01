@@ -28,6 +28,9 @@ export type RecordingInfo = { id: string; voice: string; name?: string | null; b
  */
 export type WordPosition = { passage: number; book: string; chapter: number; verse: number; word: number };
 
+/** A verse, as a word's position gives it: in which of the reader's passages, of which book – the passage's, or one read along – and where. */
+export type VersePosition = { passage: number; book: string; chapter: number; verse: number };
+
 /** An end of a mark or a selection: a word of a verse, by its index among the verse's words, or the whole verse, without one. */
 export type MarkEnd = { chapter: number; verse: number; word?: number };
 

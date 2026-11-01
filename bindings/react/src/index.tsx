@@ -54,6 +54,7 @@ export function Reader({ ref, className, style, ...options }: ReaderProps) {
     onSelectionChange: _selection,
     onMarkTap: _mark,
     onSelectionFrame: _frame,
+    onVerseInSight: _verse,
     ...shown
   } = options;
   const shownKey = JSON.stringify(shown);
@@ -66,6 +67,7 @@ export function Reader({ ref, className, style, ...options }: ReaderProps) {
     onSelectionChange: (selection) => latest.current.onSelectionChange?.(selection),
     onMarkTap: (tap) => latest.current.onMarkTap?.(tap),
     onSelectionFrame: (frame) => latest.current.onSelectionFrame?.(frame),
+    onVerseInSight: (verse) => latest.current.onVerseInSight?.(verse),
   });
 
   useEffect(() => {

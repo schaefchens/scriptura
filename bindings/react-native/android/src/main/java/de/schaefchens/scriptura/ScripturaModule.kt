@@ -187,7 +187,7 @@ class ScripturaModule : Module() {
     }
 
     View(ReaderView::class) {
-      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap", "onSelectionFrame")
+      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap", "onSelectionFrame", "onVerseInSight")
 
       Prop("passages") { view: ReaderView, passages: List<PassageRecord>? ->
         view.passages = passages ?: emptyList()
