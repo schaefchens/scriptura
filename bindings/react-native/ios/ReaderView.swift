@@ -67,9 +67,10 @@ class ReaderView: ExpoView {
   private var paragraphs: [Paragraph] = []
   private var marks: [ReaderNote] = []
   /// The note open, by its mark's index, the verses its links refer to, and what VoiceOver was on
-  /// when it opened.
+  /// when it opened; and a note to open once its mark has scrolled into sight.
   private let noteView = NoteView()
   private var openNote: Int?
+  private var pendingNote: (index: Int, from: Any?)?
   private var openLinks: [Target] = []
   private var openedFrom: Any?
   private let readAloud = ReadAloud()
@@ -107,6 +108,7 @@ class ReaderView: ExpoView {
     readAloud.onChange = { [weak self] change in self?.speechChanged(change) }
     pages.onScrollByHand = { [weak self] in self?.scrolledByHand() }
     pages.onTapElsewhere = { [weak self] in self?.closeNote() }
+    pages.onSettled = { [weak self] in self?.openPendingNote() }
     noteView.onLink = { [weak self] url in self?.followLink(url) }
     noteView.onEscape = { [weak self] in self?.closeNote() }
     addSubview(pages)
@@ -150,6 +152,7 @@ class ReaderView: ExpoView {
 
   func render() {
     closeNote()
+    pendingNote = nil
     renderStarted = CACurrentMediaTime()
     firstShown = nil
     reportPending = true
@@ -525,8 +528,12 @@ class ReaderView: ExpoView {
   fileprivate func openNote(_ index: Int, from element: Any? = nil) {
     closeNote()
     let mark = marks[index]
-    pages.show(characterAt: mark.range.location)
-    guard let rect = pages.rect(for: mark.range) else { return }
+    // Out of sight – as from a VoiceOver action on a verse further on – it opens once it is in sight.
+    guard pages.isInSight(characterAt: mark.range.location), let rect = pages.rect(for: mark.range) else {
+      pendingNote = (index, element)
+      pages.show(characterAt: mark.range.location)
+      return
+    }
     let paragraph = paragraphs[mark.paragraph]
     var links: [Target] = []
     let text = noteText(mark.note, in: paragraph, links: &links)
@@ -537,6 +544,13 @@ class ReaderView: ExpoView {
     noteView.show(text, at: convert(rect, from: pages), in: area, maxWidth: 360, maxHeight: (bounds.height * 0.45).rounded(),
                   background: colors.background, border: colors.text.withAlphaComponent(0.25), linkColor: colors.roles["note"] ?? colors.text)
     UIAccessibility.post(notification: .screenChanged, argument: noteView.textView)
+  }
+
+  /// Opens the note that waited for its mark to come into sight.
+  private func openPendingNote() {
+    guard let (index, element) = pendingNote, index < marks.count, pages.isInSight(characterAt: marks[index].range.location) else { return }
+    pendingNote = nil
+    openNote(index, from: element)
   }
 
   private func closeNote() {
@@ -560,10 +574,21 @@ class ReaderView: ExpoView {
     style.baseWritingDirection = paragraph.rightToLeft ? .rightToLeft : .leftToRight
     style.alignment = .natural
     let text = NSMutableAttributedString()
+    // The verses a note refers to stand in paragraphs of their own, each in the direction of its
+    // first letter: an Arabic verse under an English note runs from the right.
+    let natural = NSMutableParagraphStyle()
+    natural.baseWritingDirection = .natural
+    natural.alignment = .natural
     for run in note.runs {
       var attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: colors.text, .paragraphStyle: style]
       if run.role == "origin" {
         attributes[.foregroundColor] = colors.roles["origin"] ?? colors.text.withAlphaComponent(0.6)
+      }
+      if run.role == "number" {
+        attributes[.foregroundColor] = colors.roles["number"] ?? colors.text.withAlphaComponent(0.6)
+      }
+      if run.role == "preview" || run.role == "number" {
+        attributes[.paragraphStyle] = natural
       }
       if run.role == "quotation" || run.role == "emphasis", let italic = font.fontDescriptor.withSymbolicTraits(.traitItalic) {
         // The font's own italic, if it has one; not another font's.

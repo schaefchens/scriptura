@@ -23,6 +23,9 @@ dependencies {
   implementation "net.java.dev.jna:jna:5.17.0@aar"
   // Screen readers find the headings and verses the pages draw as virtual views.
   implementation "androidx.customview:customview:1.1.0"
+  // The Back key closes a note before it leaves the screen: through the activity's dispatcher,
+  // which React Native falls through to.
+  implementation "androidx.activity:activity:1.9.3"
   // Recordings play with Media3's player: it seeks to the sample, and keeps the voice's pitch at every rate.
   implementation "androidx.media3:media3-exoplayer:1.11.1"
   // The media controls and the service that keeps reading aloud going in the background.

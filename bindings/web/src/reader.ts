@@ -341,9 +341,14 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       width: `${Math.min(NOTE_WIDTH, root.clientWidth - 2 * options.sideMargin)}px`,
       maxHeight: `${Math.round(root.clientHeight * NOTE_HEIGHT)}px`,
     });
+    // After a line break, a paragraph of its own, in the direction of its first letter: the verses a
+    // note refers to may be in another script than the note.
+    let paragraph: HTMLElement = dialog;
     for (const run of note.runs) {
       if (run.text === '\n') {
-        dialog.append(document.createElement('br'));
+        paragraph = document.createElement('div');
+        paragraph.dir = 'auto';
+        dialog.append(paragraph);
         continue;
       }
       const piece = document.createElement(run.target ? 'button' : 'span');
@@ -355,6 +360,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
         piece.addEventListener('click', () => followReference(target, note, block));
       }
       if (run.role === 'origin') piece.style.color = colors.roles.origin ?? '';
+      if (run.role === 'number') piece.style.color = colors.roles.number ?? '';
       if (run.role === 'quotation' || run.role === 'emphasis') piece.style.fontStyle = 'italic';
       if (run.language) {
         piece.lang = run.language;
@@ -363,7 +369,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
         if (family) piece.style.fontFamily = `"${family}", ${familyOf(block)}`;
       }
       piece.textContent = run.text;
-      dialog.append(piece);
+      paragraph.append(piece);
     }
     root.append(dialog);
     const area = root.getBoundingClientRect();

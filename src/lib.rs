@@ -43,6 +43,26 @@ pub struct Options {
     pub drop_caps: bool,
 }
 
+/// How many verses a note shows of the ones it refers to, and how long they may be, in UTF-16 units.
+pub const PREVIEW_VERSES: usize = 3;
+pub const PREVIEW_LENGTH: usize = 400;
+
+fn text_length(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// The first `units` UTF-16 code units of a text, or fewer where that would cut a character.
+fn take_utf16(text: &str, units: usize) -> &str {
+    let mut counted = 0;
+    for (index, char) in text.char_indices() {
+        if counted + char.len_utf16() > units {
+            return &text[..index];
+        }
+        counted += char.len_utf16();
+    }
+    text
+}
+
 /// How notes show in the text: not at all; as marks where they stand, which open them; or in
 /// full, each in brackets where it stands, its mark before its text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -135,7 +155,8 @@ impl Library {
 
     /// The passages as paragraphs: per chapter a heading, then the chapter as running text, or a
     /// verse per line. With companions, other editions of a passage's book are read along with it:
-    /// see [`Block::row`]. Passages of books the library doesn't hold give nothing.
+    /// see [`Block::row`]. Passages of books the library doesn't hold give nothing. A note that
+    /// refers to verses the library holds shows them: see [`Library::preview`].
     pub fn blocks(&self, references: &[Reference], options: &Options) -> Vec<Block> {
         let companions: Vec<&Book> = options.companions.iter().filter_map(|id| self.book(id)).collect();
         let mut rows = 0..;
@@ -143,7 +164,98 @@ impl Library {
         for (passage, reference) in (0..).zip(references) {
             blocks.extend(reader::blocks(self, reference, passage, options, &companions, &mut rows));
         }
+        for block in &mut blocks {
+            for note in &mut block.notes {
+                let previews = self.previews(&block.book, &note.runs);
+                note.runs.extend(previews);
+            }
+        }
         blocks
+    }
+
+    /// The book that verses a note refers to are read in: of the code the note names, the edition
+    /// of the book the note is in, if the library holds it, or else any.
+    pub fn edition(&self, code: &str, of: &str) -> Option<&Book> {
+        let work = self.book(of).map(|book| book.work.as_str());
+        let editions = self.books.iter().filter(|book| book.code.as_deref() == Some(code));
+        editions.clone().find(|book| Some(book.work.as_str()) == work).or_else(|| editions.clone().next())
+    }
+
+    /// The verses a note's runs refer to, as runs after them, for each target the library holds a
+    /// book for: a line break, then – where the note refers to more than one place – the reference
+    /// as the note gives it, and then the verses, each number as its book writes it, in the book's
+    /// language. At most [`PREVIEW_VERSES`] verses and [`PREVIEW_LENGTH`] code units, or else
+    /// what fits and an ellipsis.
+    fn previews(&self, of: &str, runs: &[NoteRun]) -> Vec<NoteRun> {
+        let targets: Vec<&NoteRun> = runs.iter().filter(|run| run.target.is_some()).collect();
+        let mut previews = Vec::new();
+        for run in &targets {
+            let target = run.target.as_ref().expect("a target");
+            let Some(preview) = self.preview(of, target) else { continue };
+            previews.push(NoteRun { text: "\n".into(), role: None, language: None, target: None });
+            if targets.len() > 1 {
+                previews.push(NoteRun {
+                    text: run.text.trim().to_string(),
+                    role: Some("origin".into()),
+                    language: None,
+                    target: None,
+                });
+                previews.push(NoteRun { text: "\n".into(), role: None, language: None, target: None });
+            }
+            previews.extend(preview);
+        }
+        previews
+    }
+
+    /// The verses a target names, in the book the note's book refers to – see [`Library::edition`]
+    /// – as runs: each verse's number as the book writes it, then its text, in the book's language.
+    pub fn preview(&self, of: &str, target: &Target) -> Option<Vec<NoteRun>> {
+        let book = self.edition(&target.book, of)?;
+        let chapter = book.chapters.iter().find(|chapter| chapter.number == target.chapter)?;
+        let from = target.verse.unwrap_or(1);
+        let to = target.to.unwrap_or(if target.verse.is_some() { from } else { u32::MAX });
+        let verses = chapter.verses.iter().filter(|verse| (from..=to).contains(&verse.number)).take(PREVIEW_VERSES);
+        let mut runs = Vec::new();
+        let mut length = 0;
+        let mut cut = false;
+        for verse in verses {
+            let mut text: String = verse.runs.iter().map(|(run, _)| run.as_str()).collect();
+            let mut end = text_length(&text);
+            if length + end > PREVIEW_LENGTH {
+                let room = PREVIEW_LENGTH.saturating_sub(length);
+                text = take_utf16(&text, room).trim_end().to_string() + "…";
+                end = text_length(&text);
+                cut = true;
+            }
+            if !verse.label.is_empty() {
+                let number = format!("{}{}\u{a0}", if runs.is_empty() { "" } else { " " }, verse.label);
+                runs.push(NoteRun {
+                    text: number,
+                    role: Some("number".into()),
+                    language: Some(book.language.clone()),
+                    target: None,
+                });
+            }
+            runs.push(NoteRun {
+                text,
+                role: Some("preview".into()),
+                language: Some(book.language.clone()),
+                target: None,
+            });
+            length += end;
+            if cut {
+                break;
+            }
+        }
+        if chapter.verses.iter().filter(|verse| (from..=to).contains(&verse.number)).count() > PREVIEW_VERSES && !cut {
+            runs.push(NoteRun {
+                text: " …".into(),
+                role: Some("preview".into()),
+                language: Some(book.language.clone()),
+                target: None,
+            });
+        }
+        (!runs.is_empty()).then_some(runs)
     }
 
     /// What is read aloud of the passages, read along with `companions` – only the passages' own
@@ -261,6 +373,35 @@ mod tests {
                 .unwrap();
             assert_eq!(library.recordings()[0].audio, found);
         }
+    }
+
+    #[test]
+    fn a_note_shows_the_verses_it_refers_to_in_the_notes_own_edition_first() {
+        let mut library = Library::new();
+        library.add(include_bytes!("../tests/fixtures/books.json")).unwrap();
+        // Jonah 1:17 in the World English Bible, from a note in the same edition's Psalms – or, from the
+        // Hebrew, in the Hebrew, which numbers it 2:1 and has no 1:17.
+        let jonah = Target { book: "JON".into(), chapter: 1, verse: Some(17), to: None };
+        let english = library.preview("psalms", &jonah).unwrap();
+        assert_eq!(english[0].text, "17\u{a0}");
+        assert!(english[1].text.starts_with("Yahweh prepared a huge fish"));
+        assert_eq!(english[1].language.as_deref(), Some("en"));
+        assert!(library.preview("psalms-he", &jonah).is_none());
+        let hebrew =
+            library.preview("psalms-he", &Target { book: "JON".into(), chapter: 2, verse: Some(1), to: None }).unwrap();
+        assert_eq!(hebrew[1].language.as_deref(), Some("he"));
+        // A range gives each verse with its number; a chapter, its first verses and an ellipsis.
+        let range =
+            library.preview("jonah", &Target { book: "JON".into(), chapter: 2, verse: Some(2), to: Some(3) }).unwrap();
+        assert_eq!(range.iter().filter(|run| run.role.as_deref() == Some("number")).count(), 2);
+        assert_eq!(range[2].text, " 3\u{a0}");
+        let chapter =
+            library.preview("jonah", &Target { book: "JON".into(), chapter: 2, verse: None, to: None }).unwrap();
+        assert_eq!(chapter.iter().filter(|run| run.role.as_deref() == Some("number")).count(), PREVIEW_VERSES);
+        assert_eq!(chapter.last().unwrap().text, " …");
+        assert!(
+            library.preview("jonah", &Target { book: "ISA".into(), chapter: 7, verse: Some(14), to: None }).is_none()
+        );
     }
 
     #[test]

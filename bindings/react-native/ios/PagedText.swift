@@ -81,6 +81,8 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   var onTap: ((Int) -> Void)?
   /// A tap where no character is.
   var onTapElsewhere: (() -> Void)?
+  /// A scroll the reader asked for, to bring something into sight, has come to rest.
+  var onSettled: (() -> Void)?
   /// A scroll or a page turn by hand begins – or by a screen reader, or by turn(forward:).
   var onScrollByHand: (() -> Void)?
   /// The first pages show, before all of the text is laid out.
@@ -682,6 +684,10 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
 
   func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
     keepAnchor()
+  }
+
+  func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+    onSettled?()
   }
 
   func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {

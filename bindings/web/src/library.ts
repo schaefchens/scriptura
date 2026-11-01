@@ -41,7 +41,11 @@ export type NoteMark = {
   runs: NoteRun[];
 };
 
-/** A run of a note's text: its role, if it has one – "origin", "quotation", "emphasis", "label" – its language, where it isn't the book's, and the verses it refers to. */
+/**
+ * A run of a note's text: its role, if it has one – "origin", "quotation", "emphasis", "label"; "number" and "preview" for the verses
+ * the note refers to, which follow its runs after a line break where the library holds their book – its language, where it isn't
+ * the book's, and the verses it refers to.
+ */
 export type NoteRun = { text: string; role?: string | null; language?: string | null; target?: Target | null };
 
 /** Verses a note refers to: by their book's USFM code, chapter, and verse – to `to` – or the whole chapter. */

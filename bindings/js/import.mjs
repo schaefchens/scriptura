@@ -16,8 +16,9 @@
 //                     "voice": "alafasy", "name": "Mishary Rashid Alafasy", "surahs": [1, 112] }] }
 //   }
 //
-// Bibles come as USFM in a zip, as eBible.org has them, or as OSIS (`"osis": "<base URL>"`, a book
-// as `file` there), as the Open Scriptures Hebrew Bible has them. An edition writing numbers in
+// Bibles come as USFM in a zip, as eBible.org has them – by URL, or a path relative to the config –
+// or as OSIS (`"osis": "<base URL>"`, a book as `file` there), as the Open Scriptures Hebrew Bible
+// has them. An edition writing numbers in
 // other digits gives their zero as `digits`, such as 1632 (0x660) for Arabic-Indic; a book can
 // have a `title` the source lacks. USFM's footnotes, endnotes and cross references come along as
 // each verse's notes, where they stand in its text: footnotes numbered and cross references
@@ -209,8 +210,9 @@ function noteRuns(body, names) {
   const push = (text, extra = {}) => {
     const run = { text, ...(role && { role }), ...Object.assign({}, ...styles), ...extra };
     const last = runs.at(-1);
-    // Runs alike join; spaces run on as they would in the text.
-    if (last && last.role === run.role && last.language === run.language && !last.target && !run.target) last.text += text;
+    // Runs alike join; spaces run on as they would in the text. A paragraph break stays a run of its own.
+    const alike = last && last.role === run.role && last.language === run.language && !last.target && !run.target;
+    if (alike && last.text !== '\n' && text !== '\n') last.text += text;
     else if (text) runs.push(run);
   };
   const tokens = body.replace(/^[+\-*?]?\s*/, '').replace(WORDS, '$1').split(/\\(\+?[a-z]+\d*\*?)\s?/);
@@ -220,8 +222,12 @@ function noteRuns(body, names) {
       if (marker.startsWith('+')) {
         if (marker.endsWith('*')) styles.pop();
         else if (NOTE_STYLES[marker.slice(1)]) styles.push(NOTE_STYLES[marker.slice(1)]);
-      } else if (marker === 'fp') push('\n');
-      else {
+      } else if (marker === 'fp') {
+        // A new paragraph of the note's text.
+        role = null;
+        targets = false;
+        push('\n');
+      } else {
         role = NOTE_ROLES[marker] ?? null;
         targets = marker === 'xt';
       }
@@ -340,6 +346,9 @@ async function download(url) {
   return response;
 }
 
+/** Whether a source is fetched, or read from a file relative to the config. */
+const isUrl = (source) => /^[a-z][a-z0-9+.-]*:\/\//i.test(source);
+
 const downloads = await mkdtemp(join(tmpdir(), 'scriptura-'));
 
 /** A downloaded zip's path, to take files out of it. */
@@ -364,7 +373,7 @@ if (config.fonts) {
 
 const books = [];
 for (const { usfm, osis, work, language, direction, digits, books: wanted } of config.bibles ?? []) {
-  const zip = usfm && (await downloadZip(usfm, `${books.length}.zip`));
+  const zip = usfm && (isUrl(usfm) ? await downloadZip(usfm, `${books.length}.zip`) : relative(usfm));
   const names = usfm && bookNames(execFileSync('unzip', ['-p', zip, '*.usfm'], { encoding: 'utf8', maxBuffer: 1 << 28 }));
   for (const { id, code, file, title } of wanted) {
     // eBible.org names the files like 33-JONeng-web.usfm.

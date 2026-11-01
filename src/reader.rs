@@ -850,7 +850,11 @@ mod tests {
            "notes": [{"kind": "crossReference", "mark": "a", "at": 0, "runs": [{"text": "John 1:1", "target": {"book": "JHN", "chapter": 1, "verse": 1}}]},
                      {"kind": "footnote", "mark": "1", "at": 21, "runs": [{"text": "1:1 ", "role": "origin"}, {"text": "Elohim"}]},
                      {"kind": "footnote", "mark": "2", "at": 41, "runs": [{"text": "or, sky"}]}]},
-          {"number": 2, "label": "2", "runs": [["The earth was formless.", null]]}]}]}]"#;
+          {"number": 2, "label": "2", "runs": [["The earth was formless.", null]]}]}]},
+       {"id": "john", "code": "JHN", "title": "John", "work": "Test", "direction": "ltr", "language": "en",
+        "chapters": [{"number": 1, "label": "1", "verses": [
+          {"number": 1, "label": "1", "runs": [["In the beginning was the Word, and the Word was with God.", null]]},
+          {"number": 2, "label": "2", "runs": [["The same was in the beginning with God.", null]]}]}]}]"#;
 
     fn noted(notes: Notes, drop_caps: bool) -> Block {
         let mut library = Library::new();
@@ -878,6 +882,19 @@ mod tests {
         assert_eq!(block.notes[0].kind, "crossReference");
         assert_eq!(block.notes[0].runs[0].target.as_ref().unwrap().book, "JHN");
         assert_eq!(block.notes[1].runs[1].text, "Elohim");
+        // The verses a note refers to follow its runs, where the library holds their book.
+        let preview: Vec<(&str, Option<&str>)> =
+            block.notes[0].runs[1..].iter().map(|run| (run.text.as_str(), run.role.as_deref())).collect();
+        assert_eq!(
+            preview,
+            [
+                ("\n", None),
+                ("1\u{a0}", Some("number")),
+                ("In the beginning was the Word, and the Word was with God.", Some("preview"))
+            ]
+        );
+        assert_eq!(block.notes[0].runs[2].language.as_deref(), Some("en"));
+        assert_eq!(block.notes[1].runs.len(), 2);
         // The words are the verse's, a mark before or after one left out, one within it spanned.
         let plain = noted(Notes::None, false);
         assert_eq!(text(&plain), "1\u{a0}In the beginning, God created the heavens. 2\u{a0}The earth was formless.");

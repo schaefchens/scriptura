@@ -52,8 +52,11 @@ final class NoteView: UIView, UITextViewDelegate {
     backgroundColor = background
     layer.borderColor = border.cgColor
     let width = max(min(maxWidth, area.width), 1)
-    let fitting = textView.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude))
-    let height = min(fitting.height.rounded(.up), maxHeight)
+    // Measured as a whole: the text view's own estimate falls short of a text of several paragraphs.
+    let insets = textView.textContainerInset
+    let bounding = text.boundingRect(with: CGSize(width: width - insets.left - insets.right, height: .greatestFiniteMagnitude),
+                                     options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+    let height = min((bounding.height + insets.top + insets.bottom + 1).rounded(.up), maxHeight)
     // Below the place, if there is room for it there, else above.
     let below = anchor.maxY + 6 + height <= area.maxY
     let y = below ? anchor.maxY + 6 : max(anchor.minY - 6 - height, area.minY)

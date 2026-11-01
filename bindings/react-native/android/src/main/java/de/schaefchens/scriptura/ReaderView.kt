@@ -19,6 +19,8 @@ import android.text.style.TabStopSpan
 import android.text.style.TypefaceSpan
 import android.util.TypedValue
 import android.view.View
+import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.core.graphics.ColorUtils
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.types.ColorCompat
@@ -128,6 +130,11 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   /** A note opened where its mark stands, over the pages. */
   private val noteView = NoteView(context)
 
+  /** While a note is open, the Back key closes it: React Native hands a back press on to the activity's dispatcher when JS doesn't take it. */
+  private val backCloses = object : OnBackPressedCallback(false) {
+    override fun handleOnBackPressed() = closeNote()
+  }
+
   /** The notes' marks in the text, in its order, and the index of the note open, if one is. */
   private var marks: List<ReaderNote> = emptyList()
   private var opened: Int? = null
@@ -139,6 +146,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   init {
     pages.onTap = ::selectWord
     pages.onMarkTap = ::openNote
+    (appContext.currentActivity as? ComponentActivity)?.onBackPressedDispatcher?.addCallback(backCloses)
     pages.onAccessibilityMove = { step, readable -> move(step, from = readable.firstWord) }
     pages.onFirstPages = { if (reportPending && firstShown == 0.0) firstShown = millisecondsSinceRender() }
     pages.onPaginated = { count ->
@@ -175,6 +183,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   override fun onDetachedFromWindow() {
     super.onDetachedFromWindow()
     shown.remove(this)
+    backCloses.remove()
     readAloud.release()
   }
 
@@ -505,10 +514,12 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     val size = maxOf(pixels(paragraph.fontSize) * 0.7f, pixels(14.0))
     opened = index
     noteView.show(noteText(note), typeface, size, textColor, backgroundColor, anchor, Rect(0, 0, width, height), pixels(margin).roundToInt(), paragraph.rightToLeft)
+    backCloses.isEnabled = true
     requestLayout()
   }
 
   private fun closeNote() {
+    backCloses.isEnabled = false
     if (opened == null) return
     opened = null
     noteView.hide()
@@ -534,6 +545,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
       val end = builder.length
       when (run.role) {
         "origin" -> builder.setSpan(ForegroundColorSpan(originColor), start, end, flags)
+        "number" -> builder.setSpan(ForegroundColorSpan(roleColors["number"] ?: originColor), start, end, flags)
         "quotation", "emphasis" -> builder.setSpan(StyleSpan(Typeface.ITALIC), start, end, flags)
       }
       run.language?.let { language ->

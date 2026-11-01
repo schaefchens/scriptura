@@ -44,7 +44,11 @@ class NoteView(context: Context) : FrameLayout(context) {
     label.movementMethod = LinkMovementMethod.getInstance()
     label.setLineSpacing(0f, 1.15f)
     label.textAlignment = TEXT_ALIGNMENT_VIEW_START
+    // Each paragraph runs in the direction of its first letter: the verses a note refers to may be
+    // in another script than the note.
+    label.textDirection = View.TEXT_DIRECTION_FIRST_STRONG
   }
+
 
   private fun dp(value: Int) = (value * density).roundToInt()
 

@@ -14,6 +14,8 @@
 
 The World English Bible's verses keep the edition's notes: Jonah 1:1 and 2:2 each carry a footnote, as marks the reader opens.
 
+`99-TSTnotes.usfm` is a book made up to test the import's notes (`npm test -w bindings/js`): footnotes, an endnote, cross references, a note in a heading, paragraphs and a Hebrew word within a note.
+
 `recordings.json` holds recordings of Al-Fatiha in two voices and of the start of Al-Baqarah, their timings made up: the last counts three words in verse 255, which has fifty.
 
 Changes made by the import: the SBLGNT's apparatus signs are left out. The Hebrew's paragraph signs and the editors' notes are left out, and the two forms of a word written one way and read another are marked. The basmala opening Al-Baqarah stands as a verse of its own, verse 0. The Quran text itself is unchanged.

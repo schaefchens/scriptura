@@ -23,7 +23,8 @@
     "scriptura-import": "import.mjs"
   },
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "node --test test/"
   },
   "files": [
     "src",
