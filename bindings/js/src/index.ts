@@ -194,6 +194,13 @@ export type ReaderOptions = {
    * rest of its look left on them. What it erases is found as the words selected or the style change, not as the marks change after.
    */
   selectionStyle?: { highlight?: string; underline?: string; erases?: boolean };
+  /**
+   * How a long press and a drag select: word by word ('word', the default), or by whole verses ('verse'), for an app that deals in
+   * verses, as cards of them – a long press on any word selects its verse, a drag takes in the verses it passes, and `select()` takes
+   * in the whole verses of what it is given. On the web the page's own selection, by a quick drag or a double click, takes in its
+   * verses as the pointer lifts.
+   */
+  selectBy?: 'word' | 'verse';
   /** Chapters in running text open with a drop cap: the first letter of the text set large over two lines, the first verse without its number. On by default. */
   dropCaps?: boolean;
   /**

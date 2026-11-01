@@ -75,6 +75,7 @@ function App() {
   const [dropCaps, setDropCaps] = useState<'off' | 'on' | 'ornate'>('on');
   // The page's own notes: a sign where each mark ends, or shown in full there.
   const [markNotes, setMarkNotes] = useState<'sign' | 'inline'>('sign');
+  const [selectBy, setSelectBy] = useState<'word' | 'verse'>('word');
   // A cross reference to a book the library doesn't hold; and a verse to jump to once its book shows.
   const [missing, setMissing] = useState<string>();
   const pending = useRef<WordPosition>(undefined);
@@ -256,6 +257,7 @@ function App() {
           {{ off: 'No drop caps', on: 'Drop caps', ornate: 'Ornate drop caps' }[dropCaps]}
         </button>
         <button onClick={() => setMarkNotes(markNotes === 'sign' ? 'inline' : 'sign')}>{markNotes === 'sign' ? 'My notes as signs' : 'My notes in full'}</button>
+        <button onClick={() => setSelectBy(selectBy === 'word' ? 'verse' : 'word')}>{selectBy === 'word' ? 'Selecting words' : 'Selecting verses'}</button>
         {editions.map(({ id, title, work }) => (
           <label key={id}>
             <input type="checkbox" checked={along.includes(id)} onChange={() => toggle(id)} /> {passages.length > 1 ? `${title} · ${work}` : work}
@@ -314,6 +316,7 @@ function App() {
         parallel={parallel}
         notes={notes}
         markNotes={markNotes}
+        selectBy={selectBy}
         // While the pen is up, the words being selected look as they will marked.
         selectionStyle={penLook}
         dropCaps={dropCaps !== 'off'}

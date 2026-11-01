@@ -109,6 +109,7 @@ const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVo
   notes: 'marks',
   dropCaps: true,
   markNotes: 'sign',
+  selectBy: 'word',
   voices: {},
   speakAlong: false,
   speechRate: 1,
@@ -904,18 +905,29 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     return `background-color: ${fill ?? `color-mix(in srgb, ${line} 18%, transparent)`};${line ? ` text-decoration: underline ${line} 2px;` : ''}`;
   }
 
-  /** The words at a point in the page: the word there, or the words of the verse whose number is there. */
+  /**
+   * The words at a point in the page: the word there – selecting verses, its verse – or the words of
+   * the verse whose number is there.
+   */
   function wordsAt(x: number, y: number): [number, number] | undefined {
     const index = wordAt(x, y);
-    if (index !== undefined) return [index, index];
+    if (index !== undefined) return options.selectBy === 'verse' ? verseOf(index) : [index, index];
     const caret = caretAt(x, y);
     const block = caret ? pieces.findIndex((blockPieces) => blockPieces.some((piece) => piece.node === caret.node)) : -1;
     if (!caret || block < 0) return undefined;
     const offset = pieces[block].find((piece) => piece.node === caret.node)!.start + caret.offset;
     const verse = blocks[block].verses.find((range) => range.start <= offset && offset < range.end);
     if (!verse) return undefined;
-    const inVerse = words.flatMap((word, at) => (word.block === block && word.place.chapter === verse.chapter && word.place.verse === verse.verse ? [at] : []));
-    return inVerse.length > 0 ? [inVerse[0], inVerse[inVerse.length - 1]] : undefined;
+    const first = words.findIndex((word) => word.block === block && word.place.chapter === verse.chapter && word.place.verse === verse.verse);
+    return first < 0 ? undefined : verseOf(first);
+  }
+
+  /** The words of a word's verse, from its first to its last, in however many paragraphs they stand. */
+  function verseOf(index: number): [number, number] {
+    let [first, last] = [index, index];
+    while (first > 0 && sameVerse(words[first - 1].place, words[index].place)) first--;
+    while (last < words.length - 1 && sameVerse(words[last + 1].place, words[index].place)) last++;
+    return [first, last];
   }
 
   /** A press held still: the word there is selected, or the verse whose number it is, and the page's own selection is held off. */
@@ -930,11 +942,15 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     drawPressed();
   }
 
-  /** The pointer, moving on, takes the selection to the word under it, in the book it started in; between words, it stays. */
+  /**
+   * The pointer, moving on, takes the selection to the word under it – selecting verses, to its verse,
+   * or the verse whose number it is on – in the book it started in; between words, it stays.
+   */
   function extendPress() {
     if (!pressed) return;
     const index = wordAt(pressed.x, pressed.y);
-    if (index !== undefined && sameBook(words[index].place, words[pressed.anchor[0]].place)) pressed.focus = [index, index];
+    const at = options.selectBy === 'verse' ? wordsAt(pressed.x, pressed.y) : index === undefined ? undefined : ([index, index] as [number, number]);
+    if (at && sameBook(words[at[0]].place, words[pressed.anchor[0]].place)) pressed.focus = at;
     drawPressed();
   }
 
@@ -1136,7 +1152,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     const selected = wordsSelected();
     if (!selected) return null;
     const { passage, book } = words[selected.first].place;
-    return { passage, book, from: endOf(selected.first, true), to: endOf(selected.last, false) };
+    const found = { passage, book, from: endOf(selected.first, true), to: endOf(selected.last, false) };
+    return options.selectBy === 'verse' ? wholeVerses(found) : found;
   }
 
   /** The first and the last word the page's selection covers in the reader, both of the first's passage and book. */
@@ -1224,7 +1241,10 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     options.onSelectionChange?.(selection);
   }
 
-  /** Selects words or verses as a drag would – from a word, or a verse's first, to a word, or a verse's last – or nothing. */
+  /**
+   * Selects words or verses as a drag would – from a word, or a verse's first, to a word, or a verse's
+   * last; selecting verses, the whole verses – or nothing.
+   */
   function setSelection(selection: SelectedPlaces | null) {
     const selected = document.getSelection();
     if (!selected) return;
@@ -1232,7 +1252,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       if (selectionOfPage()) selected.removeAllRanges();
       return;
     }
-    const span = wordsOf(selection);
+    const span = wordsOf(options.selectBy === 'verse' ? wholeVerses(selection) : selection);
     if (!span) return;
     const [first, last] = span;
     const range = document.createRange();
@@ -1390,6 +1410,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     down = undefined;
     frameLater();
     if (pressedHere) return;
+    // Selecting verses, the page's own selection – a quick drag, a double click – takes in its verses, once the browser is done with it.
+    if (options.selectBy === 'verse') setTimeout(() => setSelection(selectionOfPage()));
     const target = event.target instanceof Element ? event.target : null;
     if (opened && target && opened.note.contains(target)) return;
     if (Math.hypot(dx, dy) < 8 && held < LONG_PRESS && selected) return closeNote();
@@ -1540,6 +1562,14 @@ function compare(place: Place, end: MarkEnd, last: boolean) {
   const ends = [end.chapter, end.verse, end.word ?? (last ? Infinity : 0)];
   return [place.chapter, place.verse, place.index].map((value, at) => Math.sign(value - ends[at])).find((sign) => sign !== 0) ?? 0;
 }
+
+/** A selection's whole verses: from its first verse's first word to its last verse's last. */
+const wholeVerses = ({ passage, book, from, to }: SelectedPlaces): SelectedPlaces => ({
+  passage,
+  book,
+  from: { chapter: from.chapter, verse: from.verse },
+  to: { chapter: to.chapter, verse: to.verse },
+});
 
 /** A mark's color: the palette's, by the name the mark gives – or the name itself, as a color. */
 const colorOf = (name: string, named: Record<string, string> | undefined) => named?.[name] ?? name;

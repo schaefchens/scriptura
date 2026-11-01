@@ -49,6 +49,9 @@ class ReaderView: ExpoView {
   var selectionStyle: SelectionStyle? {
     didSet { applyMarks() }
   }
+  /// How a long press and a drag select: "word", word by word, or "verse", by whole verses – and so
+  /// does JS's select().
+  var selectBy = "word"
   var dropCaps = true
   var dropCapFont: String?
   /// A voice per language for reading aloud, by identifier; otherwise the device's for it.
@@ -540,13 +543,23 @@ class ReaderView: ExpoView {
     return low - 1
   }
 
-  /// The words a finger is on: the word under it, or the verse whose number it is on.
+  /// The words a finger is on: the word under it – selecting verses, its verse – or the verse whose
+  /// number it is on.
   private func wordsUnder(_ offset: Int?) -> ClosedRange<Int>? {
     guard let offset else { return nil }
     if let index = word(atCharacter: offset) {
-      return index...index
+      return selectBy == "verse" ? wholeVerses(index...index) : index...index
     }
-    return verses.first { NSLocationInRange(offset, $0.range) }?.words
+    return verses.first { NSLocationInRange(offset, $0.range) }?.words.map(wholeVerses)
+  }
+
+  /// The words of the verses of a span's first and last words: from the first word of the one to the
+  /// last of the other, in however many paragraphs they stand.
+  private func wholeVerses(_ span: ClosedRange<Int>) -> ClosedRange<Int> {
+    var (first, last) = (span.lowerBound, span.upperBound)
+    while first > 0, words[first - 1].isInVerse(of: words[span.lowerBound]) { first -= 1 }
+    while last < words.count - 1, words[last + 1].isInVerse(of: words[span.upperBound]) { last += 1 }
+    return first...last
   }
 
   /// A long press starts a selection: the word under the finger, or the verse whose number it is on.
@@ -561,10 +574,14 @@ class ReaderView: ExpoView {
 
   /// The finger, still down, extends the selection to the word under it, in either direction –
   /// within the passage and book it started in. Over a verse's number, or beside the words, it stays
-  /// as it was: only a long press selects a verse by its number.
+  /// as it was: only a long press selects a verse by its number. Selecting verses, it takes in the
+  /// verse of the word, or the verse whose number it is on.
   private func extendSelection(toCharacter offset: Int?) {
-    guard let anchor = anchorWords, let offset, let focus = word(atCharacter: offset) else { return }
-    setSelected(selection(min(anchor.lowerBound, focus)...max(anchor.upperBound, focus), of: anchor.lowerBound), report: false)
+    guard let anchor = anchorWords, let offset else { return }
+    let focus = selectBy == "verse" ? wordsUnder(offset) : word(atCharacter: offset).map { $0...$0 }
+    guard let focus else { return }
+    let span = min(anchor.lowerBound, focus.lowerBound)...max(anchor.upperBound, focus.upperBound)
+    setSelected(selection(span, of: anchor.lowerBound), report: false)
   }
 
   /// The finger lifts: JS hears what is selected, and where it shows.
@@ -576,7 +593,8 @@ class ReaderView: ExpoView {
   }
 
   /// Selects words or verses as JS asks – from a word, or a verse's first, to a word, or a verse's
-  /// last – and brings them into sight, unless some of them are; or nothing.
+  /// last; selecting verses, the whole verses – and brings them into sight, unless some of them are;
+  /// or nothing.
   func select(_ selection: SelectionRecord?) {
     guard let selection else { return setSelected(nil) }
     let inBook = { (word: ReaderWord) in word.place.passage == UInt32(selection.passage) && word.place.book == selection.book }
@@ -586,17 +604,17 @@ class ReaderView: ExpoView {
     guard let first = words.firstIndex(where: { inBook($0) && key($0) >= from }),
           let last = words.lastIndex(where: { inBook($0) && key($0) <= to }), first <= last
     else { return setSelected(nil) }
-    let chosen = Selected(words: first...last, passage: UInt32(selection.passage), book: selection.book)
+    let chosen = Selected(words: selectBy == "verse" ? wholeVerses(first...last) : first...last, passage: UInt32(selection.passage), book: selection.book)
     setSelected(chosen)
     if !textRanges(of: chosen).contains(where: pages.isInSight(range:)) {
-      pages.show(characterAt: words[first].range.location)
+      pages.show(characterAt: words[chosen.words.lowerBound].range.location)
     }
   }
 
   /// VoiceOver's actions on a verse: selecting it, and extending the selection to it – within the
   /// book the selection is in, the books read along between left out.
   fileprivate func selectionActions(for readable: Readable) -> [UIAccessibilityCustomAction] {
-    guard let verseWords = verses.first(where: { $0.range == readable.range })?.words else { return [] }
+    guard let verseWords = verses.first(where: { $0.range == readable.range })?.words.map(wholeVerses) else { return [] }
     return [
       UIAccessibilityCustomAction(name: "Select verse") { [weak self] _ in
         guard let self else { return false }

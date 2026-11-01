@@ -62,6 +62,7 @@ export default function App() {
   const [dropCaps, setDropCaps] = useState<'off' | 'on' | 'ornate'>('on');
   // The app's own notes: a sign where each mark ends, or shown in full there.
   const [markNotes, setMarkNotes] = useState<'sign' | 'inline'>('sign');
+  const [selectBy, setSelectBy] = useState<'word' | 'verse'>('word');
   // A cross reference to a book the library doesn't hold; and a verse to jump to once its book shows.
   const [missing, setMissing] = useState<string>();
   const pending = useRef<WordPosition>(undefined);
@@ -276,6 +277,7 @@ export default function App() {
           {button({ marks: 'Notes as marks', inline: 'Notes inline', none: 'No notes' }[notes], () => setNotes({ marks: 'inline', inline: 'none', none: 'marks' }[notes] as typeof notes))}
           {button({ off: 'No drop caps', on: 'Drop caps', ornate: 'Ornate drop caps' }[dropCaps], () => setDropCaps({ off: 'on', on: 'ornate', ornate: 'off' }[dropCaps] as typeof dropCaps))}
           {button(markNotes === 'sign' ? 'My notes as signs' : 'My notes in full', () => setMarkNotes(markNotes === 'sign' ? 'inline' : 'sign'))}
+          {button(selectBy === 'word' ? 'Selecting words' : 'Selecting verses', () => setSelectBy(selectBy === 'word' ? 'verse' : 'word'))}
           {editions.map(({ id, work }) => button(work, () => toggle(id), along.includes(id)))}
           {along.length > 0 && button(parallel === 'inline' ? 'Side by side' : 'Inline', () => setParallel(parallel === 'inline' ? 'columns' : 'inline'))}
           {along.length > 0 && button('Speak along', () => setSpeakAlong(!speakAlong), speakAlong)}
@@ -315,6 +317,7 @@ export default function App() {
           parallel={parallel}
           notes={notes}
           markNotes={markNotes}
+          selectBy={selectBy}
           // While the pen is up, the words being selected look as they will marked.
           selectionStyle={penLook}
           dropCaps={dropCaps !== 'off'}

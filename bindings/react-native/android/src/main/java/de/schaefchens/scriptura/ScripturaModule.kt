@@ -237,6 +237,9 @@ class ScripturaModule : Module() {
       Prop("markNotes") { view: ReaderView, markNotes: String? ->
         view.markNotes = markNotes ?: "sign"
       }
+      Prop("selectBy") { view: ReaderView, selectBy: String? ->
+        view.selectBy = selectBy ?: "word"
+      }
       Prop("dropCapFont") { view: ReaderView, dropCapFont: String? ->
         view.dropCapFont = dropCapFont
       }

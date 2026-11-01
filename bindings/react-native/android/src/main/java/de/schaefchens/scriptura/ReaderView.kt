@@ -92,6 +92,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
       applyMarks()
     }
 
+  /** How a long press and a drag select: "word", word by word, or "verse", by whole verses – and so does JS's select(). */
+  var selectBy = "word"
+
   /** A font family for the drop cap's letter, such as one of ornamental initials; letters it lacks are set in the text's font. */
   var dropCapFont: String? = null
 
@@ -857,9 +860,20 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   /** Which of two places comes first – chapter, verse and word: before, the same or after. */
   private fun order(a: List<Long>, b: List<Long>) = a.zip(b).map { (x, y) -> x.compareTo(y) }.firstOrNull { it != 0 } ?: 0
 
+  /** The words a finger is on: the word there – selecting verses, its verse – or the verse whose number it is on. */
+  private fun wordsUnder(offset: Int): IntRange? =
+    wordAt(offset)?.let { if (selectBy == "verse") wholeVerses(it..it) else it..it } ?: verseAt(offset)?.words?.let(::wholeVerses)
+
+  /** The words of the verses of a span's first and last words: from the first word of the one to the last of the other, in however many paragraphs they stand. */
+  private fun wholeVerses(span: IntRange): IntRange {
+    var last = span.last
+    while (last < words.size - 1 && words[last + 1].isInVerseOf(words[span.last])) last++
+    return verseStart(span.first)..last
+  }
+
   /** A long press starts a selection: the word there, or the verse whose number it is on. The word marked, and reading aloud, stay as they are. */
   private fun beginSelection(offset: Int?) {
-    val anchor = offset?.let { wordAt(it)?.let { word -> word..word } ?: verseAt(it)?.words }
+    val anchor = offset?.let(::wordsUnder)
     anchorWords = anchor
     if (anchor == null) return
     closeNote()
@@ -870,14 +884,15 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   /**
    * The finger, still down, takes the selection on to the word under it, in either direction: the words
    * of the book it started in, from the first to the last of them between – of a book read along, those
-   * between are left out. Between words, it stays.
+   * between are left out. Between words, it stays. Selecting verses, it takes in the verse of the word,
+   * or the verse whose number it is on.
    */
   private fun extendSelection(offset: Int?) {
     val anchor = anchorWords ?: return
-    val focus = offset?.let(::wordAt) ?: return
+    val focus = offset?.let { if (selectBy == "verse") wordsUnder(it) else wordAt(it)?.let { word -> word..word } } ?: return
     val book = words[anchor.first]
-    val first = (minOf(anchor.first, focus)..anchor.first).first { words[it].isInBookOf(book) }
-    val last = (maxOf(anchor.last, focus) downTo anchor.last).first { words[it].isInBookOf(book) }
+    val first = (minOf(anchor.first, focus.first)..anchor.first).first { words[it].isInBookOf(book) }
+    val last = (maxOf(anchor.last, focus.last) downTo anchor.last).first { words[it].isInBookOf(book) }
     setSelected(first..last, report = false)
   }
 
@@ -900,8 +915,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     val first = words.indexOfFirst { inBook(it) && compareWith(it, from) >= 0 }
     val last = words.indexOfLast { inBook(it) && compareWith(it, to) <= 0 }
     if (first < 0 || last < first) return setSelected(null)
-    setSelected(first..last)
-    if (!pages.isAnyInSight(words[first].start, words[last].end)) pages.show(characterAt = words[first].start)
+    val chosen = if (selectBy == "verse") wholeVerses(first..last) else first..last
+    setSelected(chosen)
+    if (!pages.isAnyInSight(words[chosen.first].start, words[chosen.last].end)) pages.show(characterAt = words[chosen.first].start)
   }
 
   /** Where a word stands against an end of a selection – chapter, verse and word – before it, at it or after it. */
@@ -910,7 +926,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
 
   /** TalkBack selects a verse, or takes the selection on to it: from the selection's start, or the verse, to its end. */
   private fun selectVerse(readable: Readable, extend: Boolean) {
-    val verse = verses.firstOrNull { it.start == readable.start }?.words ?: return
+    val verse = verses.firstOrNull { it.start == readable.start }?.words?.let(::wholeVerses) ?: return
     val current = selected
     if (!extend || current == null || !words[current.first].isInBookOf(words[verse.first])) return setSelected(verse)
     setSelected(minOf(current.first, verse.first)..maxOf(current.last, verse.last))
