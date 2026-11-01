@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::reader::words_of;
-use crate::{Block, Book, Library, Notes, Options, Recording, Reference, VerseNumbers, Word};
+use crate::{Block, Book, Library, MarkNotes, Notes, Options, Recording, Reference, VerseNumbers, Word};
 
 /// Where a word stands: in which passage of a request, in which book – the passage's, or one read
 /// along with it – and where in the scripture: its chapter, its verse, and which word of the verse.
@@ -133,6 +133,7 @@ impl Speech {
             companions: companions.to_vec(),
             notes: Notes::None,
             drop_caps: false,
+            mark_notes: MarkNotes::Sign,
         };
         let blocks = library.blocks(references, &options);
         let mut recordings = Recordings { library, voices: recorded, chapters: HashMap::new(), chosen: Vec::new() };
@@ -510,6 +511,7 @@ mod tests {
                 companions: Vec::new(),
                 notes: Notes::Marks,
                 drop_caps: true,
+                mark_notes: MarkNotes::Sign,
             },
         );
         let spoken = all(speech(&[reference("jonah", Some(2), None, None)], &[], false, None), 4000);

@@ -1,4 +1,18 @@
-import type { BookInfo, LaidOut, MarkInfo, MarkTap, MoveStep, ReaderOptions, RecordingInfo, ReferenceTarget, Selection, SpeechChange, Voice, WordPosition } from '@schaefchens/scriptura';
+import type {
+  BookInfo,
+  LaidOut,
+  MarkInfo,
+  MarkTap,
+  MoveStep,
+  ReaderOptions,
+  RecordingInfo,
+  ReferenceTarget,
+  Selection,
+  SelectionFrame,
+  SpeechChange,
+  Voice,
+  WordPosition,
+} from '@schaefchens/scriptura';
 import { requireNativeModule, requireNativeView } from 'expo';
 import type { Ref } from 'react';
 import type { NativeSyntheticEvent, StyleProp, ViewStyle } from 'react-native';
@@ -75,17 +89,24 @@ export type ReaderProps = ReaderOptions & {
   onSelectionChange?: (selection: Selection | null) => void;
   /** A tap on marked words: the marks there, by id, and the word, which the tap reaches as any tap does. A mark's sign opens its note instead. */
   onMarkTap?: (tap: MarkTap) => void;
+  /**
+   * Where the selection shows in the reader, in points from its top left, as it settles – after a drag, a scroll, a page turn or a
+   * change of layout – and none while a finger drags or the reader moves, or where none of it is in sight: for a panel of the app's
+   * own beside it.
+   */
+  onSelectionFrame?: (frame: SelectionFrame | null) => void;
   ref?: Ref<ReaderHandle>;
   style?: StyleProp<ViewStyle>;
 };
 
-type NativeProps = Omit<ReaderProps, 'onWordChange' | 'onLaidOut' | 'onSpeechChange' | 'onReference' | 'onSelectionChange' | 'onMarkTap'> & {
+type NativeProps = Omit<ReaderProps, 'onWordChange' | 'onLaidOut' | 'onSpeechChange' | 'onReference' | 'onSelectionChange' | 'onMarkTap' | 'onSelectionFrame'> & {
   onWordChange?: (event: NativeSyntheticEvent<WordPosition>) => void;
   onLaidOut?: (event: NativeSyntheticEvent<LaidOut>) => void;
   onSpeechChange?: (event: NativeSyntheticEvent<SpeechChange>) => void;
   onReference?: (event: NativeSyntheticEvent<ReferenceTarget>) => void;
   onSelectionChange?: (event: NativeSyntheticEvent<{ selection?: Selection | null }>) => void;
   onMarkTap?: (event: NativeSyntheticEvent<MarkTap>) => void;
+  onSelectionFrame?: (event: NativeSyntheticEvent<{ frame?: SelectionFrame | null }>) => void;
 };
 
 const NativeReader = requireNativeView<NativeProps>('Scriptura');
@@ -94,7 +115,7 @@ const NativeReader = requireNativeView<NativeProps>('Scriptura');
  * Scripture in pages or one endless scroll, laid out with the platform's own text stack: TextKit 2
  * on iOS, Android's text layout. It gets the passages' text itself, from the books added.
  */
-export function Reader({ onWordChange, onLaidOut, onSpeechChange, onReference, onSelectionChange, onMarkTap, ...props }: ReaderProps) {
+export function Reader({ onWordChange, onLaidOut, onSpeechChange, onReference, onSelectionChange, onMarkTap, onSelectionFrame, ...props }: ReaderProps) {
   return (
     <NativeReader
       {...props}
@@ -104,6 +125,7 @@ export function Reader({ onWordChange, onLaidOut, onSpeechChange, onReference, o
       onReference={onReference && (({ nativeEvent }) => onReference(nativeEvent))}
       onSelectionChange={onSelectionChange && (({ nativeEvent }) => onSelectionChange(nativeEvent.selection ?? null))}
       onMarkTap={onMarkTap && (({ nativeEvent }) => onMarkTap(nativeEvent))}
+      onSelectionFrame={onSelectionFrame && (({ nativeEvent }) => onSelectionFrame(nativeEvent.frame ?? null))}
     />
   );
 }

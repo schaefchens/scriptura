@@ -63,6 +63,13 @@ class MarkEndRecord : Record {
   @Field val word: Int? = null
 }
 
+/** How the selection is drawn, as JS may give it: a mark's look – a highlight and an underline, by the names or colors a mark gives – or none, for the selection's own; and whether a pen erases. */
+class SelectionStyleRecord : Record {
+  @Field val highlight: String? = null
+  @Field val underline: String? = null
+  @Field val erases: Boolean = false
+}
+
 /** Words or verses to select, as JS passes them: where they stand, never their text. */
 class SelectionRecord : Record {
   @Field val passage: Int = 0
@@ -180,7 +187,7 @@ class ScripturaModule : Module() {
     }
 
     View(ReaderView::class) {
-      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap")
+      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap", "onSelectionFrame")
 
       Prop("passages") { view: ReaderView, passages: List<PassageRecord>? ->
         view.passages = passages ?: emptyList()
@@ -223,6 +230,12 @@ class ScripturaModule : Module() {
       }
       Prop("dropCaps") { view: ReaderView, dropCaps: Boolean? ->
         view.dropCaps = dropCaps ?: true
+      }
+      Prop("selectionStyle") { view: ReaderView, style: SelectionStyleRecord? ->
+        view.selectionStyle = style?.let { ReaderView.SelectionStyle(it.highlight, it.underline, it.erases) }
+      }
+      Prop("markNotes") { view: ReaderView, markNotes: String? ->
+        view.markNotes = markNotes ?: "sign"
       }
       Prop("dropCapFont") { view: ReaderView, dropCapFont: String? ->
         view.dropCapFont = dropCapFont

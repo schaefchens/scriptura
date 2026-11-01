@@ -15,7 +15,9 @@ mod speech;
 use serde::de::Error as _;
 
 pub use model::{Book, Chapter, Mark, MarkEnd, Note, NoteRun, RecordedVerse, Recording, Target, Verse, VerseNumbers};
-pub use reader::{Block, DropCap, NoteMark, PlacedMark, Segment, VerseRange, WORD_DEFINITION, Word};
+pub use reader::{
+    Block, DropCap, MARK_SIGN_KIND, NoteMark, ParagraphMarks, PlacedMark, Segment, VerseRange, WORD_DEFINITION, Word,
+};
 pub use speech::{Part, Place, Speech, Take, TimedWord, Utterance};
 
 /// A whole book, one chapter of it, or a verse range in that chapter.
@@ -41,6 +43,8 @@ pub struct Options {
     /// Chapters in running text open with a drop cap: the first letter of the text set large, the
     /// first verse without its number.
     pub drop_caps: bool,
+    /// How the notes of the host's marks show in the text.
+    pub mark_notes: MarkNotes,
 }
 
 /// How many verses a note shows of the ones it refers to, and how long they may be, in UTF-16 units.
@@ -70,6 +74,15 @@ pub enum Notes {
     None,
     #[default]
     Marks,
+    Inline,
+}
+
+/// How the notes of a host's marks show in the text: as a sign where each mark ends, which opens its
+/// note; or in full there, in brackets after the sign, as an edition's note shown in full.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkNotes {
+    #[default]
+    Sign,
     Inline,
 }
 
@@ -188,7 +201,7 @@ impl Library {
     /// verse per line. With companions, other editions of a passage's book are read along with it:
     /// see [`Block::row`]. Passages of books the library doesn't hold give nothing. A note that
     /// refers to verses the library holds shows them: see [`Library::preview`]. The host's marks
-    /// stand over their words: see [`PlacedMark`].
+    /// stand over their words, and the signs of their notes in the text: see [`PlacedMark`].
     pub fn blocks(&self, references: &[Reference], options: &Options) -> Vec<Block> {
         let companions: Vec<&Book> = options.companions.iter().filter_map(|id| self.book(id)).collect();
         let mut rows = 0..;
@@ -196,26 +209,25 @@ impl Library {
         for (passage, reference) in (0..).zip(references) {
             blocks.extend(reader::blocks(self, reference, passage, options, &companions, &mut rows));
         }
-        reader::place_marks(&mut blocks, &self.marks);
+        reader::place_marks(&mut blocks, &self.marks, options.mark_notes);
         for block in &mut blocks {
             for note in &mut block.notes {
                 let previews = self.previews(&block.book, &note.runs);
                 note.runs.extend(previews);
-            }
-            for mark in &mut block.marks {
-                if let Some(runs) = &mut mark.note {
-                    let previews = self.previews(&block.book, runs);
-                    runs.extend(previews);
-                }
             }
         }
         blocks
     }
 
     /// The marks in the passages' paragraphs, as [`Library::blocks`] places them, paragraph by
-    /// paragraph: for a reader to draw them anew as they change, its layout kept.
-    pub fn marks_in(&self, references: &[Reference], options: &Options) -> Vec<Vec<PlacedMark>> {
-        self.blocks(references, options).into_iter().map(|block| block.marks).collect()
+    /// paragraph, and the signs of their notes: for a reader to draw them anew as they change – its
+    /// layout kept, unless the signs changed, which stand in the text.
+    pub fn marks_in(&self, references: &[Reference], options: &Options) -> Vec<ParagraphMarks> {
+        let paragraph = |block: Block| ParagraphMarks {
+            signs: block.notes.into_iter().filter(|note| note.kind == MARK_SIGN_KIND).collect(),
+            marks: block.marks,
+        };
+        self.blocks(references, options).into_iter().map(paragraph).collect()
     }
 
     /// The book that verses a note refers to are read in: of the code the note names, the edition
@@ -458,6 +470,7 @@ mod tests {
             companions: Vec::new(),
             notes: Notes::Marks,
             drop_caps: true,
+            mark_notes: MarkNotes::Sign,
         };
         assert!(Library::new().blocks(&[reference], &options).is_empty());
     }

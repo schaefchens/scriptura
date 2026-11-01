@@ -38,6 +38,15 @@ export type MarkEnd = { chapter: number; verse: number; word?: number };
  */
 export type Selection = { passage: number; book: string; from: MarkEnd; to: MarkEnd };
 
+/** A rectangle in a reader, from its top left, in points – in pixels on the web: x, y, width and height. */
+export type Frame = [x: number, y: number, width: number, height: number];
+
+/**
+ * Where a selection shows in a reader: the part of its first line in sight, and of its last – the same where it takes one line. For
+ * an app to set a panel of its own beside it.
+ */
+export type SelectionFrame = { first: Frame; last: Frame };
+
 /** A tap on marked words: the marks there, by id, and the word tapped, which the tap reaches as any tap does. */
 export type MarkTap = WordPosition & { ids: string[] };
 
@@ -61,6 +70,8 @@ export type Mark = {
   /** Its note, in runs as an edition's notes have them. A sign where the mark ends opens it. */
   note?: NoteRun[];
 };
+
+export { cutOut, marksTouching, spanOf, type Stretch, within } from './marks';
 
 /** A mark as a list shows it: which words of which book it marks and how, and whether it has a note – not the note itself. */
 export type MarkInfo = {
@@ -171,6 +182,18 @@ export type ReaderOptions = {
    * mark opens the note there; a cross reference's verses it jumps to, or reports (onReference).
    */
   notes?: 'marks' | 'inline' | 'none';
+  /**
+   * The notes of the app's marks: a sign, ✎, in the text where each mark ends, which opens the note ('sign', the default); or the
+   * note shown in full there, in brackets after its sign, as an edition's note in full ('inline'), which still opens it.
+   */
+  markNotes?: 'sign' | 'inline';
+  /**
+   * How the selection is drawn: in the selection's color (none given, the default); or, given a mark's look – by the names or colors
+   * a mark gives – as the words would look marked so: for a pen that marks as it goes. A pen that also erases (`erases`) takes its
+   * look off words that all lie in one mark of that look, by place: those show as they would then – the mark cut around them, the
+   * rest of its look left on them. What it erases is found as the words selected or the style change, not as the marks change after.
+   */
+  selectionStyle?: { highlight?: string; underline?: string; erases?: boolean };
   /** Chapters in running text open with a drop cap: the first letter of the text set large over two lines, the first verse without its number. On by default. */
   dropCaps?: boolean;
   /**

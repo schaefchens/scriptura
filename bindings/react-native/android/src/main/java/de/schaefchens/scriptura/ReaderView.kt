@@ -31,6 +31,8 @@ import kotlin.math.ceil
 import kotlin.math.roundToInt
 import de.schaefchens.scriptura.core.Block
 import de.schaefchens.scriptura.core.DropCap
+import de.schaefchens.scriptura.core.MarkEnd
+import de.schaefchens.scriptura.core.MarkNotes
 import de.schaefchens.scriptura.core.NoteMark
 import de.schaefchens.scriptura.core.NoteRun
 import de.schaefchens.scriptura.core.Notes
@@ -41,6 +43,7 @@ import de.schaefchens.scriptura.core.books
 import de.schaefchens.scriptura.core.VerseRange
 import de.schaefchens.scriptura.core.Word
 import de.schaefchens.scriptura.core.WordPosition
+import de.schaefchens.scriptura.core.marks as libraryMarks
 import de.schaefchens.scriptura.core.readerBlocks
 import de.schaefchens.scriptura.core.readerMarks
 import java.util.WeakHashMap
@@ -52,8 +55,9 @@ import java.util.WeakHashMap
  * word or jumped to; JS learns only where the current word stands, never its text. It reads aloud –
  * chapters with recordings from them, the rest with the device's voices – from the word it is at, and
  * marks each word as it is said, keeping it in sight – unless it was scrolled away from it by hand.
- * The host's marks are drawn over their words, their notes opened at their signs; words or verses are
- * selected by a long press and a drag, or by TalkBack, and reported by where they stand.
+ * The host's marks are drawn over their words, the signs of their notes standing in the text as notes'
+ * marks; words or verses are selected by a long press and a drag, or by TalkBack, and reported by where
+ * they stand.
  */
 class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
   // Without it, React Native ignores the pages' requests for a new layout.
@@ -77,6 +81,16 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   /** The books' notes in the text: "marks", each opening where it stands, "inline", shown in full there, or "none"; and chapters opening with a drop cap. */
   var notes = "marks"
   var dropCaps = true
+
+  /** The notes of the host's marks in the text: "sign", a sign where each mark ends, which opens the note, or "inline", the note shown in full there. */
+  var markNotes = "sign"
+
+  /** How the selection is drawn: as a mark of this look would be – a pen's, marking as it goes – or, none given, in the selection's own color. See [SelectionStyle]. */
+  var selectionStyle: SelectionStyle? = null
+    set(value) {
+      field = value
+      applyMarks()
+    }
 
   /** A font family for the drop cap's letter, such as one of ornamental initials; letters it lacks are set in the text's font. */
   var dropCapFont: String? = null
@@ -106,6 +120,15 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   /** The words or verses selected, or none, as the selection goes; and a tap on marked words. */
   private val onSelectionChange by EventDispatcher()
   private val onMarkTap by EventDispatcher()
+
+  /**
+   * Where the selection shows, as it settles, or none; and as JS last heard of it, whether the text
+   * moves meanwhile, and whether it is being laid out anew, its words not yet those selected.
+   */
+  private val onSelectionFrame by EventDispatcher()
+  private var reportedFrame = ""
+  private var moving = false
+  private var rendering = false
   private var renderStarted = 0L
   private var firstShown = 0.0
 
@@ -151,9 +174,8 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   private var textColor = Color.BLACK
   private var backgroundColor = Color.WHITE
 
-  /** The host's marks in the text, and the signs of their notes, which open them as a note's mark does. */
+  /** The host's marks in the text; the signs of their notes are among the notes' marks. */
   private var placedMarks: List<ReaderMark> = emptyList()
-  private var signs: List<ReaderNote> = emptyList()
 
   /** The marks' colors by the names they give: the palette's, or else the light one's. ARGB. */
   private var markFills = MARK_FILLS
@@ -175,10 +197,12 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   private var anchorWords: IntRange? = null
   private var reportedSelection = ""
 
+  /** What a pen that erases takes its look off: the mark of its look the words selected all lie in – and what it was found for, the words and the style. */
+  private var erasing: Pair<String, String?> = "" to null
+
   init {
     pages.onTap = ::selectWord
     pages.onMarkTap = { index -> marks.getOrNull(index)?.let(::openNote) }
-    pages.onSignTap = ::tapSign
     pages.onSelectStart = ::beginSelection
     pages.onSelectMove = ::extendSelection
     pages.onSelectEnd = ::endSelection
@@ -195,6 +219,14 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     readAloud.onWord = ::reached
     readAloud.onChange = ::speechChanged
     pages.onScrollByHand = ::scrolledByHand
+    pages.onMove = {
+      moving = true
+      reportFrame()
+    }
+    pages.onRest = {
+      moving = false
+      reportFrame()
+    }
     addView(pages, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
     // Over the pages, laid out where its mark is; it takes no room in the row.
     addView(noteView, LayoutParams(0, 0))
@@ -225,6 +257,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   }
 
   fun render() {
+    rendering = true
     renderStarted = System.nanoTime()
     reportPending = true
     firstShown = 0.0
@@ -254,9 +287,10 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     val roleColors = colors.roles.mapValues { ColorCompat.toArgb(it.value) }
     this.roleColors = roleColors
     val shownNotes = when (notes) { "none" -> Notes.NONE; "inline" -> Notes.INLINE; else -> Notes.MARKS }
-    val request = BlocksRequest(references, fontSize, versePerLine, companions, shownNotes, dropCaps)
+    val shownMarkNotes = if (markNotes == "inline") MarkNotes.INLINE else MarkNotes.SIGN
+    val request = BlocksRequest(references, fontSize, versePerLine, companions, shownNotes, dropCaps, shownMarkNotes)
     shownRequest = request
-    val blocks = with(request) { readerBlocks(references, fontSize, versePerLine, companions, notes, dropCaps) }
+    val blocks = with(request) { readerBlocks(references, fontSize, versePerLine, companions, notes, dropCaps, markNotes) }
     val paragraphs = blocks.map { Paragraph(it, roleColors, fontSize(it)) }
     shownParagraphs = paragraphs
     // The passages read along with other books, in rows.
@@ -346,7 +380,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     val anchor = anchorWord?.let { words[it].start } ?: 0
     pages.readables = namingChapters(readables)
     pages.marks = marks.mapIndexed { index, note ->
-      Mark(note.start, note.end, note.passage, note.book, note.chapter, note.verse, note.mark, note.kind, note.language, index)
+      Mark(note.start, note.end, note.passage, note.book, note.chapter, note.verse, note.mark, note.kind, note.language, index, note.id)
     }
     val rightToLeft = withWords.isNotEmpty() && withWords.all { it.rightToLeft }
     val sections = if (sideBySide) sectionsOf(paragraphs, paragraphRanges, along) else listOf(Section(0, text.length))
@@ -374,6 +408,8 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     readAs = read
     rateAs = speechRate
     ReadingService.show(context, this, nowPlaying, readAloud.state)
+    rendering = false
+    reportFrame()
   }
 
   private val baseTypeface get() = if (font == "serif") Typeface.SERIF else Typeface.DEFAULT
@@ -539,22 +575,22 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   private fun position(place: WordPlace) =
     WordPosition(place.passage.toUInt(), place.book, place.chapter.toUInt(), place.verse.toUInt(), place.index.toUInt())
 
-  /** Selects the word at a point in this view's pixels, or opens the note whose mark or sign is there, as a tap there would. */
-  fun tap(x: Float, y: Float) {
-    val (atX, atY) = x - pages.left to y - pages.top
-    pages.signAt(atX, atY)?.let { return tapSign(it) }
-    selectWord(pages.offsetAt(atX, atY))
-  }
+  /** Selects the word at a point in this view's pixels, or opens the note whose mark is there, as a tap there would. */
+  fun tap(x: Float, y: Float) = selectWord(pages.offsetAt(x - pages.left, y - pages.top))
 
   /** The headings, verses and notes' marks a screen reader finds in sight, by where they stand, never their text. */
   fun accessibilityElementsInSight() = pages.accessibilityElementsInSight()
 
   /**
-   * A tap at a character: on a note's mark, it opens the note – or closes it, if it is the one open;
-   * elsewhere, it selects the word, and names the host's marks on it to JS. Any tap ends a selection.
+   * A tap at a character: on a note's mark – the sign of a mark's note too – it opens the note, or
+   * closes it, if it is the one open; elsewhere, it selects the word, and names the host's marks on it
+   * to JS. The first tap after a selection only ends it.
    */
   private fun selectWord(offset: Int?) {
-    setSelected(null)
+    if (selected != null) {
+      closeNote()
+      return setSelected(null)
+    }
     if (offset == null) return closeNote()
     val note = marks.firstOrNull { offset in it.start..it.end }
     if (note != null) {
@@ -571,21 +607,14 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     onMarkTap(mapOf("ids" to ids, "passage" to place.passage, "book" to place.book, "chapter" to place.chapter, "verse" to place.verse, "word" to place.index))
   }
 
-  /** A tap on the sign of a mark's note opens the note – or closes it, if it is the one open. Any tap ends a selection. */
-  private fun tapSign(id: String) {
-    setSelected(null)
-    val sign = signs.firstOrNull { it.mark == id } ?: return
-    if (isOpen(sign)) closeNote() else openNote(sign)
-  }
-
   private fun isOpen(note: ReaderNote) = opened?.let { it.kind == note.kind && it.mark == note.mark && it.start == note.start } == true
 
   /**
-   * Opens a note where its mark or sign stands – below its line, or above it – in its paragraph's
-   * font: see [NoteView]. The note open before closes.
+   * Opens a note where its mark stands – below its line, or above it – in its paragraph's font: see
+   * [NoteView]. The note open before closes.
    */
   private fun openNote(note: ReaderNote) {
-    val anchor = (if (note.kind == SIGN_KIND) pages.signRect(note.mark) else null) ?: pages.rectOf(note.start, note.end) ?: return
+    val anchor = pages.rectOf(note.start, note.end) ?: return
     anchor.offset(pages.left, pages.top)
     val paragraph = shownParagraphs.getOrNull(note.paragraph) ?: return
     val typeface = familyOf(paragraph)?.let(::typeface) ?: baseTypeface
@@ -742,43 +771,91 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     placed.map { mark ->
       ReaderMark(
         mark.id, paragraph, start + mark.start.toInt(), start + mark.end.toInt(),
-        mark.highlight?.let { colorOf(it, markFills) }, mark.underline?.let { colorOf(it, markLines) }, mark.note,
+        mark.highlight?.let { colorOf(it, markFills) }, mark.underline?.let { colorOf(it, markLines) },
       )
     }
   }
 
-  /** Draws the host's marks anew as they change: the same paragraphs, their marks asked for again, the layout kept. */
+  /**
+   * Draws the host's marks anew as they change: the same paragraphs, their marks asked for again, the
+   * layout kept – unless the signs of their notes changed, which stand in the text: then it is laid out
+   * anew, the reader staying at its word and the words selected.
+   */
   private fun refreshMarks() {
     val request = shownRequest ?: return
-    val placed = with(request) { readerMarks(references, fontSize, versePerLine, companions, notes, dropCaps) }
-    if (placed.size != shownParagraphs.size) return render()
-    placedMarks = placedMarksOf(placed)
+    val placed = with(request) { readerMarks(references, fontSize, versePerLine, companions, notes, dropCaps, markNotes) }
+    val signsChanged = placed.size != shownParagraphs.size ||
+      placed.zip(shownParagraphs).any { (marks, paragraph) -> marks.signs != paragraph.notes.filter { it.kind == Mark.SIGN_KIND } }
+    if (signsChanged) return render()
+    placedMarks = placedMarksOf(placed.map { it.marks })
     applyMarks()
   }
 
   /**
-   * Draws the host's marks and the selection over the text, and sets the signs of the marks' notes:
-   * each where its mark ends, opening the note as a note's mark does, on the verse of the mark's last
-   * word. A mark's note open closes: it may have changed.
+   * Draws the host's marks and the selection over the text: the selection in its color, or – given a selection style – over the marks
+   * as the words would look marked so; or, as a pen erases them, as they will look: the mark cut around them, what is left of its look
+   * on them.
    */
   private fun applyMarks() {
-    if (opened?.kind == SIGN_KIND) closeNote()
-    val noteColor = roleColors["note"] ?: textColor
-    signs = placedMarks.mapNotNull { mark ->
-      val runs = mark.note ?: return@mapNotNull null
-      val last = wordAt(mark.end - 1) ?: return@mapNotNull null
-      val place = words[last].place
-      val language = shownParagraphs[mark.paragraph].language
-      ReaderNote(place.passage, place.book, language, mark.end - 1, mark.end, mark.paragraph, place.chapter, place.verse, runs, SIGN_KIND, mark.id)
+    val selected = selected
+    val style = selectionStyle
+    val stretches = selected?.let(::stretchesOf).orEmpty()
+    val erased = erasedMark()
+    val marks = placedMarks.flatMap { mark ->
+      val over = stretches.firstOrNull { it.first < mark.end && mark.start < it.last }
+      if (mark.id == erased && over != null && selected != null && style != null) cut(mark, over, selected, style)
+      else listOf(Decoration(mark.start, mark.end, mark.fill, mark.line))
     }
-    pages.decorate(
-      placedMarks.map { mark ->
-        val sign = mark.note?.let { Sign(mark.id, SIGN, noteColor, pixels(shownParagraphs[mark.paragraph].fontSize)) }
-        Decoration(mark.start, mark.end, mark.fill, mark.line, sign)
-      },
-    )
-    drawSelection()
+    if (style == null || (style.highlight == null && style.underline == null)) {
+      pages.decorate(marks)
+      pages.select(stretches)
+      return
+    }
+    val (fill, line) = style.highlight?.let { colorOf(it, markFills) } to style.underline?.let { colorOf(it, markLines) }
+    pages.decorate(if (erased != null) marks else marks + stretches.map { Decoration(it.first, it.last, fill, line) })
+    pages.select(emptyList())
   }
+
+  /** A mark a pen erases words of, as it will be: in its look before and after them, over them – [over], in its paragraph – in what is left of it. */
+  private fun cut(mark: ReaderMark, over: IntRange, selected: IntRange, style: SelectionStyle): List<Decoration> {
+    val book = words[selected.first]
+    val inMark = { word: ReaderWord -> mark.start <= word.start && word.end <= mark.end }
+    val before = (selected.first - 1 downTo 0).firstOrNull { words[it].isInBookOf(book) }?.let(words::get)?.takeIf(inMark)
+    val after = (selected.last + 1 until words.size).firstOrNull { words[it].isInBookOf(book) }?.let(words::get)?.takeIf(inMark)
+    val (fill, line) = mark.fill.takeIf { style.highlight == null } to mark.line.takeIf { style.underline == null }
+    return listOfNotNull(
+      before?.let { Decoration(mark.start, it.end, mark.fill, mark.line) },
+      Decoration(maxOf(mark.start, over.first), minOf(mark.end, over.last), fill, line).takeIf { fill != null || line != null },
+      after?.let { Decoration(it.start, mark.end, mark.fill, mark.line) },
+    )
+  }
+
+  /**
+   * What the selection erases: the mark its words all lie in, of the pen's look, by place, as the pen finds it. Found anew only as the
+   * words or the style change: the pen changes the marks as it lets go, and the selection stays until it is done.
+   */
+  private fun erasedMark(): String? {
+    val selected = selected
+    val style = selectionStyle
+    if (selected == null || style == null || !style.erases || (style.highlight == null && style.underline == null)) {
+      erasing = "" to null
+      return null
+    }
+    val (from, to) = endsOf(selected)
+    val place = words[selected.first].place
+    val key = "${place.passage} ${place.book} $from $to $style"
+    if (key == erasing.first) return erasing.second
+    val endOf = { end: MarkEnd -> End(end.chapter.toInt(), end.verse.toInt(), end.word?.toInt()) }
+    val mark = libraryMarks().firstOrNull { mark ->
+      mark.book == place.book && order(endOf(mark.from).asStart(), from.asStart()) <= 0 && order(to.asEnd(), endOf(mark.to).asEnd()) <= 0 &&
+        (style.highlight == null || mark.highlight == style.highlight) && (style.underline == null || mark.underline == style.underline)
+    }
+    erasing = key to mark?.id
+    return erasing.second
+  }
+
+  /** Which of two places comes first – chapter, verse and word: before, the same or after. */
+  private fun order(a: List<Long>, b: List<Long>) = a.zip(b).map { (x, y) -> x.compareTo(y) }.firstOrNull { it != 0 } ?: 0
 
   /** A long press starts a selection: the word there, or the verse whose number it is on. The word marked, and reading aloud, stay as they are. */
   private fun beginSelection(offset: Int?) {
@@ -787,6 +864,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     if (anchor == null) return
     closeNote()
     setSelected(anchor, report = false)
+    reportFrame()
   }
 
   /**
@@ -812,7 +890,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
 
   /**
    * Selects words or verses as JS asks – from a word, or a verse's first, to a word, or a verse's last –
-   * and brings them into sight; or nothing.
+   * and brings them into sight, if none of them is; or nothing.
    */
   fun selectWords(selection: SelectionRecord?) {
     if (selection == null) return setSelected(null)
@@ -823,7 +901,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     val last = words.indexOfLast { inBook(it) && compareWith(it, to) <= 0 }
     if (first < 0 || last < first) return setSelected(null)
     setSelected(first..last)
-    pages.show(characterAt = words[first].start)
+    if (!pages.isAnyInSight(words[first].start, words[last].end)) pages.show(characterAt = words[first].start)
   }
 
   /** Where a word stands against an end of a selection – chapter, verse and word – before it, at it or after it. */
@@ -845,9 +923,11 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     if (report) reportSelection()
   }
 
-  /** The words selected as stretches of the text: those of their book, a paragraph at a time. */
-  private fun drawSelection() {
-    val selected = selected ?: return pages.select(emptyList())
+  /** Draws the words selected, or none – with the marks, in the selection's look. */
+  private fun drawSelection() = applyMarks()
+
+  /** Words selected as stretches of the text: those of their book, a paragraph at a time, each from its first character to before its last. */
+  private fun stretchesOf(selected: IntRange): List<IntRange> {
     val book = words[selected.first]
     val stretches = mutableListOf<IntRange>()
     var index = selected.first
@@ -861,14 +941,44 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
       stretches += words[start].start..words[index].end
       index++
     }
-    pages.select(stretches)
+    return stretches
+  }
+
+  /**
+   * Tells JS where the selection shows, if that changed: the part of its first line in sight and of its
+   * last, in dp from this view's top left – or none, while a finger chooses words or the text moves,
+   * where none of it is in sight, or with none selected.
+   */
+  private fun reportFrame() {
+    if (rendering) return
+    val selected = selected?.takeIf { anchorWords == null && !moving }
+    val lines = selected?.let { pages.linesInSight(stretchesOf(it)) }
+    val frame = lines?.let { (first, last) -> mapOf("first" to dp(first), "last" to dp(last)) }
+    val key = frame?.toString() ?: ""
+    if (key == reportedFrame) return
+    reportedFrame = key
+    // A frame of null tells JS there is none; the dispatcher's map type allows no null, its converter does.
+    @Suppress("UNCHECKED_CAST")
+    onSelectionFrame(mapOf("frame" to frame) as Map<String, Any>)
+  }
+
+  /** A rectangle in the pages' pixels as JS takes it: x, y, width and height in dp from this view's top left. */
+  private fun dp(rect: android.graphics.RectF): List<Double> {
+    val density = resources.displayMetrics.density
+    return listOf(rect.left + pages.left, rect.top + pages.top, rect.width(), rect.height()).map { (it / density * 10).roundToInt() / 10.0 }
+  }
+
+  /** Tells JS what is selected, and where it shows, if either changed. */
+  private fun reportSelection() {
+    tellSelection()
+    reportFrame()
   }
 
   /**
    * Tells JS what is selected, if that changed: the first and last words as the selection's ends – a
    * whole verse where they are its first or last word – or none.
    */
-  private fun reportSelection() {
+  private fun tellSelection() {
     val selected = selected
     if (selected == null) {
       if (reportedSelection.isEmpty()) return
@@ -878,16 +988,21 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
       onSelectionChange(mapOf("selection" to null) as Map<String, Any>)
       return
     }
-    val (first, last) = words[selected.first] to words[selected.last]
-    val from = mutableMapOf<String, Any>("chapter" to first.place.chapter, "verse" to first.place.verse)
-    val to = mutableMapOf<String, Any>("chapter" to last.place.chapter, "verse" to last.place.verse)
-    if (first.place.index != 0) from["word"] = first.place.index
-    if (words.getOrNull(selected.last + 1)?.isInVerseOf(last) == true) to["word"] = last.place.index
-    val selection = mapOf("passage" to first.place.passage, "book" to first.place.book, "from" to from, "to" to to)
+    val (from, to) = endsOf(selected)
+    val place = words[selected.first].place
+    val selection = mapOf("passage" to place.passage, "book" to place.book, "from" to from.record(), "to" to to.record())
     val key = selection.toString()
     if (key == reportedSelection) return
     reportedSelection = key
     onSelectionChange(mapOf("selection" to selection))
+  }
+
+  /** The ends of the words selected, as JS hears of them: the first and the last word – a whole verse where they are its first or last word. */
+  private fun endsOf(selected: IntRange): Pair<End, End> {
+    val (first, last) = words[selected.first] to words[selected.last]
+    val lastIsWord = words.getOrNull(selected.last + 1)?.isInVerseOf(last) == true
+    return End(first.place.chapter, first.place.verse, first.place.index.takeIf { it != 0 }) to
+      End(last.place.chapter, last.place.verse, last.place.index.takeIf { lastIsWord })
   }
 
   private fun verseStart(index: Int): Int {
@@ -913,9 +1028,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   }
 
   /**
-   * What opens a note in the reader's text: a note's mark, or the sign of a host's mark – where it is,
-   * in which paragraph, on which verse of which book, the note's runs, and what it is: a note's kind
-   * and mark, or [SIGN_KIND] and the host's mark's id.
+   * A note's mark in the reader's text – an edition's, or the sign of a host's mark's note, of the kind
+   * "mark" – where it is, in which paragraph, on which verse of which book, the note's runs, its kind
+   * and mark, and for a sign, the host's mark's id.
    */
   private class ReaderNote(
     val passage: Int,
@@ -929,15 +1044,16 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     val runs: List<NoteRun>,
     val kind: String,
     val mark: String,
+    val id: String?,
   ) {
     constructor(passage: Int, book: String, language: String, note: NoteMark, textStart: Int, paragraph: Int) : this(
       passage, book, language, textStart + note.start.toInt(), textStart + note.end.toInt(), paragraph,
-      note.chapter.toInt(), note.verse.toInt(), note.runs, note.kind, note.mark,
+      note.chapter.toInt(), note.verse.toInt(), note.runs, note.kind, note.mark, note.id,
     )
   }
 
-  /** A host's mark in the reader's text: its words, in which paragraph, how it is drawn – ARGB – and its note, where it ends. */
-  private class ReaderMark(val id: String, val paragraph: Int, val start: Int, val end: Int, val fill: Int?, val line: Int?, val note: List<NoteRun>?)
+  /** A host's mark in the reader's text: its words, in which paragraph, and how it is drawn – ARGB. */
+  private class ReaderMark(val id: String, val paragraph: Int, val start: Int, val end: Int, val fill: Int?, val line: Int?)
 
   /** A verse of the reader's text: where it is, its number included, and its words – none, for a verse without. */
   private class ReaderVerse(val start: Int, val end: Int, val words: IntRange?)
@@ -950,10 +1066,30 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     val companions: List<String>,
     val notes: Notes,
     val dropCaps: Boolean,
+    val markNotes: MarkNotes,
   )
 
   /** Where a word stands: in which passage, in which book – the passage's, or one read along with it – and where in the scripture. */
   data class WordPlace(val passage: Int, val book: String, val chapter: Int, val verse: Int, val index: Int)
+
+  /** An end of words selected or marked: a word, or – with none – a whole verse. */
+  private data class End(val chapter: Int, val verse: Int, val word: Int?) {
+    /** Where words from it start: a whole verse before its first word. */
+    fun asStart() = listOf(chapter.toLong(), verse.toLong(), word?.toLong() ?: -1L)
+
+    /** Where words to it end: a whole verse after its last word. */
+    fun asEnd() = listOf(chapter.toLong(), verse.toLong(), word?.toLong() ?: Long.MAX_VALUE)
+
+    /** As JS hears of it. */
+    fun record() = listOfNotNull("chapter" to chapter, "verse" to verse, word?.let { "word" to it }).toMap()
+  }
+
+  /**
+   * How the selection is drawn, given a mark's look – a highlight and an underline, by the names or colors a mark gives: as words marked
+   * so would look, for a pen that marks as it goes. A pen that erases too takes its look off words that all lie in one mark of it, by
+   * place: those look as they will then.
+   */
+  data class SelectionStyle(val highlight: String?, val underline: String?, val erases: Boolean)
 
   /** A paragraph as the core made it, sized and colored for the reader. Colors are ARGB. */
   private class Paragraph(
@@ -1103,10 +1239,6 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     private val MARK_FILLS = mapOf("yellow" to 0xFFFFEDB6.toInt(), "green" to 0xFFB9EABB.toInt(), "blue" to 0xFFB8DFFF.toInt(), "pink" to 0xFFFFD4E2.toInt())
     private val MARK_LINES = mapOf("yellow" to 0xFFF9A825.toInt(), "green" to 0xFF2E7D32.toInt(), "blue" to 0xFF1565C0.toInt(), "pink" to 0xFFAD1457.toInt())
     private const val SELECTION = 0xFF64B5F6.toInt()
-
-    /** The sign of a mark's note: a pencil, or where the system's fonts have none, a dagger. */
-    private val SIGN by lazy { if (Paint().hasGlyph("\u270E")) "\u270E" else "\u2020" }
-    private const val SIGN_KIND = "mark"
 
     /** A mark's color: the palette's, by the name the mark gives – or the name itself, as "#RRGGBB", "#RRGGBBAA" or a name Android knows. */
     private fun colorOf(name: String, named: Map<String, Int>): Int? = named[name] ?: runCatching {

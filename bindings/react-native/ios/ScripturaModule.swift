@@ -39,6 +39,14 @@ struct MarkEndRecord: Record {
   @Field var word: Int?
 }
 
+/// How the selection is drawn, as JS may give it: a mark's look – a highlight and an underline, by the
+/// names or colors a mark gives – or none, for the selection's own; and whether a pen erases.
+struct SelectionStyleRecord: Record {
+  @Field var highlight: String?
+  @Field var underline: String?
+  @Field var erases: Bool = false
+}
+
 /// Words or verses to select, as JS passes them: where they stand, never their text.
 struct SelectionRecord: Record {
   @Field var passage: Int = 0
@@ -121,7 +129,7 @@ public class ScripturaModule: Module {
     Function("marks") {
       marks().map { mark in
         ["id": mark.id, "book": mark.book, "from": Self.end(mark.from), "to": Self.end(mark.to),
-         "highlight": mark.highlight, "underline": mark.underline, "note": mark.note]
+         "highlight": mark.highlight as Any, "underline": mark.underline as Any, "note": mark.note]
       }
     }
 
@@ -141,7 +149,7 @@ public class ScripturaModule: Module {
     }
 
     View(ReaderView.self) {
-      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap")
+      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap", "onSelectionFrame")
 
       Prop("passages") { (view: ReaderView, passages: [PassageRecord]?) in
         view.passages = passages ?? []
@@ -184,6 +192,12 @@ public class ScripturaModule: Module {
       }
       Prop("dropCaps", true) { (view: ReaderView, dropCaps: Bool) in
         view.dropCaps = dropCaps
+      }
+      Prop("selectionStyle") { (view: ReaderView, style: SelectionStyleRecord?) in
+        view.selectionStyle = style.map { SelectionStyle(highlight: $0.highlight, underline: $0.underline, erases: $0.erases) }
+      }
+      Prop("markNotes", "sign") { (view: ReaderView, markNotes: String) in
+        view.markNotes = markNotes
       }
       Prop("dropCapFont") { (view: ReaderView, dropCapFont: String?) in
         view.dropCapFont = dropCapFont

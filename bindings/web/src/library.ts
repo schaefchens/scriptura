@@ -31,23 +31,25 @@ export type Block = {
 
 /**
  * A mark in a paragraph: the words of it the paragraph holds, as their range in the paragraph's text – a verse's number and the
- * notes' marks left out – how it is drawn, and its note where the mark ends, if it has one: a sign there opens it. See the core's
- * PlacedMark.
+ * notes' marks left out – and how it is drawn. The sign of its note stands in the text where the mark ends, as a note's mark of the
+ * kind "mark". See the core's PlacedMark.
  */
-export type PlacedMark = { id: string; start: number; end: number; highlight: string | null; underline: string | null; note: NoteRun[] | null };
+export type PlacedMark = { id: string; start: number; end: number; highlight: string | null; underline: string | null };
 
 /**
  * A note's mark in a paragraph – its range in the text, on which verse – and the note it opens: a
- * footnote, an endnote or a cross reference, as runs, some of which refer to verses.
+ * footnote, an endnote or a cross reference, as runs, some of which refer to verses; or, of the kind
+ * "mark", the sign of an app's mark's note, with the mark's id.
  */
 export type NoteMark = {
   chapter: number;
   verse: number;
   start: number;
   end: number;
-  kind: 'footnote' | 'endnote' | 'crossReference';
+  kind: 'footnote' | 'endnote' | 'crossReference' | 'mark';
   mark: string;
   runs: NoteRun[];
+  id?: string | null;
 };
 
 export type { NoteRun, Target };
@@ -217,7 +219,10 @@ export class Library {
   }
 
   /** The passages as paragraphs, read along with `companions`. */
-  blocks(passages: Passage[], options: { fontSize: number; versePerLine?: boolean; companions?: string[]; notes?: 'marks' | 'inline' | 'none'; dropCaps?: boolean }): Block[] {
+  blocks(
+    passages: Passage[],
+    options: { fontSize: number; versePerLine?: boolean; companions?: string[]; notes?: 'marks' | 'inline' | 'none'; dropCaps?: boolean; markNotes?: 'sign' | 'inline' },
+  ): Block[] {
     return JSON.parse(this.core.blocksJson(JSON.stringify(passages), JSON.stringify(options)));
   }
 

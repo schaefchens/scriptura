@@ -2,6 +2,7 @@ package de.schaefchens.scriptura
 
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.text.Layout
 import android.text.Spanned
@@ -54,7 +55,9 @@ class HiddenSpan : ReplacementSpan() {
  * A drop cap: the first letter of a chapter's text, set large in the margin the paragraph's first
  * two lines leave at their start, its baseline on the second line's. The [size] is the one the
  * reader worked out, so a capital stands from the first line's digit height down to the second
- * line's baseline – or, in a font of initials, the letter itself fills the two lines.
+ * line's baseline – or, in a font of initials, the letter itself fills the two lines. The letter with
+ * its marks – an Arabic letter's vowel above it, a tail below – stays within the two lines: taller,
+ * it is set smaller, and where it still reaches out, moved in.
  */
 class DropCapSpan(
   private val letter: String,
@@ -75,14 +78,29 @@ class DropCapSpan(
     val line = layout.getLineForOffset(start)
     val paragraphEnd = (text as? Spanned)?.getSpanEnd(this) ?: text.length
     val second = line + 1
-    val at = if (second < layout.lineCount && layout.getLineStart(second) < paragraphEnd) layout.getLineBaseline(second).toFloat()
-    else baseline + (layout.getLineBottom(line) - layout.getLineTop(line)).toFloat()
+    val two = second < layout.lineCount && layout.getLineStart(second) < paragraphEnd
+    val at = if (two) layout.getLineBaseline(second).toFloat() else baseline + (layout.getLineBottom(line) - layout.getLineTop(line)).toFloat()
     val large = Paint(paint).apply {
       isAntiAlias = true
       textSize = size
       this@DropCapSpan.typeface?.let { typeface = it }
     }
-    canvas.drawText(letter, if (dir >= 0) x.toFloat() else x - large.measureText(letter), at, large)
+    // The room above the baseline, up to the first line's top, and below it, down to the second's descent.
+    val above = at - layout.getLineTop(line)
+    val below = if (two) layout.getLineDescent(second).toFloat() else paint.descent()
+    val glyphs = Rect()
+    large.getTextBounds(letter, 0, letter.length, glyphs)
+    val tall = (glyphs.bottom - glyphs.top).toFloat()
+    if (tall > above + below) {
+      large.textSize = size * (above + below) / tall
+      large.getTextBounds(letter, 0, letter.length, glyphs)
+    }
+    val shift = when {
+      glyphs.bottom > below -> below - glyphs.bottom
+      -glyphs.top > above -> -glyphs.top - above
+      else -> 0f
+    }
+    canvas.drawText(letter, if (dir >= 0) x.toFloat() else x - large.measureText(letter), at + shift, large)
   }
 
   companion object {

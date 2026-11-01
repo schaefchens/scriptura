@@ -21,14 +21,15 @@ const HIGHLIGHT = '#FFE082';
 const DARK_HIGHLIGHT_SHARE = 0.28;
 /** The colors marks can name: a fill behind their words, and the color of their underline, as made for black on white. */
 export const MARK_COLORS: Record<string, { fill: string; line: string }> = {
-  yellow: { fill: '#FFE082', line: '#F9A825' },
+  // A lemon, not the highlight's amber, so the word the voice is at shows on a yellow mark.
+  yellow: { fill: '#FFF59D', line: '#F9A825' },
   green: { fill: '#A5D6A7', line: '#2E7D32' },
   blue: { fill: '#90CAF9', line: '#1565C0' },
   pink: { fill: '#F8BBD0', line: '#AD1457' },
 };
 /** A mark's fill takes a smaller share of the contrast than the highlight, so the word the voice is at still shows on it. */
 const MARK_SHARE = 0.6;
-const DARK_MARK_SHARE = 0.18;
+const DARK_MARK_SHARE = 0.14;
 const SELECTION = '#64B5F6';
 /** A light background turns a little warm as the contrast is lowered, like paper. */
 const PAPER = { hue: 85, chroma: 0.03 };

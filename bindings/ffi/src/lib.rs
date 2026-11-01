@@ -110,7 +110,8 @@ pub struct Block {
     pub marks: Vec<PlacedMark>,
 }
 
-/// A host's mark in a paragraph, and its note where the mark ends: see `scriptura::PlacedMark`.
+/// A host's mark in a paragraph, its note's sign standing in the text as a note's mark: see
+/// `scriptura::PlacedMark`.
 #[derive(uniffi::Record)]
 pub struct PlacedMark {
     pub id: String,
@@ -118,7 +119,14 @@ pub struct PlacedMark {
     pub end: u32,
     pub highlight: Option<String>,
     pub underline: Option<String>,
-    pub note: Option<Vec<NoteRun>>,
+}
+
+/// A paragraph's marks and the signs of their notes, to draw them anew: see
+/// `scriptura::ParagraphMarks`.
+#[derive(uniffi::Record)]
+pub struct ParagraphMarks {
+    pub marks: Vec<PlacedMark>,
+    pub signs: Vec<NoteMark>,
 }
 
 #[derive(uniffi::Record)]
@@ -127,7 +135,8 @@ pub struct Segment {
     pub role: Option<String>,
 }
 
-/// A note's mark in a paragraph, and the note it opens: see `scriptura::NoteMark`.
+/// A note's mark in a paragraph, and the note it opens – an edition's, or the sign of a host's
+/// mark's note, of the kind "mark", with the mark's id: see `scriptura::NoteMark`.
 #[derive(uniffi::Record)]
 pub struct NoteMark {
     pub chapter: u32,
@@ -137,6 +146,7 @@ pub struct NoteMark {
     pub kind: String,
     pub mark: String,
     pub runs: Vec<NoteRun>,
+    pub id: Option<String>,
 }
 
 /// A run of a note's text: see `scriptura::NoteRun`.
@@ -162,6 +172,13 @@ pub struct Target {
 pub enum Notes {
     None,
     Marks,
+    Inline,
+}
+
+/// How the notes of a host's marks show in the text: see `scriptura::MarkNotes`.
+#[derive(uniffi::Enum)]
+pub enum MarkNotes {
+    Sign,
     Inline,
 }
 
@@ -387,7 +404,8 @@ pub fn marks() -> Vec<MarkInfo> {
 }
 
 /// The passages as paragraphs, read along with `companions`, with the notes as asked for and drop
-/// caps if asked for, and the host's marks over their words: see `scriptura::Library::blocks`.
+/// caps if asked for, and the host's marks over their words, their notes as `mark_notes` asks: see
+/// `scriptura::Library::blocks`.
 #[uniffi::export]
 pub fn reader_blocks(
     references: Vec<Reference>,
@@ -396,13 +414,15 @@ pub fn reader_blocks(
     companions: Vec<String>,
     notes: Notes,
     drop_caps: bool,
+    mark_notes: MarkNotes,
 ) -> Vec<Block> {
-    let options = core_options(font_size, verse_per_line, companions, notes, drop_caps);
+    let options = core_options(font_size, verse_per_line, companions, notes, drop_caps, mark_notes);
     LIBRARY.read().unwrap().blocks(&core_references(references), &options).into_iter().map(Block::from).collect()
 }
 
-/// The marks in the passages' paragraphs, paragraph by paragraph as `reader_blocks` gives them with
-/// the same arguments: for a reader to draw them anew as they change, its layout kept.
+/// The marks in the passages' paragraphs, and the signs of their notes, paragraph by paragraph as
+/// `reader_blocks` gives them with the same arguments: for a reader to draw them anew as they
+/// change – its layout kept, unless the signs changed, which stand in the text.
 #[uniffi::export]
 pub fn reader_marks(
     references: Vec<Reference>,
@@ -411,10 +431,15 @@ pub fn reader_marks(
     companions: Vec<String>,
     notes: Notes,
     drop_caps: bool,
-) -> Vec<Vec<PlacedMark>> {
-    let options = core_options(font_size, verse_per_line, companions, notes, drop_caps);
+    mark_notes: MarkNotes,
+) -> Vec<ParagraphMarks> {
+    let options = core_options(font_size, verse_per_line, companions, notes, drop_caps, mark_notes);
     let placed = LIBRARY.read().unwrap().marks_in(&core_references(references), &options);
-    placed.into_iter().map(|marks| marks.into_iter().map(PlacedMark::from).collect()).collect()
+    let paragraph = |scriptura::ParagraphMarks { marks, signs }: scriptura::ParagraphMarks| ParagraphMarks {
+        marks: marks.into_iter().map(PlacedMark::from).collect(),
+        signs: signs.into_iter().map(NoteMark::from).collect(),
+    };
+    placed.into_iter().map(paragraph).collect()
 }
 
 fn core_options(
@@ -423,13 +448,18 @@ fn core_options(
     companions: Vec<String>,
     notes: Notes,
     drop_caps: bool,
+    mark_notes: MarkNotes,
 ) -> scriptura::Options {
     let notes = match notes {
         Notes::None => scriptura::Notes::None,
         Notes::Marks => scriptura::Notes::Marks,
         Notes::Inline => scriptura::Notes::Inline,
     };
-    scriptura::Options { font_size, verse_per_line, companions, notes, drop_caps }
+    let mark_notes = match mark_notes {
+        MarkNotes::Sign => scriptura::MarkNotes::Sign,
+        MarkNotes::Inline => scriptura::MarkNotes::Inline,
+    };
+    scriptura::Options { font_size, verse_per_line, companions, notes, drop_caps, mark_notes }
 }
 
 fn core_references(references: Vec<Reference>) -> Vec<scriptura::Reference> {
@@ -482,20 +512,14 @@ impl From<scriptura::NoteMark> for NoteMark {
             kind: note.kind,
             mark: note.mark,
             runs: note.runs.into_iter().map(NoteRun::from).collect(),
+            id: note.id,
         }
     }
 }
 
 impl From<scriptura::PlacedMark> for PlacedMark {
-    fn from(mark: scriptura::PlacedMark) -> Self {
-        PlacedMark {
-            id: mark.id,
-            start: mark.start,
-            end: mark.end,
-            highlight: mark.highlight,
-            underline: mark.underline,
-            note: mark.note.map(|runs| runs.into_iter().map(NoteRun::from).collect()),
-        }
+    fn from(scriptura::PlacedMark { id, start, end, highlight, underline }: scriptura::PlacedMark) -> Self {
+        PlacedMark { id, start, end, highlight, underline }
     }
 }
 

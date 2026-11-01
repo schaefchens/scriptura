@@ -47,22 +47,12 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     let rightToLeft: Bool
   }
 
-  /// A host's mark as it is drawn over the text: its range, a fill behind its words, a line under
-  /// them, and the sign of its note after its last word, which is tapped to open the note.
+  /// A host's mark as it is drawn over the text: its range, a fill behind its words, and a line under
+  /// them. The sign of its note stands in the text, as a note's mark does.
   struct Decoration {
     let range: NSRange
     let fill: UIColor?
     let line: UIColor?
-    let sign: Sign?
-    let rightToLeft: Bool
-  }
-
-  /// The sign of a mark's note: what it is, drawn small and raised in a color, after words of `size`.
-  struct Sign {
-    let id: String
-    let text: String
-    let color: UIColor
-    let size: CGFloat
   }
 
   /// The text as last given; until it is laid out, the one before it stays in sight.
@@ -103,10 +93,9 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   var onTap: ((Int) -> Void)?
   /// A tap where no character is.
   var onTapElsewhere: (() -> Void)?
-  /// A tap on the sign of a mark's note, by the mark's id.
-  var onTapSign: ((String) -> Void)?
   /// A long press on a character, or beside the text; then, the finger still down, each character it
-  /// moves over; and the finger lifting. The text doesn't scroll meanwhile.
+  /// moves over; and the finger lifting. The text doesn't follow the finger meanwhile; resting near
+  /// an edge, the finger scrolls it on, or turns the page.
   var onLongPress: ((Int?) -> Void)?
   var onDrag: ((Int?) -> Void)?
   var onRelease: (() -> Void)?
@@ -114,13 +103,34 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   var onSettled: (() -> Void)?
   /// A scroll or a page turn by hand begins – or by a screen reader, or by turn(forward:).
   var onScrollByHand: (() -> Void)?
+  /// The text starts moving – by a hand, a screen reader, or the reader bringing something into sight
+  /// – or comes to rest; and a layout is in use, so what is in sight may stand elsewhere.
+  var onMove: ((Bool) -> Void)?
+  var onShown: (() -> Void)?
+  /// Whether the text moves: from a scroll or page turn starting until it comes to rest.
+  private(set) var isMoving = false
   /// The first pages show, before all of the text is laid out.
   var onFirstPages: (() -> Void)?
   /// The whole text is laid out, into this many pages, or parts in one endless scroll.
   var onPaginated: ((Int) -> Void)?
 
+  /// While a long press chooses words: where the finger is, in sight; whether it started near an
+  /// edge, which then pulls only once it has left it; the display link that scrolls on, or turns the
+  /// page, while the finger rests near an edge; since when it rests there; and the link's last tick.
+  private var pressPoint: CGPoint?
+  private var pressStartedAtEdge = false
+  private var edgeLink: CADisplayLink?
+  private var edgeSince: CFTimeInterval?
+  private var lastEdgeTick: CFTimeInterval = 0
+
   /// Above and below the text.
   private static let inset: CGFloat = 12
+  /// How near the top or bottom a finger choosing words scrolls the text on, and how fast at most, in
+  /// points a second; in pages, how near the side it turns the page, after resting there how long.
+  private static let scrollEdge: CGFloat = 48
+  private static let scrollSpeed: CGFloat = 480
+  private static let pageEdge: CGFloat = 32
+  private static let pageRest: CFTimeInterval = 0.5
   /// How far past the reader's place the text is laid out before it shows, and how much a chunk holds.
   private static let firstPages = 8000
   private static let chunkLength = 12000
@@ -381,6 +391,7 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     } else {
       onFirstPages?()
     }
+    onShown?()
     UIAccessibility.post(notification: .layoutChanged, argument: nil)
   }
 
@@ -577,16 +588,6 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     decorate(decorations, selection: ranges, color: selectionColor)
   }
 
-  /// The sign of a mark's note at a point in this view's content, by the mark's id, if a part in
-  /// sight draws one there or near it.
-  func sign(at point: CGPoint) -> String? {
-    guard layout.text === text else { return nil }
-    for view in views.values.joined() {
-      if let id = view.sign(at: view.convert(point, from: self)) { return id }
-    }
-    return nil
-  }
-
   /// The character at a point in this view's content, if a part holds one there – or a little way
   /// around it, the nearest.
   func characterIndex(at point: CGPoint) -> Int? {
@@ -596,6 +597,20 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
           let position = view.closestPosition(to: view.convert(point, from: self))
     else { return nil }
     return view.range.location + view.offset(from: view.beginningOfDocument, to: position)
+  }
+
+  /// Where the text in `ranges` shows, line by line in the text's order, in this view's coordinates:
+  /// each line's rectangle over it, as far as the parts in sight, and beside it, hold it.
+  func lineRects(for ranges: [NSRange]) -> [CGRect] {
+    guard layout.text === text else { return [] }
+    let parts = views.values.joined().sorted { $0.range.location < $1.range.location }
+    return ranges.flatMap { range in
+      parts.flatMap { view -> [CGRect] in
+        guard let overlap = range.intersection(view.range), overlap.length > 0 else { return [] }
+        let local = NSRange(location: overlap.location - view.range.location, length: overlap.length)
+        return view.lineFrames(of: local).map { convert($0, from: view) }
+      }
+    }
   }
 
   /// Where the characters in `range` show in this view's content – on their first line, from the
@@ -624,13 +639,26 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     }
     guard let part = layout.parts.lastIndex(atOrBefore: index, \.range.location) else { return }
     guard continuous else {
-      setContentOffset(CGPoint(x: CGFloat(layout.parts[part].page) * bounds.width, y: 0), animated: true)
+      move(to: CGPoint(x: CGFloat(layout.parts[part].page) * bounds.width, y: 0))
       return
     }
     let line = contentRect(for: NSRange(location: index, length: 0))
     guard !bounds.contains(line) else { return }
     let lowest = max(contentSize.height - bounds.height, 0)
-    setContentOffset(CGPoint(x: 0, y: min(max(line.minY - bounds.height / 3, 0), lowest)), animated: true)
+    move(to: CGPoint(x: 0, y: min(max(line.minY - bounds.height / 3, 0), lowest)))
+  }
+
+  /// Moves the text to `offset`, gliding there – telling of it, unless it is there.
+  private func move(to offset: CGPoint) {
+    guard offset != contentOffset else { return }
+    moving(true)
+    setContentOffset(offset, animated: true)
+  }
+
+  private func moving(_ moving: Bool) {
+    guard moving != isMoving else { return }
+    isMoving = moving
+    onMove?(moving)
   }
 
   /// Whether the character at `index` is in sight: on the page shown, or in one endless scroll, its
@@ -643,6 +671,23 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
       return layout.parts[part].page == Int((contentOffset.x / bounds.width).rounded())
     }
     return bounds.contains(contentRect(for: NSRange(location: index, length: 0)))
+  }
+
+  /// Whether any of the text in `range` is in sight: on the page shown, or in one endless scroll, a
+  /// line of it in view.
+  func isInSight(range: NSRange) -> Bool {
+    guard range.length > 0, layout.text === text, range.location < layout.end || layout.complete,
+          let first = layout.parts.lastIndex(atOrBefore: range.location, \.range.location),
+          let last = layout.parts.lastIndex(atOrBefore: NSMaxRange(range) - 1, \.range.location)
+    else { return false }
+    guard continuous else {
+      let page = Int((contentOffset.x / bounds.width).rounded())
+      let pages = [layout.parts[first].page, layout.parts[last].page]
+      return (pages.min()!...pages.max()!).contains(page)
+    }
+    let top = contentRect(for: NSRange(location: range.location, length: 0)).minY
+    let bottom = contentRect(for: NSRange(location: NSMaxRange(range) - 1, length: 0)).maxY
+    return bottom > bounds.minY && top < bounds.maxY
   }
 
   /// Whether a finger moves the text, or it still glides after one.
@@ -659,7 +704,7 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
       guard target != contentOffset.y else { return nil }
       onScrollByHand?()
       anchor = character(below: target - 1) ?? anchor
-      setContentOffset(CGPoint(x: 0, y: target), animated: true)
+      move(to: CGPoint(x: 0, y: target))
       return 0
     }
     let current = Int((contentOffset.x / bounds.width).rounded())
@@ -667,7 +712,7 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
     guard page != current else { return nil }
     onScrollByHand?()
     anchor = firstCharacter(onPage: page)
-    setContentOffset(CGPoint(x: CGFloat(page) * bounds.width, y: 0), animated: true)
+    move(to: CGPoint(x: CGFloat(page) * bounds.width, y: 0))
     return page
   }
 
@@ -728,6 +773,7 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   }
 
   func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+    moving(true)
     onScrollByHand?()
   }
 
@@ -746,15 +792,18 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
 
   func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
     keepAnchor()
+    moving(false)
   }
 
   func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+    moving(false)
     onSettled?()
   }
 
   func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
     if !decelerate {
       keepAnchor()
+      moving(false)
     }
   }
 
@@ -776,31 +825,98 @@ final class PagedText: UIScrollView, UIScrollViewDelegate {
   }
 
   @objc private func tapped(_ gesture: UITapGestureRecognizer) {
-    let point = gesture.location(in: self)
-    if let id = sign(at: point) {
-      onTapSign?(id)
-    } else if let index = characterIndex(at: point) {
+    if let index = characterIndex(at: gesture.location(in: self)) {
       onTap?(index)
     } else {
       onTapElsewhere?()
     }
   }
 
-  /// A long press, and the finger dragging on from it: the text stays put under it meanwhile.
+  /// A long press, and the finger dragging on from it: the text doesn't follow the finger meanwhile,
+  /// but near an edge it scrolls on, or the page turns.
   @objc private func pressed(_ gesture: UILongPressGestureRecognizer) {
-    let index = characterIndex(at: gesture.location(in: self))
+    let location = gesture.location(in: self)
+    let index = characterIndex(at: location)
+    pressPoint = CGPoint(x: location.x - bounds.minX, y: location.y - bounds.minY)
     switch gesture.state {
     case .began:
       isScrollEnabled = false
+      pressStartedAtEdge = pressPoint.map { edgePull($0).direction != 0 } ?? false
       onLongPress?(index)
     case .changed:
       onDrag?(index)
+      followEdge()
     case .ended, .cancelled, .failed:
+      stopFollowingEdge()
+      pressPoint = nil
       isScrollEnabled = true
       onRelease?()
     default:
       break
     }
+  }
+
+  /// Which way a finger choosing words, at `point` in sight, moves the text: back (-1), on (1) or not
+  /// at all (0), and how deep in the edge it is, from 0 to 1. In a mirrored view, as for pages from the
+  /// right, its own coordinates run the pages' way.
+  private func edgePull(_ point: CGPoint) -> (direction: Int, depth: CGFloat) {
+    if continuous {
+      if point.y < Self.scrollEdge { return (-1, 1 - max(point.y, 0) / Self.scrollEdge) }
+      if point.y > bounds.height - Self.scrollEdge { return (1, 1 - max(bounds.height - point.y, 0) / Self.scrollEdge) }
+      return (0, 0)
+    }
+    if point.x < Self.pageEdge { return (-1, 1) }
+    if point.x > bounds.width - Self.pageEdge { return (1, 1) }
+    return (0, 0)
+  }
+
+  /// The finger near an edge starts the text moving – once it has left the edge it started at – and
+  /// away from one stops it. Moving it so is a hand's: the reader no longer follows the voice.
+  private func followEdge() {
+    guard let point = pressPoint else { return stopFollowingEdge() }
+    let pulled = edgePull(point).direction != 0
+    if pressStartedAtEdge {
+      pressStartedAtEdge = pulled
+      return
+    }
+    guard pulled else { return stopFollowingEdge() }
+    guard edgeLink == nil else { return }
+    let now = CACurrentMediaTime()
+    (edgeSince, lastEdgeTick) = (now, now)
+    let link = CADisplayLink(target: self, selector: #selector(edgeTick))
+    link.add(to: .main, forMode: .common)
+    edgeLink = link
+    onScrollByHand?()
+  }
+
+  private func stopFollowingEdge() {
+    edgeLink?.invalidate()
+    edgeLink = nil
+    edgeSince = nil
+  }
+
+  /// Each frame the finger rests near an edge: the text scrolls on, the faster the nearer the edge –
+  /// in pages, the page turns after a rest, and again after another – and the words chosen reach to
+  /// the one under the finger.
+  @objc private func edgeTick(_ link: CADisplayLink) {
+    guard let point = pressPoint else { return stopFollowingEdge() }
+    let (direction, depth) = edgePull(point)
+    guard direction != 0 else { return stopFollowingEdge() }
+    let elapsed = link.timestamp - lastEdgeTick
+    lastEdgeTick = link.timestamp
+    if continuous {
+      let lowest = max(contentSize.height - bounds.height, 0)
+      // Slow at the zone's inner side, to stop at a word; fast at the very edge, to reach far.
+      let step = CGFloat(direction) * Self.scrollSpeed * max(depth * depth, 0.05) * CGFloat(elapsed)
+      let target = min(max(contentOffset.y + step, 0), lowest)
+      guard target != contentOffset.y else { return }
+      setContentOffset(CGPoint(x: 0, y: target), animated: false)
+      keepAnchor()
+    } else if let since = edgeSince, link.timestamp - since >= Self.pageRest {
+      edgeSince = link.timestamp
+      turn(forward: direction > 0)
+    }
+    onDrag?(characterIndex(at: CGPoint(x: bounds.minX + point.x, y: bounds.minY + point.y)))
   }
 }
 
@@ -911,13 +1027,11 @@ private func distance(from point: CGPoint, to rect: CGRect) -> CGFloat {
 /// A part's text, in a text view of its own, and the part. A drop cap in it has its space kept clear
 /// and its glyphs drawn in a view of their own. The marks' fills and lines and the selection are
 /// drawn in a view behind the text – the word the voice is at, a background of the text itself, shows
-/// over them – and the marks' signs in one over it.
+/// over them.
 private final class PartView: UITextView {
   let part: Part
   var range: NSRange { part.range }
-  private let underlay = DecorationView(reach: 0)
-  /// A mark's sign at a line's end may stand a little past the part.
-  private let overlay = DecorationView(reach: 24)
+  private let underlay = DecorationView()
 
   init(frame: CGRect, text: NSAttributedString, part: Part, dropCaps: [DropCapDraw]) {
     self.part = part
@@ -934,7 +1048,6 @@ private final class PartView: UITextView {
     attributedText = text
     insertSubview(underlay, at: 0)
     dropCaps.forEach { addSubview(DropCapView($0)) }
-    addSubview(overlay)
   }
 
   required init?(coder: NSCoder) {
@@ -943,11 +1056,9 @@ private final class PartView: UITextView {
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    // The text's own views come as they are needed: behind them, and over them, still.
+    // The text's own views come as they are needed: behind them, still.
     underlay.frame = bounds
-    overlay.frame = bounds.insetBy(dx: -overlay.reach, dy: -overlay.reach)
     sendSubviewToBack(underlay)
-    bringSubviewToFront(overlay)
   }
 
   /// Highlights the part of `range`, in the whole text, that falls in this part.
@@ -959,15 +1070,12 @@ private final class PartView: UITextView {
   }
 
   /// Draws the parts of the marks, and of the selection, that fall in this part: each mark's fill
-  /// on every line its words take, its line a little under their baselines, and its sign after its
-  /// last word – before it, in a right-to-left paragraph – raised like a note's mark.
+  /// on every line its words take, and its line a little under their baselines.
   func decorate(_ decorations: [PagedText.Decoration], selection: [NSRange], color: UIColor) {
     var fills: [DecorationView.Fill] = []
-    var signs: [DecorationView.SignDraw] = []
     for decoration in decorations {
       guard let overlap = decoration.range.intersection(range), overlap.length > 0 else { continue }
-      let lines = lines(of: NSRange(location: overlap.location - range.location, length: overlap.length))
-      for line in lines {
+      for line in lines(of: NSRange(location: overlap.location - range.location, length: overlap.length)) {
         if let fill = decoration.fill {
           fills.append(DecorationView.Fill(rect: line.frame, color: fill))
         }
@@ -975,16 +1083,6 @@ private final class PartView: UITextView {
           let y = line.frame.minY + line.baseline + 2
           fills.append(DecorationView.Fill(rect: CGRect(x: line.frame.minX, y: y, width: line.frame.width, height: 2), color: under))
         }
-      }
-      // The sign stands where the mark ends, in the part that holds its last word: small and raised,
-      // as a note's mark is.
-      if let sign = decoration.sign, let last = lines.last, NSMaxRange(overlap) == NSMaxRange(decoration.range) {
-        let font = UIFont.systemFont(ofSize: sign.size * 0.6)
-        let text = NSAttributedString(string: sign.text, attributes: [.font: font, .foregroundColor: sign.color])
-        let size = text.size()
-        let x = decoration.rightToLeft ? last.frame.minX - 1 - size.width : last.frame.maxX + 1
-        let y = last.frame.minY + last.baseline - sign.size * 0.33 - font.ascender
-        signs.append(DecorationView.SignDraw(id: sign.id, rect: CGRect(origin: CGPoint(x: x, y: y), size: size), text: text))
       }
     }
     for selected in selection {
@@ -994,12 +1092,12 @@ private final class PartView: UITextView {
       }
     }
     underlay.fills = fills
-    overlay.signs = signs
   }
 
-  /// The sign drawn at a point in this view, or near it, by its mark's id.
-  func sign(at point: CGPoint) -> String? {
-    overlay.signs.first { $0.rect.insetBy(dx: -8, dy: -6).contains(point) }?.id
+  /// Where the characters in `local` – a range in this part's text – show: each line's rectangle over
+  /// them, in this view's coordinates.
+  func lineFrames(of local: NSRange) -> [CGRect] {
+    lines(of: local).map(\.frame)
   }
 
   /// The lines the characters in `local` – a range in this part's text – stand on: each line's
@@ -1055,28 +1153,16 @@ private final class PartView: UITextView {
   }
 }
 
-/// What is drawn around a part's text: fills – a mark's, its line, the selection – or the signs of
-/// the marks' notes.
+/// What is drawn behind a part's text: fills – a mark's, its line, the selection.
 private final class DecorationView: UIView {
   struct Fill {
     let rect: CGRect
     let color: UIColor
   }
 
-  /// A sign where it is drawn, by its mark's id.
-  struct SignDraw {
-    let id: String
-    let rect: CGRect
-    let text: NSAttributedString
-  }
-
   var fills: [Fill] = [] { didSet { setNeedsDisplay() } }
-  var signs: [SignDraw] = [] { didSet { setNeedsDisplay() } }
-  /// How far it reaches past its part on every side; what it draws is placed in the part's coordinates.
-  let reach: CGFloat
 
-  init(reach: CGFloat) {
-    self.reach = reach
+  init() {
     super.init(frame: .zero)
     isOpaque = false
     backgroundColor = .clear
@@ -1091,7 +1177,6 @@ private final class DecorationView: UIView {
 
   override func draw(_ rect: CGRect) {
     guard let context = UIGraphicsGetCurrentContext() else { return }
-    context.translateBy(x: reach, y: reach)
     // Each color as one shape: where the lines of a fill meet or overlap, it is drawn once – without
     // a seam, and a see-through selection no darker there.
     var shapes: [(color: UIColor, path: CGMutablePath)] = []
@@ -1108,9 +1193,6 @@ private final class DecorationView: UIView {
       context.addPath(path)
       context.setFillColor(color.cgColor)
       context.fillPath(using: .winding)
-    }
-    for sign in signs {
-      sign.text.draw(at: sign.rect.origin)
     }
   }
 }

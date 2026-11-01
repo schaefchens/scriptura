@@ -10,8 +10,9 @@ import UIKit
 /// word it is at, and marks each word as it is said, keeping it in sight – unless it was scrolled
 /// away from it by hand. The books' notes stand in the text as marks, each opening where it stands;
 /// a cross reference's verses it jumps to, or tells JS of. Chapters open with a drop cap. The host's
-/// marks are drawn over their words, their notes opened at their signs; words or verses are selected
-/// by a long press and a drag, or by VoiceOver, and reported by where they stand.
+/// marks are drawn over their words, the signs of their notes standing in the text as the notes'
+/// marks do; words or verses are selected by a long press and a drag, or by VoiceOver, and reported by
+/// where they stand.
 class ReaderView: ExpoView {
   /// Posted as the host adds or removes books: every reader shows what the library now holds.
   static let booksChanged = Notification.Name("ScripturaBooksChanged")
@@ -41,6 +42,13 @@ class ReaderView: ExpoView {
   /// the letter, such as one of ornamental initials.
   /// "marks", "inline" or "none".
   var notes = "marks"
+  /// The host's marks' notes: "sign", a sign where each mark ends, or "inline", the note in full there.
+  var markNotes = "sign"
+  /// How the selection is drawn: as a mark of this look would be – a pen's, marking as it goes – or,
+  /// none given, in the selection's own color. See SelectionStyle.
+  var selectionStyle: SelectionStyle? {
+    didSet { applyMarks() }
+  }
   var dropCaps = true
   var dropCapFont: String?
   /// A voice per language for reading aloud, by identifier; otherwise the device's for it.
@@ -65,6 +73,8 @@ class ReaderView: ExpoView {
   /// The words or verses selected, or none, as the selection goes; and a tap on marked words.
   let onSelectionChange = EventDispatcher()
   let onMarkTap = EventDispatcher()
+  /// Where the selection shows, as it settles, for a panel of the app's own beside it; or nowhere.
+  let onSelectionFrame = EventDispatcher()
 
   private let pages = PagedText()
   private var words: [ReaderWord] = []
@@ -77,19 +87,28 @@ class ReaderView: ExpoView {
   private var paragraphRanges: [NSRange] = []
   private var verses: [ReaderVerse] = []
   private var marks: [ReaderNote] = []
-  /// The host's marks in the text, and the signs of their notes.
+  /// The host's marks in the text.
   private var placedMarks: [ReaderMark] = []
-  private var signs: [ReaderNote] = []
-  /// How the notes were asked for, so the marks can be asked for anew as they change.
+  /// The width the text was last laid out for, where the hanging verse numbers of books side by side
+  /// depend on it.
+  private var numbersWidth: CGFloat?
+  /// How the notes and the marks' notes were asked for, so the marks can be asked for anew as they
+  /// change.
   private var shownNotes: Notes = .marks
+  private var shownMarkNotes: MarkNotes = .sign
+  /// Where the selection showed as last reported to JS, so that only changes are.
+  private var reportedFrame = ""
   /// The words selected – by a long press and a drag, by VoiceOver or by JS – in one passage's book;
   /// while a finger drags, the words it started from; and the selection as last reported to JS, so
   /// that only changes are.
   private var selected: Selected?
   private var anchorWords: ClosedRange<Int>?
   private var reportedSelection = ""
+  /// What a pen that erases takes its look off: the mark of its look the words selected all lie in –
+  /// and what it was found for, the words and the style.
+  private var erasing: (key: String, mark: String?) = ("", nil)
   private let feedback = UISelectionFeedbackGenerator()
-  /// The note open – a note's mark or a mark's sign – the verses its links refer to, and what
+  /// The note open – an edition's, or a host's mark's – the verses its links refer to, and what
   /// VoiceOver was on when it opened; and a note to open once its mark has scrolled into sight.
   private let noteView = NoteView()
   private var openNote: ReaderNote?
@@ -134,11 +153,12 @@ class ReaderView: ExpoView {
       self?.closeNote()
       self?.setSelected(nil)
     }
-    pages.onTapSign = { [weak self] id in self?.tapSign(id) }
     pages.onLongPress = { [weak self] index in self?.beginSelection(atCharacter: index) }
     pages.onDrag = { [weak self] index in self?.extendSelection(toCharacter: index) }
     pages.onRelease = { [weak self] in self?.endSelection() }
     pages.onSettled = { [weak self] in self?.openPendingNote() }
+    pages.onMove = { [weak self] _ in self?.reportFrame() }
+    pages.onShown = { [weak self] in self?.reportFrame() }
     noteView.onLink = { [weak self] url in self?.followLink(url) }
     noteView.onEscape = { [weak self] in self?.closeNote() }
     addSubview(pages)
@@ -181,6 +201,10 @@ class ReaderView: ExpoView {
       pages.frame = bounds
       closeNote()
     }
+    // Books side by side hang their verse numbers by the width of their columns.
+    if let numbersWidth, numbersWidth != bounds.width {
+      render()
+    }
   }
 
   func render() {
@@ -209,7 +233,9 @@ class ReaderView: ExpoView {
     shownReferences = references
     let shownNotes: Notes = notes == "none" ? .none : notes == "inline" ? .inline : .marks
     self.shownNotes = shownNotes
-    let blocks = readerBlocks(references: references, fontSize: fontSize, versePerLine: versePerLine, companions: companions, notes: shownNotes, dropCaps: dropCaps)
+    shownMarkNotes = markNotes == "inline" ? .inline : .sign
+    let blocks = readerBlocks(references: references, fontSize: fontSize, versePerLine: versePerLine, companions: companions, notes: shownNotes,
+                              dropCaps: dropCaps, markNotes: shownMarkNotes)
     let paragraphs = blocks.map { Paragraph($0, colors: colors, fontSize: fontSize(for: $0)) }
     // The passages read along with other books, in rows.
     let along = Set(paragraphs.filter { $0.column > 0 }.map(\.passage))
@@ -223,10 +249,12 @@ class ReaderView: ExpoView {
     verses = []
     current = nil
     self.paragraphs = paragraphs
-    let numberColumn = numberColumnWidth(paragraphs)
+    let numberColumns = numberColumnWidths(paragraphs, sideBySide: sideBySide, along: along)
+    numbersWidth = sideBySide && paragraphs.contains { $0.numberHangs && along.contains($0.passage) } ? bounds.width : nil
     for (index, paragraph) in paragraphs.enumerated() {
       let font = font(of: paragraph)
       let next = index + 1 < paragraphs.count ? paragraphs[index + 1] : nil
+      let numberColumn = numberColumns[Self.numberColumn(of: paragraph, sideBySide: sideBySide, along: along)] ?? 0
       let style = style(of: paragraph, before: next, numberColumn: numberColumn, along: along.contains(paragraph.passage), sideBySide: sideBySide)
       let start = text.length
       var attributes: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: style]
@@ -246,7 +274,7 @@ class ReaderView: ExpoView {
       let firstMark = marks.count
       marks += paragraph.notes.map { note in
         ReaderNote(paragraph: index, range: NSRange(location: start + Int(note.start), length: Int(note.end - note.start)), runs: note.runs,
-                   label: Self.name(of: note), kind: note.kind, mark: note.mark, chapter: note.chapter, verse: note.verse)
+                   label: Self.name(of: note), kind: note.kind, mark: note.mark, id: note.id, chapter: note.chapter, verse: note.verse)
       }
       readables += paragraph.readables(at: range, firstWord: words.count, firstMark: firstMark)
       let firstWord = words.count
@@ -295,6 +323,10 @@ class ReaderView: ExpoView {
     placedMarks = placedMarks(from: paragraphs.map(\.marks))
     applyMarks()
     reportSelection()
+    // Where the selection now shows, JS hears once the new layout is in use.
+    if selected == nil {
+      reportFrame()
+    }
     // Other books read along or other recordings change what is read, and a new rate how: the voice
     // goes on from the word it is at. A recording takes a new rate as it plays.
     let changed = readAs != (companions, speakAlong, recordedVoices) || (speechRate != rateAs && !readAloud.setRate(speechRate))
@@ -361,7 +393,7 @@ class ReaderView: ExpoView {
       placed.0.map { mark in
         ReaderMark(id: mark.id, paragraph: index, range: NSRange(location: placed.1.location + Int(mark.start), length: Int(mark.end - mark.start)),
                    fill: mark.highlight.flatMap { Self.color($0, in: colors.marks, or: Self.markFills) },
-                   line: mark.underline.flatMap { Self.color($0, in: colors.markLines, or: Self.markLines) }, note: mark.note)
+                   line: mark.underline.flatMap { Self.color($0, in: colors.markLines, or: Self.markLines) })
       }
     }
   }
@@ -382,39 +414,88 @@ class ReaderView: ExpoView {
   }
 
   /// Draws the host's marks anew as they change: the same paragraphs, their marks asked for again,
-  /// the layout kept.
+  /// the layout kept – unless the signs of their notes changed, which stand in the text: then the
+  /// text is laid out anew, the reader staying at its word, the selection kept.
   private func refreshMarks() {
     guard !paragraphs.isEmpty else { return }
-    let placed = readerMarks(references: shownReferences, fontSize: fontSize, versePerLine: versePerLine, companions: companions, notes: shownNotes, dropCaps: dropCaps)
-    guard placed.count == paragraphs.count else { return render() }
-    placedMarks = placedMarks(from: placed)
+    let placed = readerMarks(references: shownReferences, fontSize: fontSize, versePerLine: versePerLine, companions: companions, notes: shownNotes,
+                             dropCaps: dropCaps, markNotes: shownMarkNotes)
+    let signed = placed.count == paragraphs.count && zip(placed, paragraphs).allSatisfy { $0.signs == $1.notes.filter { $0.kind == Self.signKind } }
+    guard signed else { return render() }
+    placedMarks = placedMarks(from: placed.map(\.marks))
     applyMarks()
   }
 
-  /// Draws the marks and the selection over the text, and sets the signs of the marks' notes: each
-  /// where its mark ends, opening the note as a note's mark does, in the verse of the mark's last word.
+  /// Draws the marks and the selection over the text: the selection in its color, or – given a
+  /// selection style – over the marks as the words would look marked so; or, as a pen erases them, as
+  /// they will look: the mark cut around them, what is left of its look on them.
   private func applyMarks() {
-    signs = placedMarks.compactMap { mark in
-      guard let runs = mark.note, mark.range.length > 0, let last = word(atCharacter: NSMaxRange(mark.range) - 1) else { return nil }
-      let place = words[last].place
-      return ReaderNote(paragraph: mark.paragraph, range: NSRange(location: NSMaxRange(mark.range) - 1, length: 1), runs: runs, label: "Note",
-                        kind: "mark", mark: mark.id, chapter: place.chapter, verse: place.verse)
+    var selection = selected.map(textRanges(of:)) ?? []
+    let erased = erasedMark()
+    var decorations = placedMarks.flatMap { mark -> [PagedText.Decoration] in
+      let over = selection.first { NSIntersectionRange($0, mark.range).length > 0 }
+      guard mark.id == erased, let over, let selected, let selectionStyle else {
+        return [PagedText.Decoration(range: mark.range, fill: mark.fill, line: mark.line)]
+      }
+      return cut(mark, over: over, selected: selected, style: selectionStyle)
     }
-    let decorations = placedMarks.map { mark -> PagedText.Decoration in
-      let paragraph = paragraphs[mark.paragraph]
-      let sign = mark.note.map { _ in PagedText.Sign(id: mark.id, text: Self.signText, color: colors.roles["note"] ?? colors.text, size: paragraph.fontSize) }
-      return PagedText.Decoration(range: mark.range, fill: mark.fill, line: mark.line, sign: sign, rightToLeft: paragraph.rightToLeft)
+    if let style = selectionStyle, style.highlight != nil || style.underline != nil {
+      let fill = style.highlight.flatMap { Self.color($0, in: colors.marks, or: Self.markFills) }
+      let line = style.underline.flatMap { Self.color($0, in: colors.markLines, or: Self.markLines) }
+      if erased == nil {
+        decorations += selection.map { PagedText.Decoration(range: $0, fill: fill, line: line) }
+      }
+      selection = []
     }
-    pages.decorate(decorations, selection: selected.map(textRanges(of:)) ?? [], color: colors.selection.withAlphaComponent(0.4))
+    pages.decorate(decorations, selection: selection, color: colors.selection.withAlphaComponent(0.4))
   }
 
-  /// The sign of a mark's note: a pencil, or where no font has one, a dagger.
-  private static let signText: String = {
-    let font = UIFont.systemFont(ofSize: 12)
-    let pencil = "\u{270E}"
-    let drawn = CTFontCreateForString(font, pencil as CFString, CFRange(location: 0, length: 1)) as UIFont
-    return has(pencil, drawn) ? pencil : "\u{2020}"
-  }()
+  /// A mark a pen erases words of, as it will be: in its look before and after them, over them in
+  /// what is left of it – `over` where they are in the mark's paragraph.
+  private func cut(_ mark: ReaderMark, over: NSRange, selected: Selected, style: SelectionStyle) -> [PagedText.Decoration] {
+    let inMark = { (word: ReaderWord) in mark.range.location <= word.range.location && NSMaxRange(word.range) <= NSMaxRange(mark.range) }
+    let before = words[..<selected.words.lowerBound].last(where: selected.holds).flatMap { inMark($0) ? $0 : nil }
+    let after = words[(selected.words.upperBound + 1)...].first(where: selected.holds).flatMap { inMark($0) ? $0 : nil }
+    let (fill, line) = (style.highlight == nil ? mark.fill : nil, style.underline == nil ? mark.line : nil)
+    var parts: [PagedText.Decoration] = []
+    if let before {
+      parts.append(PagedText.Decoration(range: NSRange(location: mark.range.location, length: NSMaxRange(before.range) - mark.range.location),
+                                        fill: mark.fill, line: mark.line))
+    }
+    if fill != nil || line != nil {
+      parts.append(PagedText.Decoration(range: NSIntersectionRange(mark.range, over), fill: fill, line: line))
+    }
+    if let after {
+      parts.append(PagedText.Decoration(range: NSRange(location: after.range.location, length: NSMaxRange(mark.range) - after.range.location),
+                                        fill: mark.fill, line: mark.line))
+    }
+    return parts
+  }
+
+  /// What the selection erases: the mark its words all lie in, of the pen's look, by place, as the
+  /// pen finds it. Found anew only as the words or the style change: the pen changes the marks as it
+  /// lets go, and the selection stays until it is done.
+  private func erasedMark() -> String? {
+    guard let selected, let style = selectionStyle, style.erases, style.highlight != nil || style.underline != nil else {
+      erasing = ("", nil)
+      return nil
+    }
+    let (from, to) = ends(of: selected)
+    let key = "\(selected.passage) \(selected.book) \(from) \(to) \(style)"
+    guard key != erasing.key else { return erasing.mark }
+    // A whole verse starts before its first word and ends after its last.
+    let start = { (end: MarkEnd) in (end.chapter, end.verse, end.word.map { Int64($0) } ?? -1) }
+    let finish = { (end: MarkEnd) in (end.chapter, end.verse, end.word.map { Int64($0) } ?? .max) }
+    let mark = ScripturaReactNative.marks().first { mark in
+      mark.book == selected.book && start(mark.from) <= start(from) && finish(to) <= finish(mark.to)
+        && (style.highlight == nil || mark.highlight == style.highlight) && (style.underline == nil || mark.underline == style.underline)
+    }
+    erasing = (key, mark?.id)
+    return erasing.mark
+  }
+
+  /// The kind of a note's mark that is the sign of a host's mark's note.
+  private static let signKind = "mark"
 
   /// Whether a verse VoiceOver reads has marks on it.
   fileprivate func isMarked(_ readable: Readable) -> Bool {
@@ -486,15 +567,16 @@ class ReaderView: ExpoView {
     setSelected(selection(min(anchor.lowerBound, focus)...max(anchor.upperBound, focus), of: anchor.lowerBound), report: false)
   }
 
-  /// The finger lifts: JS hears what is selected.
+  /// The finger lifts: JS hears what is selected, and where it shows.
   private func endSelection() {
     guard anchorWords != nil else { return }
     anchorWords = nil
     reportSelection()
+    reportFrame()
   }
 
   /// Selects words or verses as JS asks – from a word, or a verse's first, to a word, or a verse's
-  /// last – and brings them into sight; or nothing.
+  /// last – and brings them into sight, unless some of them are; or nothing.
   func select(_ selection: SelectionRecord?) {
     guard let selection else { return setSelected(nil) }
     let inBook = { (word: ReaderWord) in word.place.passage == UInt32(selection.passage) && word.place.book == selection.book }
@@ -504,8 +586,11 @@ class ReaderView: ExpoView {
     guard let first = words.firstIndex(where: { inBook($0) && key($0) >= from }),
           let last = words.lastIndex(where: { inBook($0) && key($0) <= to }), first <= last
     else { return setSelected(nil) }
-    setSelected(Selected(words: first...last, passage: UInt32(selection.passage), book: selection.book))
-    pages.show(characterAt: words[first].range.location)
+    let chosen = Selected(words: first...last, passage: UInt32(selection.passage), book: selection.book)
+    setSelected(chosen)
+    if !textRanges(of: chosen).contains(where: pages.isInSight(range:)) {
+      pages.show(characterAt: words[first].range.location)
+    }
   }
 
   /// VoiceOver's actions on a verse: selecting it, and extending the selection to it – within the
@@ -528,23 +613,46 @@ class ReaderView: ExpoView {
     ]
   }
 
-  /// VoiceOver's actions opening the notes of the marks that end in a verse.
-  fileprivate func signActions(for readable: Readable, from element: Any) -> [UIAccessibilityCustomAction] {
-    signs.filter { NSLocationInRange($0.range.location, readable.range) }.map { sign in
-      UIAccessibilityCustomAction(name: sign.label) { [weak self] _ in
-        self?.openNote(sign, from: element)
-        return true
-      }
-    }
-  }
-
-  /// Draws the words selected, or none, and – unless a finger is still choosing them – tells JS.
+  /// Draws the words selected, or none, and – unless a finger is still choosing them – tells JS; and
+  /// where they show, or that they show nowhere while a finger chooses them.
   private func setSelected(_ selected: Selected?, report: Bool = true) {
     self.selected = selected
-    pages.select(selected.map(textRanges(of:)) ?? [])
+    applyMarks()
     if report {
       reportSelection()
     }
+    reportFrame()
+  }
+
+  /// Tells JS where the selection shows, if that changed: the part of its first line in sight and of
+  /// its last, in points from the reader's top left – none while a finger chooses words or the text
+  /// moves, or where none of the selection is in sight.
+  private func reportFrame() {
+    let frame = selectionFrame()
+    let key = frame.map { "\($0.first) \($0.last)" } ?? ""
+    guard key != reportedFrame else { return }
+    reportedFrame = key
+    guard let frame else { return onSelectionFrame(["frame": NSNull()]) }
+    onSelectionFrame(["frame": ["first": Self.numbers(frame.first), "last": Self.numbers(frame.last)]])
+  }
+
+  /// Where the selection shows in sight, in this view's coordinates: the line of its first words in
+  /// sight, from the first to the last of them on it, and the line of its last.
+  private func selectionFrame() -> (first: CGRect, last: CGRect)? {
+    guard let selected, anchorWords == nil, !pages.isMoving, !pages.isScrollingByHand else { return nil }
+    let lines = pages.lineRects(for: textRanges(of: selected)).map { pages.convert($0, to: self) }.filter { $0.width > 0 && $0.intersects(bounds) }
+    guard let first = lines.first, let last = lines.last else { return nil }
+    // A line may come in pieces – a part's last line given twice, text of both directions: those at
+    // its height, one after the other, are one.
+    let line = { (rect: CGRect, pieces: [CGRect]) in
+      pieces.prefix { abs($0.midY - rect.midY) < rect.height / 2 }.reduce(rect) { $0.union($1) }
+    }
+    return (line(first, Array(lines.dropFirst())), line(last, Array(lines.dropLast().reversed())))
+  }
+
+  /// A rectangle as JS gets it: x, y, width and height, to half a point.
+  private static func numbers(_ rect: CGRect) -> [Double] {
+    [rect.minX, rect.minY, rect.width, rect.height].map { (Double($0) * 2).rounded() / 2 }
   }
 
   /// Tells JS what is selected, if that changed: the first and last words as the selection's ends –
@@ -557,25 +665,26 @@ class ReaderView: ExpoView {
       }
       return
     }
-    let (first, last) = (words[selected.words.lowerBound], words[selected.words.upperBound])
-    var from: [String: Any] = ["chapter": first.place.chapter, "verse": first.place.verse]
-    var to: [String: Any] = ["chapter": last.place.chapter, "verse": last.place.verse]
-    let fromWord = first.place.index != 0 ? Int(first.place.index) : -1
-    let next = selected.words.upperBound + 1
-    let toWord = next < words.count && words[next].isInVerse(of: last) ? Int(last.place.index) : -1
-    if fromWord >= 0 { from["word"] = fromWord }
-    if toWord >= 0 { to["word"] = toWord }
-    let key = "\(first.place.passage) \(first.place.book) \(first.place.chapter):\(first.place.verse):\(fromWord) \(last.place.chapter):\(last.place.verse):\(toWord)"
+    let (from, to) = ends(of: selected)
+    let key = "\(selected.passage) \(selected.book) \(from) \(to)"
     guard key != reportedSelection else { return }
     reportedSelection = key
-    onSelectionChange(["selection": ["passage": first.place.passage, "book": first.place.book, "from": from, "to": to]])
+    let record = { (end: MarkEnd) -> [String: Any] in
+      var record: [String: Any] = ["chapter": end.chapter, "verse": end.verse]
+      if let word = end.word { record["word"] = word }
+      return record
+    }
+    onSelectionChange(["selection": ["passage": selected.passage, "book": selected.book, "from": record(from), "to": record(to)]])
   }
 
-  /// A tap on the sign of a mark's note opens the note, or closes it if it is the one open.
-  private func tapSign(_ id: String) {
-    setSelected(nil)
-    guard let sign = signs.first(where: { $0.mark == id }) else { return }
-    openNote?.range == sign.range ? closeNote() : openNote(sign)
+  /// The ends of the words selected, as JS hears of them: the first and the last word – a whole verse
+  /// where they are its first or last word.
+  private func ends(of selected: Selected) -> (from: MarkEnd, to: MarkEnd) {
+    let (first, last) = (words[selected.words.lowerBound], words[selected.words.upperBound])
+    let next = selected.words.upperBound + 1
+    let lastIsWord = next < words.count && words[next].isInVerse(of: last)
+    return (MarkEnd(chapter: first.place.chapter, verse: first.place.verse, word: first.place.index == 0 ? nil : first.place.index),
+            MarkEnd(chapter: last.place.chapter, verse: last.place.verse, word: lastIsWord ? last.place.index : nil))
   }
 
   /// How far the glyphs of `letter` reach above and below the baseline in `font`, per point of its size.
@@ -702,19 +811,34 @@ class ReaderView: ExpoView {
     return cells
   }
 
-  /// How far the text of verse lines starts, past the widest verse number before it.
-  private func numberColumnWidth(_ paragraphs: [Paragraph]) -> CGFloat {
+  /// How far the text of verse lines starts, past the widest verse number before it: by the column
+  /// of books side by side – each book its own, and in a column narrow for its numbers, at most a
+  /// quarter of it, so its lines keep room for their words – and for the text that flows, of `-1`.
+  private func numberColumnWidths(_ paragraphs: [Paragraph], sideBySide: Bool, along: Set<UInt32>) -> [Int: CGFloat] {
     var widths: [String: CGFloat] = [:]
-    var widest: CGFloat = 0
+    var widest: [Int: CGFloat] = [:]
     for paragraph in paragraphs where paragraph.numberHangs {
       let number = paragraph.runs[0].text.trimmingCharacters(in: .whitespaces)
       let font = font(of: paragraph)
       let key = "\(font.fontName) \(font.pointSize) \(number)"
       let width = widths[key] ?? (number as NSString).size(withAttributes: [.font: font]).width
       widths[key] = width
-      widest = max(widest, width + paragraph.fontSize * 0.4)
+      let column = Self.numberColumn(of: paragraph, sideBySide: sideBySide, along: along)
+      widest[column] = max(widest[column] ?? 0, width + paragraph.fontSize * 0.4)
     }
-    return widest.rounded(.up)
+    // As wide as the reader lays the columns of books side by side out.
+    let columns = CGFloat((paragraphs.filter { along.contains($0.passage) }.map(\.column).max() ?? 0) + 1)
+    let gap = max(margin, 16)
+    let cell = (bounds.width - 2 * margin - (columns - 1) * gap) / columns
+    return Dictionary(uniqueKeysWithValues: widest.map { column, width in
+      (column, (column >= 0 && bounds.width > 0 ? min(width, cell / 4) : width).rounded(.up))
+    })
+  }
+
+  /// The column whose verse numbers a paragraph's hang by: its book's, side by side, or else `-1`, the
+  /// text that flows.
+  private static func numberColumn(of paragraph: Paragraph, sideBySide: Bool, along: Set<UInt32>) -> Int {
+    sideBySide && along.contains(paragraph.passage) ? Int(paragraph.column) : -1
   }
 
   /// One step through the words: "word+1", "word-1", "word+10", "word-10", "verse+1" or "verse-1".
@@ -765,14 +889,17 @@ class ReaderView: ExpoView {
     }
   }
 
-  /// A note as VoiceOver names it: "Footnote 1", "Cross reference a".
+  /// A note as VoiceOver names it: "Footnote 1", "Cross reference a" – the sign of a host's mark's
+  /// note as "Note".
   fileprivate static func name(of note: NoteMark) -> String {
+    guard note.kind != signKind else { return "Note" }
     let kind = ["footnote": "Footnote", "endnote": "Endnote", "crossReference": "Cross reference"][note.kind] ?? "Note"
     return "\(kind) \(note.mark)"
   }
 
-  /// The headings and verses VoiceOver finds in sight, and the notes' marks: where they stand and
-  /// where they are, in this view's points, but not their text, which JS never gets.
+  /// The headings and verses VoiceOver finds in sight, and the notes' marks – the signs of the host's
+  /// marks' notes by their marks' ids: where they stand and where they are, in this view's points, but
+  /// not their text, which JS never gets.
   func accessibilityElementsInSight() -> [[String: Any]] {
     guard let elements = pages.accessibilityElements as? [ReadableElement] else { return [] }
     let sight = screenRect(bounds, in: self)
@@ -792,7 +919,7 @@ class ReaderView: ExpoView {
       }
       return found
     }
-    let notes: [[String: Any]] = (marks + signs).compactMap { (mark: ReaderNote) -> [String: Any]? in
+    let notes: [[String: Any]] = marks.compactMap { (mark: ReaderNote) -> [String: Any]? in
       guard let rect = pages.rect(for: mark.range) else { return nil }
       let shown = screenRect(rect, in: pages)
       guard shown.intersects(sight) else { return nil }
@@ -801,15 +928,19 @@ class ReaderView: ExpoView {
         "passage": paragraph.passage, "book": paragraph.book, "chapter": mark.chapter, "verse": mark.verse,
         "kind": mark.kind, "language": paragraph.language, "frame": frame(shown),
       ]
-      found[mark.kind == "mark" ? "mark" : "note"] = mark.mark
+      if mark.kind == Self.signKind {
+        found["mark"] = mark.id
+      } else {
+        found["note"] = mark.mark
+      }
       return found
     }
     return readables + notes
   }
 
-  /// Opens a note – a footnote's text, a cross reference's verses, a mark's note – where its mark or
-  /// sign stands, and tells VoiceOver; `from` is what VoiceOver was on. The mark is brought into
-  /// sight first.
+  /// Opens a note – a footnote's text, a cross reference's verses, a host's mark's note – where its
+  /// mark stands, and tells VoiceOver; `from` is what VoiceOver was on. The mark is brought into sight
+  /// first.
   fileprivate func openNote(_ mark: ReaderNote, from element: Any? = nil) {
     closeNote()
     // Out of sight – as from a VoiceOver action on a verse further on – it opens once it is in sight.
@@ -994,17 +1125,16 @@ class ReaderView: ExpoView {
 
   /// Selects the word at a point in this view's coordinates, as a tap there would.
   func tap(at point: CGPoint) {
-    let point = pages.convert(point, from: self)
-    if let id = pages.sign(at: point) {
-      return tapSign(id)
-    }
-    pages.characterIndex(at: point).map(selectWord(atCharacter:))
+    pages.characterIndex(at: pages.convert(point, from: self)).map(selectWord(atCharacter:))
   }
 
   /// A tap on a note's mark opens the note, or closes it if it is the one open; a tap on a word
-  /// selects it, and names the marks on it to JS. Any tap ends a selection.
+  /// selects it, and names the marks on it to JS. The first tap after a selection only ends it.
   private func selectWord(atCharacter offset: Int) {
-    setSelected(nil)
+    if selected != nil {
+      closeNote()
+      return setSelected(nil)
+    }
     if let note = marks.first(where: { $0.range.location <= offset && offset <= NSMaxRange($0.range) }) {
       openNote?.range == note.range ? closeNote() : openNote(note)
       return
@@ -1116,10 +1246,9 @@ class ReaderView: ExpoView {
   }
 }
 
-/// What opens a note in the reader's text: a note's mark, or the sign of a host's mark – in which
-/// paragraph, where in the text (a sign stands at the last character of its mark's words), the
-/// note's runs, what VoiceOver calls it, its kind, its mark – a note's, or the host's mark's id – and
-/// the verse it stands in.
+/// A note's mark in the reader's text – an edition's, or the sign of a host's mark's note: in which
+/// paragraph, where in the text, the note's runs, what VoiceOver calls it, its kind, its mark, the
+/// host's mark's id for a sign, and the verse it stands in.
 private struct ReaderNote {
   let paragraph: Int
   let range: NSRange
@@ -1127,19 +1256,19 @@ private struct ReaderNote {
   let label: String
   let kind: String
   let mark: String
+  let id: String?
   let chapter: UInt32
   let verse: UInt32
 }
 
-/// A host's mark in the reader's text: in which paragraph, where in the text – its words –, how it is
-/// drawn, and its note, where the mark ends.
+/// A host's mark in the reader's text: in which paragraph, where in the text – its words – and how it
+/// is drawn.
 private struct ReaderMark {
   let id: String
   let paragraph: Int
   let range: NSRange
   let fill: UIColor?
   let line: UIColor?
-  let note: [NoteRun]?
 }
 
 /// A verse of the reader's text: where it is, its number included, and its words – none for a verse
@@ -1147,6 +1276,16 @@ private struct ReaderMark {
 private struct ReaderVerse {
   let range: NSRange
   let words: ClosedRange<Int>?
+}
+
+/// How the selection is drawn, given a mark's look – a highlight and an underline, by the names or
+/// colors a mark gives: as words marked so would look, for a pen that marks as it goes. A pen that
+/// erases too takes its look off words that all lie in one mark of it, by place: those look as they
+/// will then.
+struct SelectionStyle: Equatable {
+  let highlight: String?
+  let underline: String?
+  let erases: Bool
 }
 
 /// Words selected, of one passage's book: from the first to the last, by their index in the reader's
@@ -1311,6 +1450,8 @@ private final class ReadableElement: UIAccessibilityElement {
         let local = NSRange(location: mark.range.location - readable.range.location, length: mark.range.length)
         text = (text as NSString).replacingCharacters(in: local, with: ", \(ReaderView.name(of: mark.note).lowercased()), ")
       }
+      // The sign of a host's mark's note shown in full is read as what it is.
+      text = text.replacingOccurrences(of: "\u{270E}", with: "note")
       let label = NSMutableAttributedString()
       // A verse with marks on it is announced as marked, before its text.
       if reader?.isMarked(readable) == true {
@@ -1336,7 +1477,7 @@ private final class ReadableElement: UIAccessibilityElement {
     get {
       guard let reader else { return [] }
       return reader.moveActions(from: readable.firstWord) + reader.noteActions(for: readable.marks.map(\.index), from: self)
-        + reader.signActions(for: readable, from: self) + reader.selectionActions(for: readable)
+        + reader.selectionActions(for: readable)
     }
     set {}
   }

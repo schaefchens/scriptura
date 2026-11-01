@@ -4,7 +4,7 @@ use std::ops::RangeFrom;
 use serde::Serialize;
 
 use crate::model::{Mark, Note, NoteRun};
-use crate::{Book, Chapter, Library, Notes, Options, Reference, Verse, VerseNumbers};
+use crate::{Book, Chapter, Library, MarkNotes, Notes, Options, Reference, Verse, VerseNumbers};
 
 /// A paragraph with its own direction, language and font, from the passage at `passage` in the
 /// request: a chapter's heading, its running text, or a verse on a line of its own.
@@ -78,9 +78,9 @@ pub struct Word {
 
 /// A note's mark in a paragraph: on which verse, its range in the paragraph's text in UTF-16 code
 /// units – the mark alone, or the whole of a note shown in full – and the note it opens – its kind
-/// ("footnote", "endnote" or "crossReference"), its mark as text, and its runs, which may refer to
-/// verses. A tap on the mark opens the note where it stands; a screen reader announces it with the
-/// verse.
+/// ("footnote", "endnote" or "crossReference"; "mark" for the sign of an app's mark's note), its
+/// mark as text, and its runs, which may refer to verses. A tap on the mark opens the note where it
+/// stands; a screen reader announces it with the verse.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteMark {
@@ -91,6 +91,8 @@ pub struct NoteMark {
     pub kind: String,
     pub mark: String,
     pub runs: Vec<NoteRun>,
+    /// The app's mark whose note it opens, for a mark's sign; none for an edition's note.
+    pub id: Option<String>,
 }
 
 /// What opens a chapter, set large over the first lines of its paragraph: the first letter of the
@@ -104,9 +106,10 @@ pub struct DropCap {
     pub letter_end: u32,
 }
 
-/// A host's mark in a paragraph: the words of it the paragraph holds, as their range in the
-/// paragraph's text in UTF-16 code units – a verse's number and the notes' marks left out – how
-/// it is drawn, and its note, where the mark ends: a sign there opens it. See [`Mark`].
+/// An app's mark in a paragraph: the words of it the paragraph holds, as their range in the
+/// paragraph's text in UTF-16 code units – a verse's number and the notes' marks left out – and how
+/// it is drawn. The sign of its note stands in the text where the mark ends, as a note's mark: see
+/// [`MARK_SIGN_KIND`]. See [`Mark`].
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlacedMark {
@@ -115,10 +118,24 @@ pub struct PlacedMark {
     pub end: u32,
     pub highlight: Option<String>,
     pub underline: Option<String>,
-    /// The note's runs, in the last paragraph of a passage that holds any of the mark, if it has
-    /// a note; none elsewhere.
-    pub note: Option<Vec<NoteRun>>,
 }
+
+/// A paragraph's marks, for a reader to draw them anew as they change, its layout kept: the marks
+/// over its words, and the signs of their notes, which stand in its text – as these change, so does
+/// the text, and the paragraph is to be laid out anew.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ParagraphMarks {
+    pub marks: Vec<PlacedMark>,
+    pub signs: Vec<NoteMark>,
+}
+
+/// The kind of a note's mark that is the sign of an app's mark's note: it stands in the text where
+/// the mark ends, and opens the mark's note as an edition's note's mark opens its note.
+pub const MARK_SIGN_KIND: &str = "mark";
+/// The sign itself: a pencil.
+const MARK_SIGN: &str = "\u{270E}";
+/// Where the sign stands alone, a word joiner before it keeps it on the line of the word it follows.
+const JOINED_SIGN: &str = "\u{2060}\u{270E}";
 
 const HEADING: &str = "heading";
 const NUMBER: &str = "number";
@@ -417,9 +434,10 @@ fn paragraph<'a>(
 }
 
 /// Each mark's words in every paragraph of its book that holds any – from the first of them to
-/// the last – and its note in the last such paragraph of each passage. A mark of a book no
-/// paragraph is from shows nowhere.
-pub(crate) fn place_marks(blocks: &mut [Block], marks: &[Mark]) {
+/// the last – and the sign of its note, if it has one, where its words end in the last such
+/// paragraph of each passage – or the note in full there, as `mark_notes` asks: see [`set_signs`].
+/// A mark of a book no paragraph is from shows nowhere.
+pub(crate) fn place_marks(blocks: &mut [Block], marks: &[Mark], mark_notes: MarkNotes) {
     let key = |word: &Word| (word.chapter, word.verse, word.index);
     // The paragraphs of each book that hold words, with the places of their first and last words:
     // a mark looks only at its book's, and passes over those it has no words in at a glance.
@@ -431,11 +449,13 @@ pub(crate) fn place_marks(blocks: &mut [Block], marks: &[Mark]) {
         }
     }
     let mut placed: Vec<(usize, PlacedMark)> = Vec::new();
+    // Where the signs of the marks' notes go: in a paragraph, where a mark's words there end.
+    let mut signs: Vec<(usize, u32, &Mark)> = Vec::new();
     for mark in marks {
         let Some(candidates) = by_book.get(mark.book.as_str()) else { continue };
         let (from, to) = (mark.from.start(), mark.to.end());
-        // Per passage, the mark's part in the last paragraph that holds any of it.
-        let mut last: Vec<(u32, usize)> = Vec::new();
+        // Per passage, the last paragraph that holds any of the mark, and where its words end there.
+        let mut last: Vec<(u32, usize, u32)> = Vec::new();
         for &(index, first, end) in candidates {
             if end < from || first > to {
                 continue;
@@ -446,31 +466,148 @@ pub(crate) fn place_marks(blocks: &mut [Block], marks: &[Mark]) {
             if start >= stop {
                 continue;
             }
+            let end = block.words[stop - 1].end;
             placed.push((
                 index,
                 PlacedMark {
                     id: mark.id.clone(),
                     start: block.words[start].start,
-                    end: block.words[stop - 1].end,
+                    end,
                     highlight: mark.highlight.clone(),
                     underline: mark.underline.clone(),
-                    note: None,
                 },
             ));
-            match last.iter_mut().find(|(passage, _)| *passage == block.passage) {
-                Some(entry) => entry.1 = placed.len() - 1,
-                None => last.push((block.passage, placed.len() - 1)),
+            match last.iter_mut().find(|(passage, ..)| *passage == block.passage) {
+                Some(entry) => (entry.1, entry.2) = (index, end),
+                None => last.push((block.passage, index, end)),
             }
         }
         if !mark.note.is_empty() {
-            for (_, at) in last {
-                placed[at].1.note = Some(mark.note.clone());
-            }
+            signs.extend(last.into_iter().map(|(_, index, end)| (index, end, mark)));
         }
     }
     for (index, mark) in placed {
         blocks[index].marks.push(mark);
     }
+    set_signs(blocks, signs, mark_notes);
+}
+
+/// Sets the sign of each mark's note into its paragraph's text where the mark's words there end –
+/// after an edition's note's mark that follows them straight away – as a note's mark of the kind
+/// [`MARK_SIGN_KIND`], which opens the mark's note, on the verse of the mark's last word there; or,
+/// in full, the note in brackets after the sign, as an edition's note shown in full. What follows in
+/// the paragraph moves on: its words, verses, notes and marks; a mark the sign falls within takes it
+/// in. Like the notes' marks, a sign is no word, nor is a note in full.
+fn set_signs(blocks: &mut [Block], signs: Vec<(usize, u32, &Mark)>, mark_notes: MarkNotes) {
+    // Where each goes in its paragraph's text as it is, and on which verse.
+    let mut places: Vec<(usize, u32, usize, u32, u32, &Mark)> = Vec::new();
+    for (order, (index, end, mark)) in signs.into_iter().enumerate() {
+        let block = &blocks[index];
+        let mut at = end;
+        while let Some(note) =
+            block.notes.iter().find(|note| note.start == at && note.end - note.start == utf16(&note.mark))
+        {
+            at = note.end;
+        }
+        let Some(word) = block.words.iter().rfind(|word| word.end <= end) else { continue };
+        places.push((index, at, order, word.chapter, word.verse, mark));
+    }
+    // The last first, so each leaves the places of those before it as they are; of signs at one
+    // place, the later mark's first, so the earlier's stands first.
+    places.sort_by_key(|place| std::cmp::Reverse((place.0, place.1, place.2)));
+    for (index, at, _, chapter, verse, mark) in places {
+        insert_sign(&mut blocks[index], at, chapter, verse, mark, mark_notes);
+    }
+}
+
+/// Sets a mark's sign – or its note in full – into a paragraph's text at `at`, on a verse: see
+/// [`set_signs`].
+fn insert_sign(block: &mut Block, at: u32, chapter: u32, verse: u32, mark: &Mark, mark_notes: MarkNotes) {
+    let sign = |text: &str| Segment { text: text.into(), role: Some(NOTE.into()) };
+    let inserted = match mark_notes {
+        MarkNotes::Sign => vec![sign(JOINED_SIGN)],
+        // Set off by spaces from the words around it where there are none, as an edition's note.
+        MarkNotes::Inline => {
+            let text: String = block.segments.iter().map(|segment| segment.text.as_str()).collect();
+            let (before, after) = split_utf16(&text, at);
+            let lead = before.chars().last().is_some_and(|char| !char.is_whitespace());
+            let trail = after.chars().next().is_some_and(char::is_alphanumeric);
+            vec![
+                Segment { text: if lead { " [".into() } else { "[".into() }, role: Some(NOTE_TEXT.into()) },
+                sign(MARK_SIGN),
+                Segment {
+                    text: format!(" {}]{}", inline_text(&mark.note), if trail { " " } else { "" }),
+                    role: Some(NOTE_TEXT.into()),
+                },
+            ]
+        }
+    };
+    let length: u32 = inserted.iter().map(|segment| utf16(&segment.text)).sum();
+    // The segment the place is in is cut there, and the sign goes between its parts.
+    let mut start = 0;
+    let mut place = block.segments.len();
+    for (index, segment) in block.segments.iter().enumerate() {
+        let end = start + utf16(&segment.text);
+        if at < end {
+            place = index;
+            break;
+        }
+        start = end;
+    }
+    if place < block.segments.len() && at > start {
+        let (before, after) = split_utf16(&block.segments[place].text, at - start);
+        let (before, after) = (before.to_string(), after.to_string());
+        let role = block.segments[place].role.clone();
+        block.segments[place].text = before;
+        block.segments.insert(place + 1, Segment { text: after, role });
+        place += 1;
+    }
+    for (offset, segment) in inserted.into_iter().enumerate() {
+        block.segments.insert(place + offset, segment);
+    }
+    for word in &mut block.words {
+        if word.start >= at {
+            (word.start, word.end) = (word.start + length, word.end + length);
+        }
+    }
+    // The verse the sign stands in takes it in.
+    for range in &mut block.verses {
+        if range.start >= at {
+            range.start += length;
+        }
+        if range.end >= at {
+            range.end += length;
+        }
+    }
+    for note in &mut block.notes {
+        if note.start >= at {
+            (note.start, note.end) = (note.start + length, note.end + length);
+        }
+    }
+    for placed in &mut block.marks {
+        if placed.start >= at {
+            (placed.start, placed.end) = (placed.start + length, placed.end + length);
+        } else if placed.end > at {
+            placed.end += length;
+        }
+    }
+    if let Some(drop) = &mut block.drop_cap
+        && drop.letter_start >= at
+    {
+        (drop.letter_start, drop.letter_end) = (drop.letter_start + length, drop.letter_end + length);
+    }
+    let position = block.notes.partition_point(|note| note.start < at);
+    let sign = NoteMark {
+        chapter,
+        verse,
+        start: at,
+        end: at + length,
+        kind: MARK_SIGN_KIND.into(),
+        mark: (if mark_notes == MarkNotes::Sign { JOINED_SIGN } else { MARK_SIGN }).into(),
+        runs: mark.note.clone(),
+        id: Some(mark.id.clone()),
+    };
+    block.notes.insert(position, sign);
 }
 
 /// A note as it goes into a verse's text, at `at`: its mark, as a segment of its own – shown in
@@ -486,7 +623,7 @@ struct Insert<'a> {
 impl<'a> Insert<'a> {
     fn of(note: &'a Note, notes: Notes, verse_text: &str) -> Self {
         let mark = Segment { text: note.mark.clone(), role: Some(NOTE.into()) };
-        let text = if notes == Notes::Inline { inline_text(note) } else { String::new() };
+        let text = if notes == Notes::Inline { inline_text(&note.runs) } else { String::new() };
         let segments = if text.is_empty() {
             vec![mark]
         } else {
@@ -506,8 +643,8 @@ impl<'a> Insert<'a> {
 
 /// A note's text as it shows in full: its runs as one line, without the verse it names, which it
 /// stands in.
-fn inline_text(note: &Note) -> String {
-    let runs = note.runs.iter().filter(|run| run.role.as_deref() != Some("origin"));
+fn inline_text(runs: &[NoteRun]) -> String {
+    let runs = runs.iter().filter(|run| run.role.as_deref() != Some("origin"));
     let text: String = runs.map(|run| if run.text == "\n" { " ".to_string() } else { run.text.clone() }).collect();
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -647,6 +784,7 @@ impl Text {
             kind: note.kind.clone(),
             mark: note.mark.clone(),
             runs: note.runs.clone(),
+            id: None,
         });
     }
 }
@@ -681,7 +819,14 @@ mod tests {
     }
 
     fn options(verse_per_line: bool) -> Options {
-        Options { font_size: 28.0, verse_per_line, companions: Vec::new(), notes: Notes::Marks, drop_caps: true }
+        Options {
+            font_size: 28.0,
+            verse_per_line,
+            companions: Vec::new(),
+            notes: Notes::Marks,
+            drop_caps: true,
+            mark_notes: MarkNotes::Sign,
+        }
     }
 
     fn passage(book: &str, chapter: Option<u32>, from: Option<u32>, to: Option<u32>) -> Vec<Block> {
@@ -938,7 +1083,7 @@ mod tests {
         let mut library = Library::new();
         library.add(NOTED.as_bytes()).unwrap();
         let reference = Reference { book: "noted".into(), chapter: None, from: None, to: None };
-        let options = Options { font_size: 28.0, verse_per_line: false, companions: Vec::new(), notes, drop_caps };
+        let options = Options { notes, drop_caps, ..options(false) };
         library.blocks(&[reference], &options).swap_remove(1)
     }
 
@@ -1081,6 +1226,16 @@ mod tests {
         library.blocks(&[Reference { book: book.into(), chapter, from: None, to: None }], &options)
     }
 
+    /// The signs of marks' notes in a block's text.
+    fn signs(block: &Block) -> Vec<&NoteMark> {
+        block.notes.iter().filter(|note| note.kind == MARK_SIGN_KIND).collect()
+    }
+
+    /// The part of a block's text from `start` to `end`, in UTF-16 code units.
+    fn text_between(block: &Block, start: u32, end: u32) -> String {
+        String::from_utf16(&utf16(block)[start as usize..end as usize]).unwrap()
+    }
+
     /// A block's marks, each as its id and the text it covers.
     fn marked_text(block: &Block) -> Vec<(String, String)> {
         let text = utf16(block);
@@ -1113,11 +1268,18 @@ mod tests {
         assert!(blocks.iter().all(|block| block.kind != "heading" || block.marks.is_empty()));
         assert_eq!(blocks[1].marks[0].highlight.as_deref(), Some("yellow"));
         assert_eq!(blocks[1].marks[1].underline.as_deref(), Some("blue"));
-        assert_eq!(blocks[1].marks[1].note, None);
-        let note = blocks[3].marks[0].note.as_ref().expect("the note where the mark ends");
-        assert_eq!(note[0].text, "Three days: see ");
-        // The verses the note refers to follow, as with an edition's notes.
-        assert_eq!(note.last().unwrap().role.as_deref(), Some("preview"));
+        // The note's sign stands in the text where the mark ends – after 2:1, in chapter 2's
+        // paragraph – as a note's mark that opens the mark's note, the verses it refers to after it,
+        // as with an edition's notes. It is no word: the words are as they were.
+        assert!(signs(&blocks[1]).is_empty());
+        let sign = signs(&blocks[3]);
+        assert_eq!((sign.len(), sign[0].id.as_deref(), sign[0].chapter, sign[0].verse), (1, Some("prayer"), 2, 1));
+        assert_eq!(text_between(&blocks[3], sign[0].start, sign[0].end), "\u{2060}\u{270E}");
+        assert_eq!(verses(&blocks[3])[0], format!("{VERSE_2_1}\u{2060}\u{270E}"));
+        assert!(verses(&blocks[3])[1].starts_with("2\u{a0}He said"));
+        assert_eq!(sign[0].runs[0].text, "Three days: see ");
+        assert_eq!(sign[0].runs.last().unwrap().role.as_deref(), Some("preview"));
+        assert_eq!(words(&blocks), words(&placed(&marked("[]"), "jonah", None, false, &[])));
         // A verse per line: each verse's line holds its part; the note goes with the last.
         let lines = placed(&library, "jonah", None, true, &[]);
         let with: Vec<(usize, Vec<String>)> = (0..)
@@ -1127,11 +1289,11 @@ mod tests {
             .collect();
         assert_eq!(with, [(3, vec!["fish".to_string(), "prayer".to_string()]), (5, vec!["prayer".to_string()])]);
         assert_eq!(marked_text(&lines[5]), [("prayer".to_string(), VERSE_2_1.to_string())]);
-        assert!(lines[3].marks[1].note.is_none() && lines[5].marks[0].note.is_some());
+        assert!(signs(&lines[3]).is_empty() && signs(&lines[5]).len() == 1);
         // Only chapter 2 shown: the mark's note still stands where it ends.
         let chapter = placed(&library, "jonah", Some(2), false, &[]);
         assert_eq!(marked_text(&chapter[1]), [("prayer".to_string(), VERSE_2_1.to_string())]);
-        assert!(chapter[1].marks[0].note.is_some());
+        assert_eq!(signs(&chapter[1]).len(), 1);
         // A mark of a book that isn't shown shows nowhere; a passage of its book has it.
         assert!(blocks.iter().all(|block| block.marks.iter().all(|mark| mark.id != "elsewhere")));
         let psalm = placed(&library, "psalms", Some(51), false, &[]);
@@ -1154,11 +1316,90 @@ mod tests {
         let english: Vec<_> = blocks.iter().filter(|block| block.book == "jonah" && !block.marks.is_empty()).collect();
         assert_eq!(english.len(), 1);
         assert_eq!(marked_text(english[0]), [("prayer".to_string(), VERSE_2_1.to_string())]);
-        assert!(english[0].marks[0].note.is_some());
-        // The same marks, paragraph by paragraph, as a reader asks for them anew.
+        assert_eq!(signs(english[0]).len(), 1);
+        // The same marks and signs, paragraph by paragraph, as a reader asks for them anew.
         let options = Options { companions: vec!["jonah-de".into()], ..options(false) };
         let again =
             library.marks_in(&[Reference { book: "jonah".into(), chapter: Some(2), from: None, to: None }], &options);
-        assert_eq!(again, blocks.iter().map(|block| block.marks.clone()).collect::<Vec<_>>());
+        let expected: Vec<ParagraphMarks> = (blocks.iter())
+            .map(|block| ParagraphMarks {
+                marks: block.marks.clone(),
+                signs: signs(block).into_iter().cloned().collect(),
+            })
+            .collect();
+        assert_eq!(again, expected);
+    }
+
+    #[test]
+    fn a_marks_sign_follows_an_editions_note_and_is_no_word() {
+        let mut library = Library::new();
+        library.add(NOTED.as_bytes()).unwrap();
+        let reference = Reference { book: "noted".into(), chapter: None, from: None, to: None };
+        let blocks = |library: &Library, notes| {
+            library.blocks(std::slice::from_ref(&reference), &Options { notes, ..options(false) })
+        };
+        let spoken = |library: &Library| {
+            let mut speech = library.speech(std::slice::from_ref(&reference), &[], false, None, None);
+            std::iter::from_fn(|| speech.next(10_000)).collect::<Vec<_>>()
+        };
+        let unmarked =
+            (words(&blocks(&library, Notes::Marks)), words(&blocks(&library, Notes::Inline)), spoken(&library));
+        library
+            .add_marks(
+                br#"[{"id": "god", "book": "noted", "from": {"chapter": 1, "verse": 1, "word": 3}, "to": {"chapter": 1, "verse": 1, "word": 3}, "highlight": "yellow", "note": [{"text": "On God"}]},
+                     {"id": "again", "book": "noted", "from": {"chapter": 1, "verse": 1, "word": 3}, "to": {"chapter": 1, "verse": 1, "word": 3}, "underline": "blue", "note": [{"text": "Again"}]},
+                     {"id": "earth", "book": "noted", "from": {"chapter": 1, "verse": 2}, "to": {"chapter": 1, "verse": 2}, "note": [{"text": "Formless"}]}]"#,
+            )
+            .unwrap();
+        // After the edition's footnote that follows "God", in the marks' order; at the verse's end.
+        let block = blocks(&library, Notes::Marks).swap_remove(1);
+        assert_eq!(
+            text(&block),
+            "aIn the beginning, God1\u{2060}\u{270E}\u{2060}\u{270E} created the heavens2. 2\u{a0}The earth was formless.\u{2060}\u{270E}"
+        );
+        let found: Vec<_> = signs(&block)
+            .iter()
+            .map(|sign| (sign.id.clone().unwrap(), sign.verse, sign.runs[0].text.clone()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("god".into(), 1, "On God".into()),
+                ("again".into(), 1, "Again".into()),
+                ("earth".into(), 2, "Formless".into())
+            ]
+        );
+        for sign in signs(&block) {
+            assert_eq!(text_between(&block, sign.start, sign.end), "\u{2060}\u{270E}");
+        }
+        assert!(block.notes.windows(2).all(|pair| pair[0].start < pair[1].start));
+        assert_eq!(block.drop_cap, Some(DropCap { letter_start: 1, letter_end: 2 }));
+        assert_eq!(
+            marked_text(&block),
+            [
+                ("god".into(), "God".into()),
+                ("again".into(), "God".into()),
+                ("earth".into(), "The earth was formless.".into())
+            ]
+        );
+        assert_eq!(verses(&block)[1], "2\u{a0}The earth was formless.\u{2060}\u{270E}");
+        // A note shown in full stands after the signs; and either way, the words and what is read
+        // aloud are as they were.
+        let inline = blocks(&library, Notes::Inline).swap_remove(1);
+        assert!(text(&inline).contains("God\u{2060}\u{270E}\u{2060}\u{270E} [1 Elohim] created"), "{}", text(&inline));
+        let marked = (words(std::slice::from_ref(&block)), words(std::slice::from_ref(&inline)), spoken(&library));
+        assert_eq!(marked, unmarked);
+        // A mark's note shown in full stands in brackets after its sign, as an edition's note in full,
+        // and its words are still as they were.
+        let options = Options { mark_notes: MarkNotes::Inline, ..options(false) };
+        let full = library.blocks(std::slice::from_ref(&reference), &options).swap_remove(1);
+        assert_eq!(
+            text(&full),
+            "aIn the beginning, God1 [\u{270E} On God] [\u{270E} Again] created the heavens2. 2\u{a0}The earth was formless. [\u{270E} Formless]"
+        );
+        let first = signs(&full)[0];
+        assert_eq!(text_between(&full, first.start, first.end), " [\u{270E} On God]");
+        assert_eq!(verses(&full)[1], "2\u{a0}The earth was formless. [\u{270E} Formless]");
+        assert_eq!(words(std::slice::from_ref(&full)), unmarked.0);
     }
 }

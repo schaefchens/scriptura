@@ -45,7 +45,17 @@ export function Reader({ ref, className, style, ...options }: ReaderProps) {
   const made = useRef(false);
   const latest = useRef(options);
   latest.current = options;
-  const { library, onWordChange: _word, onLaidOut: _laidOut, onSpeechChange: _speech, onReference: _reference, onSelectionChange: _selection, onMarkTap: _mark, ...shown } = options;
+  const {
+    library,
+    onWordChange: _word,
+    onLaidOut: _laidOut,
+    onSpeechChange: _speech,
+    onReference: _reference,
+    onSelectionChange: _selection,
+    onMarkTap: _mark,
+    onSelectionFrame: _frame,
+    ...shown
+  } = options;
   const shownKey = JSON.stringify(shown);
   const withCallbacks = (): WebReaderOptions => ({
     ...latest.current,
@@ -55,6 +65,7 @@ export function Reader({ ref, className, style, ...options }: ReaderProps) {
     onReference: (target) => latest.current.onReference?.(target),
     onSelectionChange: (selection) => latest.current.onSelectionChange?.(selection),
     onMarkTap: (tap) => latest.current.onMarkTap?.(tap),
+    onSelectionFrame: (frame) => latest.current.onSelectionFrame?.(frame),
   });
 
   useEffect(() => {

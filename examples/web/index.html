@@ -8,8 +8,16 @@
       html, body, #root { margin: 0; height: 100%; font: 14px system-ui, sans-serif; }
       main { display: flex; flex-direction: column; height: 100%; }
       header { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px; }
+      .reader-area { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
       .reader { flex: 1; min-height: 0; }
-      .marking { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 30px; padding: 0 8px 6px; }
+      .marking { position: absolute; z-index: 20; display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 10px;
+        border: 1px solid rgba(127, 127, 127, 0.35); box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25); max-width: 340px; }
+      .marking .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+      .marking .dot { width: 28px; height: 28px; border-radius: 50%; border: 1px solid rgba(0, 0, 0, 0.25); cursor: pointer; }
+      .marking .line { width: 28px; height: 28px; border: 1px solid rgba(127, 127, 127, 0.4); border-bottom: 5px solid; border-radius: 4px;
+        background: transparent; font-weight: 600; cursor: pointer; }
+      .marking .chosen { outline: 2px solid currentColor; outline-offset: 2px; }
+      .marking.pen { left: 8px; bottom: 8px; }
       footer { padding: 6px 8px; font-size: 11px; opacity: 0.7; }
       footer a { color: inherit; }
     </style>
