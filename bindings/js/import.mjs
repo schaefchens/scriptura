@@ -12,6 +12,7 @@
 //     "bibles": [{ "usfm": "<zip from eBible.org>", "work": "World English Bible", "language": "en",
 //                  "direction": "ltr", "books": [{ "id": "jonah", "code": "JON" }] }],
 //     "quran": { "surahs": [1, 112] },
+//     "lexicons": { "file": "texts/lexicons.json" },
 //     "recordings": { "folder": "recordings", "quran": [{ "everyayah": "Alafasy_128kbps",
 //                     "voice": "alafasy", "name": "Mishary Rashid Alafasy", "surahs": [1, 112] }] }
 //   }
@@ -23,7 +24,11 @@
 // have a `title` the source lacks. USFM's footnotes, endnotes and cross references come along as
 // each verse's notes, where they stand in its text: footnotes numbered and cross references
 // lettered through each chapter, as the reader marks them. A cross reference's verses are found by
-// the names the edition's own books go by, so the reader can jump to them. Surahs come from Tanzil's text with quran-tajweed's rules laid
+// the names the edition's own books go by, so the reader can jump to them. Words tagged with
+// Strong's numbers – USFM's \w word|strong="H1961"\w*, the Open Scriptures Hebrew Bible's lemmas
+// and grammar codes – keep them as their verse's tags; `lexicons` writes the entries they lead to
+// (see lexicon.mjs) – of the numbers the books have, or all, with `"all": true` – from its sources,
+// or from copies of them named in `sources` (hebrew, greek, strongsHebrew), by URL or path. Surahs come from Tanzil's text with quran-tajweed's rules laid
 // over it, titled as Tanzil names them. `fonts` fetches the reader's fonts per script, and any
 // `extraFonts` ({ family, url, file? }), named after their PostScript names, so one family name
 // works on iOS, Android and the web.
@@ -44,6 +49,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
+import { lexicon } from './lexicon.mjs';
 import scriptFonts from './src/fonts.json' with { type: 'json' };
 
 const TANZIL_METADATA = 'https://tanzil.net/res/text/metadata/quran-data.js';
@@ -100,7 +106,19 @@ const LAYOUT = /^(?:p|pi\d?|pm[cor]?|po|pr|pc|m|mi|nb|b|q\d?|q[mrc]\d?|li\d?|cls
 // USFM character styles: their markers go, their text stays.
 const CHARACTER_STYLES = 'add|bd|bdit|bk|em|it|k|nd|no|ord|pn|qs|qt|sc|sig|tl|wj';
 // Word markers with their attributes, such as Strong's numbers: only the word stays.
-const WORDS = /\\\+?w ([^|\\]*)(?:\|[^\\]*)?\\\+?w\*/g;
+const WORDS = /\\\+?w ([^|\\]*)(?:\|([^\\]*))?\\\+?w\*/g;
+// A tagged word's place, kept through the cleaning of a verse's text: stand-ins around it, the first
+// naming its tag by index.
+const TAG_START = '\uE002';
+const TAG_OPEN = '\uE003';
+const TAG_END = '\uE004';
+const TAG_STAND_INS = /(\uE000\d+\uE001|\uE002\d+\uE003|\uE004)/;
+
+/** A number in a lexicon as the lexicons write it: H or G, four digits, and a letter telling words of one number apart – H1121a. */
+function lexiconNumber(number) {
+  const [, letter, digits, apart] = number.match(/^([HG])(\d+)\s*([a-z]?)/i);
+  return `${letter.toUpperCase()}${digits.padStart(4, '0')}${apart.toLowerCase()}`;
+}
 const NOTE_KINDS = { f: 'footnote', fe: 'endnote', x: 'crossReference' };
 // What a note's markers make of the text after them: the verse it is on, words quoted from the
 // text, a label such as "Greek", or plain text. \\xt holds the verses a cross reference points to.
@@ -124,9 +142,14 @@ function parseUsfm(usfm, digits, names) {
   // Each note gives way to a stand-in naming it, so its place in the text is kept while the rest is
   // cleaned: word attributes and character styles go, their text stays.
   const notes = [];
+  // A word with a Strong's number keeps it, between stand-ins that keep its place.
+  const numbers = [];
   const plain = usfm
     .replace(/\\(f|fe|x) (.*?)\\\1\*/gs, (_, marker, body) => `\uE000${notes.push({ kind: NOTE_KINDS[marker], body }) - 1}\uE001`)
-    .replace(WORDS, '$1')
+    .replace(WORDS, (_, word, attributes) => {
+      const number = attributes?.match(/strong="([HG]\d+[a-z]?)"/i)?.[1];
+      return number ? `${TAG_START}${numbers.push(lexiconNumber(number)) - 1}${TAG_OPEN}${word}${TAG_END}` : word;
+    })
     .replace(new RegExp(`\\\\\\+?(?:${CHARACTER_STYLES})(?: |\\*)`, 'g'), '');
   // What is left are markers, each followed by its text.
   const parts = plain.split(/\\([a-z]+\d*)\s*/);
@@ -159,8 +182,9 @@ function parseUsfm(usfm, digits, names) {
         // The edition's own number for a verse it numbers otherwise, as Luther 1912 has "[2:1]"
         // before what English Bibles number Jonah 1:17.
         .replace(/^\s*\[\d+:\d+\]/, '');
-      const { text, placed } = placeNotes(cleaned);
+      const { text, placed, tagged } = placeNotes(cleaned);
       verse.runs = [[text, null]];
+      if (tagged.length > 0) verse.tags = tagged.map(({ index, at, length }) => [at, [length, numbers[index]]]);
       const own = placed.map(({ index, at }) => {
         const { kind, body } = notes[index];
         const mark = kind === 'crossReference' ? letters(++lettered) : inDigits(++numbered, digits);
@@ -176,16 +200,28 @@ function parseUsfm(usfm, digits, names) {
 /**
  * A verse's text with its spaces tidied – one between words, none at the ends – and each note's
  * stand-in taken out: where it stood, in UTF-16 code units of the tidied text. A note after a
- * space stands before it instead, with the word it follows.
+ * space stands before it instead, with the word it follows. Tagged words' stand-ins go too: where
+ * each word starts, and how long it is.
  */
 function placeNotes(text) {
   let tidied = '';
   const placed = [];
-  for (const piece of text.split(/(\uE000\d+\uE001)/)) {
+  const tagged = [];
+  for (const piece of text.split(TAG_STAND_INS)) {
     const standIn = piece.match(/^\uE000(\d+)\uE001$/);
     if (standIn) {
       const at = tidied.length > 0 && tidied.endsWith(' ') ? tidied.length - 1 : tidied.length;
       placed.push({ index: Number(standIn[1]), at });
+      continue;
+    }
+    const tagStart = piece.match(/^\uE002(\d+)\uE003$/);
+    if (tagStart) {
+      tagged.push({ index: Number(tagStart[1]), at: tidied.length });
+      continue;
+    }
+    if (piece === TAG_END) {
+      const last = tagged.at(-1);
+      if (last && last.length === undefined) last.length = tidied.length - last.at;
       continue;
     }
     let run = piece.replace(/\s+/g, ' ');
@@ -193,7 +229,11 @@ function placeNotes(text) {
     tidied += run;
   }
   const trimmed = tidied.trimEnd();
-  return { text: trimmed, placed: placed.map(({ index, at }) => ({ index, at: Math.min(at, trimmed.length) })) };
+  return {
+    text: trimmed,
+    placed: placed.map(({ index, at }) => ({ index, at: Math.min(at, trimmed.length) })),
+    tagged: tagged.filter(({ length }) => length > 0),
+  };
 }
 
 /**
@@ -288,6 +328,23 @@ function bookNames(usfm) {
   return names;
 }
 
+/** Runs without the stand-ins of tagged words, and where each of those words starts, in UTF-16 code units of the runs' text. */
+function untag(runs) {
+  const tagged = [];
+  let offset = 0;
+  const untagged = runs.map(([text, role]) => {
+    let plain = '';
+    for (const piece of text.split(TAG_STAND_INS)) {
+      const tagStart = piece.match(/^\uE002(\d+)\uE003$/);
+      if (tagStart) tagged.push({ index: Number(tagStart[1]), at: offset + plain.length });
+      else if (piece !== TAG_END) plain += piece;
+    }
+    offset += plain.length;
+    return [plain, role];
+  });
+  return { runs: untagged, tagged };
+}
+
 /** Runs spaced as running text is: one space between words, none at the start or the end. */
 function tidy(runs) {
   const tidied = [];
@@ -301,21 +358,42 @@ function tidy(runs) {
 }
 
 /**
+ * A word of the Open Scriptures Hebrew Bible as a tag's parts, as the core reads them – length,
+ * number, grammar: its parts are split by slashes in its text and its grammar code, such as וַ/יְהִי
+ * and HC/Vqw3ms; its lemma, such as c/1961, gives the prefixes first, as letters, then the word's
+ * number, and leaves its suffixes out.
+ */
+function osisTag(attributes, word) {
+  const attribute = (name) => attributes.match(new RegExp(`${name}="([^"]*)"`))?.[1] ?? '';
+  const [language, codes] = [attribute('morph').slice(0, 1), attribute('morph').slice(1).split('/')];
+  const lemmas = attribute('lemma').split('/');
+  return word.split('/').map((part, index) => {
+    const number = lemmas[index]?.match(/^\d+(?:\s*[a-z])?/)?.[0];
+    const grammar = codes[index] ? `${language}${codes[index]}` : undefined;
+    // As the core reads a part: its length, number and grammar, those at the end left out where there are none.
+    if (grammar) return [part.length, number ? lexiconNumber(`H${number}`) : null, grammar];
+    return number ? [part.length, lexiconNumber(`H${number}`)] : [part.length];
+  });
+}
+
+/**
  * A book's chapters from the Open Scriptures Hebrew Bible's OSIS: each verse's words, with its
  * maqaf, paseq and sof pasuq. A word written one way and read another (ketiv and qere) shows the
  * written form in parentheses, as no word of the verse, and then the word read. Paragraph marks
  * and the editors' notes are left out – but for those giving the verse's number in the KJV,
- * where it differs, which a verse keeps as `kjv`.
+ * where it differs, which a verse keeps as `kjv`. Each word read keeps its lemmas' numbers and its
+ * grammar, as tags.
  */
 function parseOsis(osis) {
   const chapters = [];
   for (const [, chapter, verse, body] of osis.matchAll(/<verse osisID="[^.]+\.(\d+)\.(\d+)">(.*?)<\/verse>/gs)) {
     const kjv = body.match(/<note>KJV:[^.]+\.(\d+)\.(\d+)<\/note>/);
     if (chapters.at(-1)?.number !== Number(chapter)) chapters.push({ number: Number(chapter), label: chapter, verses: [] });
+    const parts = [];
     // A word's parts are split by slashes; segments carry the marks between words.
     const text = (xml) =>
       xml
-        .replace(/<w [^>]*>([^<]*)<\/w>/g, (_, word) => word.replaceAll('/', ''))
+        .replace(/<w ([^>]*)>([^<]*)<\/w>/g, (_, attributes, word) => `${TAG_START}${parts.push(osisTag(attributes, word)) - 1}${TAG_OPEN}${word.replaceAll('/', '')}${TAG_END}`)
         .replace(/<seg type="x-(?:pe|samekh)">[^<]*<\/seg>/g, '')
         .replace(/<seg [^>]*>([^<]*)<\/seg>/g, '$1')
         .replace(/<[^>]+>/g, '');
@@ -327,7 +405,15 @@ function parseOsis(osis) {
     for (let i = 1; i < pieces.length; i += 3) {
       runs.push([' ', null], [`(${pieces[i].replaceAll('/', '')})`, 'ketiv'], [` ${text(pieces[i + 1])}${text(pieces[i + 2])}`, null]);
     }
-    chapters.at(-1).verses.push({ number: Number(verse), label: verse, runs: tidy(runs), ...(kjv && { kjv: [Number(kjv[1]), Number(kjv[2])] }) });
+    const { runs: tidied, tagged } = untag(tidy(runs));
+    const tags = tagged.map(({ index, at }) => [at, ...parts[index]]);
+    chapters.at(-1).verses.push({
+      number: Number(verse),
+      label: verse,
+      runs: tidied,
+      ...(kjv && { kjv: [Number(kjv[1]), Number(kjv[2])] }),
+      ...(tags.length > 0 && { tags }),
+    });
   }
   // A verse without a note is numbered as in the KJV – unless another took its number there: the
   // KJV leaves it unnumbered, as it does a psalm's title, which then counts as verse 0.
@@ -379,7 +465,7 @@ for (const { usfm, osis, work, language, direction, digits, books: wanted } of c
     // eBible.org names the files like 33-JONeng-web.usfm.
     const book = usfm
       ? parseUsfm(execFileSync('unzip', ['-p', zip, `*-${code}*.usfm`], { encoding: 'utf8', maxBuffer: 1 << 28 }), digits, names)
-      : { chapters: parseOsis(await (await download(`${osis}${file}.xml`)).text()) };
+      : { chapters: parseOsis(isUrl(osis) ? await (await download(`${osis}${file}.xml`)).text() : await readFile(join(relative(osis), `${file}.xml`), 'utf8')) };
     // The book's USFM code, which every edition shares, reads them along.
     books.push({ id, code, title: title ?? book.title, work, direction, language, chapters: book.chapters });
   }
@@ -448,6 +534,26 @@ if (config.books) {
   await mkdir(dirname(out), { recursive: true });
   await writeFile(out, JSON.stringify(books));
   console.log(`Imported ${books.length} books into ${out}${fontCount ? ` and ${fontCount} fonts into ${relative(config.fonts)}` : ''}.`);
+}
+
+if (config.lexicons) {
+  const numbers = new Set();
+  const codes = new Set();
+  for (const { verses } of books.flatMap((book) => book.chapters)) {
+    for (const [, ...parts] of verses.flatMap((verse) => verse.tags ?? [])) {
+      for (const [, number, grammar] of parts) {
+        if (number) numbers.add(number);
+        if (grammar) codes.add(grammar);
+      }
+    }
+  }
+  const read = async (source) => (isUrl(source) ? (await download(source)).text() : readFile(relative(source), 'utf8'));
+  const { lexicon: made, missing } = await lexicon({ numbers, codes, all: config.lexicons.all, sources: config.lexicons.sources, read });
+  const out = relative(config.lexicons.file);
+  await mkdir(dirname(out), { recursive: true });
+  await writeFile(out, JSON.stringify([made]));
+  if (missing.length > 0) console.warn(`No entries for ${missing.length} numbers: ${missing.slice(0, 20).join(', ')}${missing.length > 20 ? ' …' : ''}`);
+  console.log(`Wrote ${made.entries.length} entries and ${Object.keys(made.grammar).length} grammar codes into ${out}.`);
 }
 
 /** A verse's words, as the core counts them: runs of non-space characters with a letter or a digit. */

@@ -3,7 +3,8 @@ use std::ops::RangeFrom;
 
 use serde::Serialize;
 
-use crate::model::{Mark, Note, NoteRun};
+use crate::lexicon::{Lexicons, digits};
+use crate::model::{Mark, Note, NoteRun, WordTag};
 use crate::{Book, Chapter, Library, MarkNotes, Notes, Options, Reference, Verse, VerseNumbers};
 
 /// A paragraph with its own direction, language and font, from the passage at `passage` in the
@@ -74,13 +75,17 @@ pub struct Word {
     pub index: u32,
     pub start: u32,
     pub end: u32,
+    /// Whether it opens an entry of the library's lexicons, as the options let its book's words: see
+    /// [`Library::entry`]. A reader opens it on a double tap.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub entry: bool,
 }
 
 /// A note's mark in a paragraph: on which verse, its range in the paragraph's text in UTF-16 code
 /// units – the mark alone, or the whole of a note shown in full – and the note it opens – its kind
-/// ("footnote", "endnote" or "crossReference"; "mark" for the sign of an app's mark's note), its
-/// mark as text, and its runs, which may refer to verses. A tap on the mark opens the note where it
-/// stands; a screen reader announces it with the verse.
+/// ("footnote", "endnote" or "crossReference"; "mark" for the sign of an app's mark's note; "entry"
+/// for a word's number), its mark as text, and its runs, which may refer to verses. A tap on the
+/// mark opens the note where it stands; a screen reader announces it with the verse.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NoteMark {
@@ -93,6 +98,9 @@ pub struct NoteMark {
     pub runs: Vec<NoteRun>,
     /// The app's mark whose note it opens, for a mark's sign; none for an edition's note.
     pub id: Option<String>,
+    /// The word, by its index in the verse, whose entry it opens, for a word's number: its runs are
+    /// none, and [`Library::entry`] gives them.
+    pub word: Option<u32>,
 }
 
 /// What opens a chapter, set large over the first lines of its paragraph: the first letter of the
@@ -132,6 +140,9 @@ pub struct ParagraphMarks {
 /// The kind of a note's mark that is the sign of an app's mark's note: it stands in the text where
 /// the mark ends, and opens the mark's note as an edition's note's mark opens its note.
 pub const MARK_SIGN_KIND: &str = "mark";
+/// The kind of a note's mark that is a word's number in a lexicon, standing after the word: it opens
+/// the word's entry. See [`crate::LexiconUse`].
+pub const ENTRY_KIND: &str = "entry";
 /// The sign itself: a pencil.
 const MARK_SIGN: &str = "\u{270E}";
 /// Where the sign stands alone, a word joiner before it keeps it on the line of the word it follows.
@@ -162,7 +173,8 @@ pub(crate) fn blocks(
     let Some(book) = library.book(&reference.book) else {
         return Vec::new();
     };
-    let (size, verse_per_line, notes) = (options.font_size, options.verse_per_line, options.notes);
+    let (size, verse_per_line) = (options.font_size, options.verse_per_line);
+    let shown = Shown { options, lexicons: &library.lexicons };
     let wanted = reference.from.unwrap_or(0)..=reference.to.unwrap_or(u32::MAX);
     let chapters =
         book.chapters.iter().filter(|chapter| reference.chapter.is_none_or(|number| number == chapter.number));
@@ -174,16 +186,15 @@ pub(crate) fn blocks(
     if !editions.is_empty() {
         let verses = chapters
             .map(|chapter| (chapter, chapter.verses.iter().filter(|verse| wanted.contains(&verse.number)).collect()));
-        return along(book, verses.collect(), reference, passage, size, verse_per_line, notes, &editions, rows);
+        return along(book, verses.collect(), reference, passage, &shown, &editions, rows);
     }
     let mut blocks = Vec::new();
     for chapter in chapters {
         let verses = chapter.verses.iter().filter(|verse| wanted.contains(&verse.number));
         blocks.push(heading(book, chapter, (reference.from, reference.to), passage, size));
         if verse_per_line {
-            blocks.extend(
-                verses.map(|verse| paragraph(book, [(chapter, verse)], passage, size, "verse", None, notes, false)),
-            );
+            blocks
+                .extend(verses.map(|verse| paragraph(book, [(chapter, verse)], passage, "verse", None, &shown, false)));
             continue;
         }
         // Unnumbered text before verse 1, such as the basmala, stands apart from the verses.
@@ -193,7 +204,7 @@ pub(crate) fn blocks(
             let opens =
                 options.drop_caps && book.verse_numbers == VerseNumbers::Start && Some(verses[0].number) == first;
             let verses = verses.into_iter().map(|verse| (chapter, verse));
-            blocks.push(paragraph(book, verses, passage, size, "text", None, notes, opens));
+            blocks.push(paragraph(book, verses, passage, "text", None, &shown, opens));
         }
     }
     for block in &mut blocks {
@@ -206,18 +217,16 @@ pub(crate) fn blocks(
 /// book's heading, then a row per verse – the verse, and in each edition the verses the KJV numbers
 /// alike, after any it numbers apart or leaves out that come before them, such as a psalm's title.
 /// An edition with none for a verse leaves its cell empty.
-#[allow(clippy::too_many_arguments)]
 fn along(
     book: &Book,
     chapters: Vec<(&Chapter, Vec<&Verse>)>,
     reference: &Reference,
     passage: u32,
-    size: f64,
-    verse_per_line: bool,
-    notes: Notes,
+    shown: &Shown,
     editions: &[&Book],
     rows: &mut RangeFrom<u32>,
 ) -> Vec<Block> {
+    let (size, verse_per_line) = (shown.options.font_size, shown.options.verse_per_line);
     let kind = if verse_per_line { "verse" } else { "text" };
     let mut read: Vec<Edition> = editions.iter().map(|edition| Edition::of(edition)).collect();
     // Each edition starts at the verse numbered as the passage's first – from a chapter's start,
@@ -247,7 +256,7 @@ fn along(
         }
         for (verse, cells) in rowed {
             let row = rows.next().unwrap_or_default();
-            blocks.push(Block { row, ..paragraph(book, [(chapter, verse)], passage, size, kind, None, notes, false) });
+            blocks.push(Block { row, ..paragraph(book, [(chapter, verse)], passage, kind, None, shown, false) });
             for ((column, edition), cell) in (1..).zip(editions).zip(cells).filter(|(_, cell)| !cell.is_empty()) {
                 // In verse lines, each verse of a cell is a line of its own.
                 let lines =
@@ -255,7 +264,7 @@ fn along(
                 blocks.extend(lines.into_iter().map(|verses| Block {
                     row,
                     column,
-                    ..paragraph(edition, verses, passage, size, kind, Some(chapter.number), notes, false)
+                    ..paragraph(edition, verses, passage, kind, Some(chapter.number), shown, false)
                 }));
             }
         }
@@ -347,22 +356,30 @@ fn typical_letter(book: &Book) -> (&'static str, f64) {
     }
 }
 
+/// What paragraphs show besides their words, as the options ask: the notes, and the words' numbers,
+/// from the lexicons that hold their entries.
+struct Shown<'a> {
+    options: &'a Options,
+    lexicons: &'a Lexicons,
+}
+
 /// Verses as a paragraph. Read along with a verse of another chapter, a verse's number names its
-/// own chapter, as 2:1 beside 1:17. With `notes`, each note's mark stands in the text where the
-/// note does, as a segment of its own – or, shown in full, in brackets after its mark. With
-/// `drop_cap`, the paragraph opens the chapter: its first verse goes without its number, and the
-/// text's first letter is to be set large.
-#[allow(clippy::too_many_arguments)]
+/// own chapter, as 2:1 beside 1:17. As `shown` asks, each note's mark stands in the text where the
+/// note does, as a segment of its own – or, shown in full, in brackets after its mark – and each
+/// tagged word's number after it, as a mark of the kind [`ENTRY_KIND`]; its words open their
+/// entries. With `drop_cap`, the paragraph opens the chapter: its first verse goes without its
+/// number, and the text's first letter is to be set large.
 fn paragraph<'a>(
     book: &Book,
     verses: impl IntoIterator<Item = (&'a Chapter, &'a Verse)>,
     passage: u32,
-    size: f64,
     kind: &str,
     beside: Option<u32>,
-    notes: Notes,
+    shown: &Shown,
     drop_cap: bool,
 ) -> Block {
+    let (size, notes) = (shown.options.font_size, shown.options.notes);
+    let (entries, numbers) = (shown.options.entries_in(&book.id), shown.options.numbers_in(&book.id));
     let mut text = Text::default();
     let mut drop = None;
     for (chapter, verse) in verses {
@@ -386,20 +403,26 @@ fn paragraph<'a>(
         }
         let offset = text.length;
         let verse_text: String = verse.runs.iter().map(|(run, _)| run.as_str()).collect();
-        let inserts: Vec<Insert> = match notes {
-            Notes::None => Vec::new(),
-            _ => verse.notes.iter().map(|note| Insert::of(note, notes, &verse_text)).collect(),
-        };
+        let words = words_of(verse);
+        let mut inserts: Vec<Insert> = Vec::new();
+        if numbers {
+            inserts.extend(verse.tags.iter().filter_map(|tag| Insert::number(tag, &words)));
+        }
+        if notes != Notes::None {
+            inserts.extend(verse.notes.iter().map(|note| Insert::of(note, notes, &verse_text)));
+        }
+        // In the order they stand; a number before a note at the same place, as it follows its word.
+        inserts.sort_by_key(|insert| insert.at);
         // How far the notes that stand before a point of the verse's text move it: at a word's
         // start, a note there comes before the word; at its end, one there comes after it.
         let moved = |at: u32, before: bool| -> u32 {
             let before_it = |insert: &&Insert| if before { insert.at <= at } else { insert.at < at };
             inserts.iter().filter(before_it).map(|insert| insert.length).sum()
         };
-        let words = words_of(verse);
         for (index, &(start, end)) in (0..).zip(&words) {
+            let entry = entries && shown.lexicons.has_entry(verse, (start, end));
             let (start, end) = (offset + start + moved(start, true), offset + end + moved(end, false));
-            text.words.push(Word { chapter, verse: verse.number, index, start, end });
+            text.words.push(Word { chapter, verse: verse.number, index, start, end, entry });
         }
         if opens && let Some(&(first, _)) = words.first() {
             let (start, letter) = (offset + first + moved(first, true), initial(&verse_text, first));
@@ -606,21 +629,42 @@ fn insert_sign(block: &mut Block, at: u32, chapter: u32, verse: u32, mark: &Mark
         mark: (if mark_notes == MarkNotes::Sign { JOINED_SIGN } else { MARK_SIGN }).into(),
         runs: mark.note.clone(),
         id: Some(mark.id.clone()),
+        word: None,
     };
     block.notes.insert(position, sign);
 }
 
 /// A note as it goes into a verse's text, at `at`: its mark, as a segment of its own – shown in
 /// full, in brackets after its mark, set off from the words around it by spaces where there are
-/// none – and how long that is in UTF-16 code units.
+/// none – and how long that is in UTF-16 code units. Or a word's number, which opens its entry.
 struct Insert<'a> {
-    note: &'a Note,
+    opens: Opens<'a>,
     at: u32,
     segments: Vec<Segment>,
     length: u32,
 }
 
+/// What a mark set into the text opens: a note, or the entry of a word, by its index in the verse.
+enum Opens<'a> {
+    Note(&'a Note),
+    Entry(u32),
+}
+
 impl<'a> Insert<'a> {
+    /// A tagged word's numbers, after it, as one mark: its digits, those of each of its parts with a
+    /// number. None for a tag without one, or within no word of the core.
+    fn number(tag: &WordTag, words: &[(u32, u32)]) -> Option<Self> {
+        let numbers: Vec<String> = tag.parts.iter().filter_map(|part| part.number.as_deref()).map(digits).collect();
+        let word = words.iter().position(|&(start, end)| tag.at < end && tag.end() > start)?;
+        if numbers.is_empty() {
+            return None;
+        }
+        let mark = numbers.join("\u{a0}");
+        let length = utf16(&mark);
+        let segments = vec![Segment { text: mark, role: Some(NOTE.into()) }];
+        Some(Insert { opens: Opens::Entry(word as u32), at: tag.end(), segments, length })
+    }
+
     fn of(note: &'a Note, notes: Notes, verse_text: &str) -> Self {
         let mark = Segment { text: note.mark.clone(), role: Some(NOTE.into()) };
         let text = if notes == Notes::Inline { inline_text(&note.runs) } else { String::new() };
@@ -637,7 +681,7 @@ impl<'a> Insert<'a> {
             ]
         };
         let length = segments.iter().map(|segment| utf16(&segment.text)).sum();
-        Insert { note, at: note.at, segments, length }
+        Insert { opens: Opens::Note(note), at: note.at, segments, length }
     }
 }
 
@@ -775,17 +819,31 @@ impl Text {
         for segment in &insert.segments {
             self.push(&segment.text, segment.role.as_deref());
         }
-        let note = insert.note;
-        self.notes.push(NoteMark {
-            chapter,
-            verse,
-            start,
-            end: self.length,
-            kind: note.kind.clone(),
-            mark: note.mark.clone(),
-            runs: note.runs.clone(),
-            id: None,
-        });
+        let mark = match insert.opens {
+            Opens::Note(note) => NoteMark {
+                chapter,
+                verse,
+                start,
+                end: self.length,
+                kind: note.kind.clone(),
+                mark: note.mark.clone(),
+                runs: note.runs.clone(),
+                id: None,
+                word: None,
+            },
+            Opens::Entry(word) => NoteMark {
+                chapter,
+                verse,
+                start,
+                end: self.length,
+                kind: ENTRY_KIND.into(),
+                mark: insert.segments.iter().map(|segment| segment.text.as_str()).collect(),
+                runs: Vec::new(),
+                id: None,
+                word: Some(word),
+            },
+        };
+        self.notes.push(mark);
     }
 }
 
@@ -826,6 +884,8 @@ mod tests {
             notes: Notes::Marks,
             drop_caps: true,
             mark_notes: MarkNotes::Sign,
+            lexicon: crate::LexiconUse::Entries,
+            lexicon_books: None,
         }
     }
 

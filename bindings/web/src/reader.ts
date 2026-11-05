@@ -81,8 +81,8 @@ export type WebReader = {
 /** Where a word stands: in which passage, in which book – the passage's, or one read along – and where in the scripture. */
 type Place = { passage: number; book: string; chapter: number; verse: number; index: number };
 
-/** A word of the text: where it stands, its paragraph, and its range in the paragraph's text. */
-type Word = { place: Place; block: number; start: number; end: number };
+/** A word of the text: where it stands, its paragraph, its range in the paragraph's text, and whether a double tap opens its lexicon entry. */
+type Word = { place: Place; block: number; start: number; end: number; entry: boolean };
 
 /** A piece of a paragraph's text in the page: its text node, and where it starts in the paragraph's text. */
 type Piece = { node: Text; start: number; length: number };
@@ -93,6 +93,8 @@ const HAND_SETTLES = 700;
 const SCROLL_KEYS = new Set(['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' ']);
 /** A pointer held this long, in milliseconds, is no tap. */
 const LONG_PRESS = 500;
+/** A second tap on a word within this long after the first, in milliseconds, opens its lexicon entry. */
+const DOUBLE_TAP = 350;
 /** A pointer held still this long on a word, in milliseconds, selects it, as a long press does on iOS and Android. */
 const PRESS = 450;
 /** While a press takes the selection on: how near the top or bottom, in pixels, the reader scrolls on, and how near a page's side, held how long, turns it. */
@@ -101,7 +103,7 @@ const SIDE = 32;
 const SIDE_REST = 500;
 /** What screen readers read where a mark starts. */
 const MARKED = 'Marked. ';
-const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVoices' | 'nowPlaying' | 'dropCapFont' | 'selectionStyle'>> = {
+const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVoices' | 'nowPlaying' | 'dropCapFont' | 'selectionStyle' | 'lexiconBooks'>> = {
   fontSize: 28,
   paging: 'scroll',
   columns: 1,
@@ -115,13 +117,14 @@ const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVo
   notes: 'marks',
   dropCaps: true,
   markNotes: 'sign',
+  lexicon: 'entries',
   selectBy: 'word',
   voices: {},
   speakAlong: false,
   speechRate: 1,
 };
-/** What a note is called where screen readers announce its mark, and where it opens. */
-const NOTE_NAMES = { footnote: 'Footnote', endnote: 'Endnote', crossReference: 'Cross reference', mark: 'Note' };
+/** What a note is called where screen readers announce its mark, and where it opens; a word's number opens its lexicon entry. */
+const NOTE_NAMES = { footnote: 'Footnote', endnote: 'Endnote', crossReference: 'Cross reference', mark: 'Note', entry: 'Lexicon entry' };
 /** How wide a note opens at most, in pixels, and how much of the reader's height it may take. */
 const NOTE_WIDTH = 360;
 const NOTE_HEIGHT = 0.45;
@@ -160,8 +163,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   /** Each word's index in `words`, by where it stands. */
   let indices = new Map<string, number>();
   let current: number | undefined;
-  /** The note open, and the mark it opened at. */
-  let opened: { note: HTMLElement; mark: HTMLElement } | undefined;
+  /** The note open, and the mark it opened at – none for a word's entry, opened at the word. */
+  let opened: { note: HTMLElement; mark?: HTMLElement } | undefined;
   const readAloud = new ReadAloud(
     (part, word) => reached({ passage: part.passage, book: part.book, chapter: word.chapter, verse: word.verse, index: word.index }),
     // While it speaks, with whether the reader follows it. The browser's media controls show it too.
@@ -221,7 +224,16 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     shownPassages = JSON.stringify(passages);
     closeNote();
 
-    blocks = library.blocks(passages, { fontSize, versePerLine, companions, notes: options.notes, dropCaps: options.dropCaps, markNotes: options.markNotes });
+    blocks = library.blocks(passages, {
+      fontSize,
+      versePerLine,
+      companions,
+      notes: options.notes,
+      dropCaps: options.dropCaps,
+      markNotes: options.markNotes,
+      lexicon: options.lexicon,
+      lexiconBooks: options.lexiconBooks,
+    });
     const families = [...blocks.map(familyOf), ...(options.dropCapFont ? [`"${options.dropCapFont}"`] : [])];
     const loading = [...new Set(families)].filter((family) => !fontsLoaded(family) && !awaited.has(family));
     if (loading.length > 0) {
@@ -250,7 +262,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       pieces.push(blockPieces);
       for (const word of block.words) {
         const { chapter, verse, index: wordIndex } = word;
-        words.push({ place: { passage: block.passage, book: block.book, chapter, verse, index: wordIndex }, block: index, start: word.start, end: word.end });
+        const place = { passage: block.passage, book: block.book, chapter, verse, index: wordIndex };
+        words.push({ place, block: index, start: word.start, end: word.end, entry: word.entry ?? false });
       }
     });
 
@@ -356,6 +369,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
         button.dataset.block = String(index);
         button.dataset.note = String(note);
         if (note >= 0) button.setAttribute('aria-label', describe(block.notes[note]));
+        // A word's number stands after every word: out of the way of the keys' tabbing.
+        if (block.notes[note]?.kind === 'entry') button.tabIndex = -1;
         const node = document.createTextNode(shown);
         button.append(node);
         element.append(button);
@@ -457,42 +472,66 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     return { fontFamily: dropFamily, fontSize: `${dropSize}px`, lineHeight: `${2 * line}px`, blockSize: `${2 * line - 0.5}px`, top: `${shift}px` };
   }
 
-  /** A note as screen readers announce its mark: "Footnote 1", "Cross reference a" – the sign of a mark's note as "Note". */
+  /** A note as screen readers announce its mark: "Footnote 1", "Cross reference a" – the sign of a mark's note as "Note", a word's number as "Lexicon entry 1961". */
   const describe = (note: NoteMark) => (note.kind === 'mark' ? NOTE_NAMES.mark : `${NOTE_NAMES[note.kind] ?? 'Note'} ${note.mark}`);
 
-  /** What a note's mark opens: the note's runs, what it is called, and the verse it stands in. */
-  type Opening = { runs: NoteRun[]; label: string; chapter: number; verse: number };
+  /**
+   * What a note's mark opens: the note's runs, what it is called, and the verse it stands in – and for a word's entry, the language
+   * and direction of the lexicon it comes from, where a note has its paragraph's.
+   */
+  type Opening = { runs: NoteRun[]; label: string; chapter: number; verse: number; language?: string; direction?: 'ltr' | 'rtl' };
 
+  /** What a mark opens: its note – or for a word's number, the word's entry, which the library gives. */
   function openingOf(mark: HTMLElement): [Block, Opening] | undefined {
     const block = blocks[Number(mark.dataset.block)];
     const note = block?.notes[Number(mark.dataset.note)];
-    return note && [block, { runs: note.runs, label: describe(note), chapter: note.chapter, verse: note.verse }];
+    if (!note) return undefined;
+    const opening = { runs: note.runs, label: describe(note), chapter: note.chapter, verse: note.verse };
+    if (note.kind !== 'entry') return [block, opening];
+    const entry = options.library.entry(block.book, note.chapter, note.verse, note.word ?? 0);
+    return entry && [block, { ...opening, ...entry }];
+  }
+
+  function openNote(mark: HTMLElement) {
+    const opening = openingOf(mark);
+    if (opening) showNote(opening, Number(mark.dataset.block), mark.getBoundingClientRect(), mark);
+  }
+
+  /** Opens a word's lexicon entry at the word – as a double tap does – if it has one. */
+  function openEntry(index: number) {
+    const word = words[index];
+    const { book, chapter, verse, index: at } = word.place;
+    const entry = options.library.entry(book, chapter, verse, at);
+    if (!entry) return;
+    const range = rangeBetween(word.block, word.start, word.end);
+    const rect = range.getClientRects()[0] ?? range.getBoundingClientRect();
+    showNote([blocks[word.block], { ...entry, label: NOTE_NAMES.entry, chapter, verse }], word.block, rect);
   }
 
   /**
-   * Opens a note at its mark – below the mark's line, or above it where there is no room below –
-   * as a dialog in the paragraph's font, its runs as they are: the verse it names, quotations and
-   * emphasis in italics, words in other languages in their fonts, and each reference a button that
-   * follows it. It stays until a tap elsewhere, the mark again, Escape, or a scroll.
+   * Opens a note where it stands – at its mark, or at a word for the word's entry: below its line, or
+   * above it where there is no room below – as a dialog in the paragraph's font, its runs as they are:
+   * the verse it names, quotations and emphasis in italics, words in bold where they are strong, words
+   * in other languages in their fonts, and each reference a button that follows it. It stays until a
+   * tap elsewhere, the mark again, Escape, or a scroll.
    */
-  function openNote(mark: HTMLElement) {
+  function showNote([block, note]: [Block, Opening], blockIndex: number, at: DOMRect, mark?: HTMLElement) {
     closeNote();
-    const opening = openingOf(mark);
-    if (!opening) return;
-    const [block, note] = opening;
     const dialog = document.createElement('div');
     dialog.className = 'scriptura-note';
     dialog.setAttribute('role', 'dialog');
     dialog.setAttribute('aria-label', note.label);
     dialog.tabIndex = -1;
-    dialog.dir = block.direction;
-    dialog.lang = block.language;
+    dialog.dir = note.direction ?? block.direction;
+    dialog.lang = note.language ?? block.language;
+    // An entry is set in the reader's font for the lexicon's language; a note in its paragraph's.
+    const family = note.language ? familyOf({ ...block, fontFamily: null, language: note.language }) : familyOf(block);
     const { colors } = options;
-    const size = parseFloat(paragraphs[Number(mark.dataset.block)].style.fontSize) || options.fontSize;
+    const size = parseFloat(paragraphs[blockIndex].style.fontSize) || options.fontSize;
     Object.assign(dialog.style, {
-      fontFamily: familyOf(block),
+      fontFamily: family,
       fontSize: `${Math.max(14, Math.round(size * 0.7))}px`,
-      lineHeight: String(lineHeight(familyOf(block)) * 1.15),
+      lineHeight: String(lineHeight(family) * 1.15),
       background: colors.background,
       color: colors.text,
       width: `${Math.min(NOTE_WIDTH, root.clientWidth - 2 * options.sideMargin)}px`,
@@ -519,23 +558,23 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       if (run.role === 'origin') piece.style.color = colors.roles.origin ?? '';
       if (run.role === 'number') piece.style.color = colors.roles.number ?? '';
       if (run.role === 'quotation' || run.role === 'emphasis') piece.style.fontStyle = 'italic';
+      if (run.role === 'strong') piece.style.fontWeight = 'bold';
       if (run.language) {
         piece.lang = run.language;
         piece.dir = 'auto';
-        const family = options.fonts[run.language];
-        if (family) piece.style.fontFamily = `"${family}", ${familyOf(block)}`;
+        const fonts = options.fonts[run.language];
+        if (fonts) piece.style.fontFamily = `"${fonts}", ${family}`;
       }
       piece.textContent = run.text;
       paragraph.append(piece);
     }
     root.append(dialog);
     const area = root.getBoundingClientRect();
-    const at = mark.getBoundingClientRect();
     const height = dialog.offsetHeight;
     const below = at.bottom + 6 + height <= area.bottom - INSET;
     const left = Math.min(Math.max(at.left, area.left + options.sideMargin), area.right - options.sideMargin - dialog.offsetWidth);
     Object.assign(dialog.style, { left: `${Math.max(left, area.left)}px`, top: `${below ? at.bottom + 6 : Math.max(at.top - 6 - height, area.top)}px` });
-    mark.setAttribute('aria-expanded', 'true');
+    mark?.setAttribute('aria-expanded', 'true');
     opened = { note: dialog, mark };
     dialog.focus({ preventScroll: true });
   }
@@ -546,8 +585,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     opened = undefined;
     const focused = note.contains(document.activeElement);
     note.remove();
-    mark.removeAttribute('aria-expanded');
-    if (focused && mark.isConnected) mark.focus({ preventScroll: true });
+    mark?.removeAttribute('aria-expanded');
+    if (focused) (mark?.isConnected ? mark : root).focus({ preventScroll: true });
   }
 
   /**
@@ -1402,6 +1441,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   // and moving on takes the selection along word by word; a drag or a double click select text, as
   // the browser has it.
   let down: { x: number; y: number; at: number; selected: boolean } | undefined;
+  /** The last tap on a word: which, and when – a second on it soon after opens its entry. */
+  let lastTap: { index: number; at: number } | undefined;
   root.addEventListener('pointerdown', (event) => {
     down = { x: event.clientX, y: event.clientY, at: performance.now(), selected: selectionOfPage() !== null };
     reportFrame();
@@ -1424,6 +1465,12 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     pressed.y = event.clientY;
     extendPress();
     edgeFrame ??= requestAnimationFrame(edgeStep);
+  });
+  // A double click on a word with an entry opens it, rather than selecting the word as the browser would.
+  root.addEventListener('mousedown', (event) => {
+    if (event.detail < 2) return;
+    const index = wordAt(event.clientX, event.clientY);
+    if (index !== undefined && words[index].entry) event.preventDefault();
   });
   root.addEventListener('touchmove', (event) => {
     // While a press takes the selection on, the finger moves no text.
@@ -1472,6 +1519,10 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       closeNote();
       const index = wordAt(event.clientX, event.clientY);
       if (index !== undefined) {
+        const now = performance.now();
+        const again = lastTap?.index === index && now - lastTap.at < DOUBLE_TAP;
+        lastTap = again ? undefined : { index, at: now };
+        if (again && words[index].entry) return openEntry(index);
         select(index);
         reportMarkTap(index);
       }
@@ -1537,7 +1588,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   // read goes with the books or recordings that change.
   let library = options.library;
   const followed = (change: LibraryChange) => {
-    if (change === 'marks') return render();
+    if (change === 'marks' || change === 'lexicons') return render();
     readAloud.stop();
     if (change === 'books') render();
   };

@@ -44,20 +44,35 @@ class NoteView(context: Context) : FrameLayout(context) {
     label.movementMethod = LinkMovementMethod.getInstance()
     label.setLineSpacing(0f, 1.15f)
     label.textAlignment = TEXT_ALIGNMENT_VIEW_START
-    // Each paragraph runs in the direction of its first letter: the verses a note refers to may be
-    // in another script than the note.
-    label.textDirection = View.TEXT_DIRECTION_FIRST_STRONG
   }
 
 
   private fun dp(value: Int) = (value * density).roundToInt()
 
   /**
-   * Shows [text] at [anchor] – the mark's rectangle in the parent's pixels – within [bounds], the
-   * parent's area, [margin] from its sides: in [typeface] at [textSize] pixels, [color] on
-   * [background], right-to-left if the text's paragraph is.
+   * Shows [text] at [anchor] – the mark's or the word's rectangle in the parent's pixels – within
+   * [bounds], the parent's area, [margin] from its sides: in [typeface] at [textSize] pixels, [color]
+   * on [background], right-to-left if the text's paragraph is. Each paragraph runs in the direction of
+   * its first letter – the verses a note refers to may be in another script than the note – unless
+   * [oneDirection]: a lexicon entry's lines, a Hebrew word and then its grammar, all run as the entry does.
    */
-  fun show(text: CharSequence, typeface: Typeface?, textSize: Float, color: Int, background: Int, anchor: Rect, bounds: Rect, margin: Int, rightToLeft: Boolean) {
+  fun show(
+    text: CharSequence,
+    typeface: Typeface?,
+    textSize: Float,
+    color: Int,
+    background: Int,
+    anchor: Rect,
+    bounds: Rect,
+    margin: Int,
+    rightToLeft: Boolean,
+    oneDirection: Boolean = false,
+  ) {
+    label.textDirection = when {
+      !oneDirection -> View.TEXT_DIRECTION_FIRST_STRONG
+      rightToLeft -> View.TEXT_DIRECTION_RTL
+      else -> View.TEXT_DIRECTION_LTR
+    }
     label.text = text
     label.typeface = typeface
     label.setTextSize(TypedValue.COMPLEX_UNIT_PX, textSize)

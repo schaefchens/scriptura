@@ -1,4 +1,4 @@
-import type { BookInfo, Mark, MarkInfo, NoteRun, Passage, RecordingInfo, Target, WordPosition } from '@schaefchens/scriptura';
+import type { BookInfo, LexiconInfo, Mark, MarkInfo, NoteRun, Passage, ReaderOptions, RecordingInfo, Target, WordPosition } from '@schaefchens/scriptura';
 
 import init, { Library as Core, type Speech as CoreSpeech } from './generated/scriptura_wasm.js';
 
@@ -20,7 +20,8 @@ export type Block = {
   segments: { text: string; role: string | null }[];
   /** Ranges in the block's text in UTF-16 code units, as JS counts them. */
   verses: { chapter: number; verse: number; start: number; end: number }[];
-  words: { chapter: number; verse: number; index: number; start: number; end: number }[];
+  /** Its words, and whether each opens a lexicon entry, as the options let it: see Library.entry. */
+  words: { chapter: number; verse: number; index: number; start: number; end: number; entry?: boolean }[];
   /** The notes on its verses, each at its mark in the text, which opens it. See the core's NoteMark. */
   notes: NoteMark[];
   /** What opens the chapter, set large over the paragraph's first lines: in running text, where the passage reads the chapter from its start. */
@@ -39,20 +40,29 @@ export type PlacedMark = { id: string; start: number; end: number; highlight: st
 /**
  * A note's mark in a paragraph – its range in the text, on which verse – and the note it opens: a
  * footnote, an endnote or a cross reference, as runs, some of which refer to verses; or, of the kind
- * "mark", the sign of an app's mark's note, with the mark's id.
+ * "mark", the sign of an app's mark's note, with the mark's id; or, of the kind "entry", a word's
+ * number, without runs: the word, by its index in the verse, whose entry Library.entry gives.
  */
 export type NoteMark = {
   chapter: number;
   verse: number;
   start: number;
   end: number;
-  kind: 'footnote' | 'endnote' | 'crossReference' | 'mark';
+  kind: 'footnote' | 'endnote' | 'crossReference' | 'mark' | 'entry';
   mark: string;
   runs: NoteRun[];
   id?: string | null;
+  word?: number | null;
 };
 
 export type { NoteRun, Target };
+
+/**
+ * A word's lexicon entry, to open as a note where the word stands: in the language and direction of the lexicon it comes from, its
+ * runs – for each word its source tagged within it, each part's grammar where the source gives it, and each part's entry: the word as
+ * the lexicon writes it, how that is read, its gloss and its number, then its definition, whose references are links.
+ */
+export type WordEntry = { language: string; direction: 'ltr' | 'rtl'; runs: NoteRun[] };
 
 /** Text for a voice, in one language: a chapter's heading, or verses of a passage's book without their numbers. See the core's Utterance. */
 export type Utterance = {
@@ -109,8 +119,8 @@ export async function loadScriptura(url?: string | URL) {
 const bytesOf = (json: string | ArrayBuffer | Uint8Array) =>
   typeof json === 'string' ? new TextEncoder().encode(json) : json instanceof Uint8Array ? json : new Uint8Array(json);
 
-/** What changed in a library: its books, its recordings, or its marks. */
-export type LibraryChange = 'books' | 'recordings' | 'marks';
+/** What changed in a library: its books, its recordings, its marks, or its lexicons. */
+export type LibraryChange = 'books' | 'recordings' | 'marks' | 'lexicons';
 
 /**
  * The books a page has added, the recordings of their chapters, the page's marks on their words, and passages of them as paragraphs.
@@ -209,6 +219,44 @@ export class Library {
     return JSON.parse(this.core.marksJson());
   }
 
+  /**
+   * Adds lexicons – a JSON array, in the shape of the core's src/model.rs, as the import tool writes them – each replacing one of the
+   * same id, and returns their ids. Words tagged with their numbers open their entries.
+   */
+  addLexicons(json: string | ArrayBuffer | Uint8Array): string[] {
+    const ids = this.core.addLexicons(bytesOf(json));
+    this.changed('lexicons');
+    return ids;
+  }
+
+  /** Fetches lexicons and adds them. */
+  async fetchLexicons(url: string | URL): Promise<string[]> {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`${response.status} for ${url}`);
+    return this.addLexicons(await response.arrayBuffer());
+  }
+
+  removeLexicons(ids: string[]) {
+    this.core.removeLexicons(ids);
+    this.changed('lexicons');
+  }
+
+  clearLexicons() {
+    this.core.clearLexicons();
+    this.changed('lexicons');
+  }
+
+  /** What the lexicons are: id, title, language, and how many entries each has. */
+  lexicons(): LexiconInfo[] {
+    return JSON.parse(this.core.lexiconsJson());
+  }
+
+  /** A word's entry, by where it stands: see WordEntry. None where the lexicons hold nothing of it. */
+  entry(book: string, chapter: number, verse: number, word: number): WordEntry | undefined {
+    const json = this.core.entryJson(book, chapter, verse, word);
+    return json === undefined ? undefined : JSON.parse(json);
+  }
+
   private changed(change: LibraryChange) {
     for (const listener of this.listeners) listener(change);
   }
@@ -221,7 +269,7 @@ export class Library {
   /** The passages as paragraphs, read along with `companions`. */
   blocks(
     passages: Passage[],
-    options: { fontSize: number; versePerLine?: boolean; companions?: string[]; notes?: 'marks' | 'inline' | 'none'; dropCaps?: boolean; markNotes?: 'sign' | 'inline' },
+    options: { fontSize: number } & Pick<ReaderOptions, 'versePerLine' | 'companions' | 'notes' | 'dropCaps' | 'markNotes' | 'lexicon' | 'lexiconBooks'>,
   ): Block[] {
     return JSON.parse(this.core.blocksJson(JSON.stringify(passages), JSON.stringify(options)));
   }

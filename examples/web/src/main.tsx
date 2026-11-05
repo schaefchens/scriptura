@@ -30,6 +30,8 @@ await loadScriptura();
 const library = new Library();
 await library.fetch('/texts/books.json');
 await library.fetchRecordings('/recordings/recordings.json');
+// The entries of the numbers the books' words are tagged with: STEPBible's lexicons, Strong's Hebrew definitions.
+await library.fetchLexicons('/texts/lexicons.json');
 addScriptFonts('/fonts/');
 // A font of ornamental initials for the drop caps, Cinzel Decorative (OFL), fetched with the others.
 const ORNATE_FONT = 'CinzelDecorative-Regular';
@@ -44,6 +46,9 @@ const SIGN_OF_JONAH: Passage[] = [
 
 /** How fast the voice reads, as a multiple of its own rate. */
 const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
+
+/** The books whose words open lexicon entries: the Hebrew and the Greek. The translations' tagging is rough – the World English Bible's "the" stands for "all" thousands of times. */
+const ORIGINALS = new Set(['he', 'el']);
 
 const MOVES: [MoveStep, string][] = [
   ['verse-1', '◀ verse'],
@@ -79,6 +84,9 @@ function App() {
   // The page's own notes: a sign where each mark ends, or shown in full there.
   const [markNotes, setMarkNotes] = useState<'sign' | 'inline'>('sign');
   const [selectBy, setSelectBy] = useState<'word' | 'verse'>('word');
+  // A double tap on a word of the Hebrew or the Greek opens its lexicon entry; the numbers can stand in the text too.
+  const [lexicon, setLexicon] = useState<'entries' | 'numbers' | 'none'>('entries');
+  const originals = useMemo(() => books.filter(({ language }) => ORIGINALS.has(language)).map(({ id }) => id), [books]);
   // A cross reference to a book the library doesn't hold; and a verse to jump to once its book shows.
   const [missing, setMissing] = useState<string>();
   const pending = useRef<WordPosition>(undefined);
@@ -261,6 +269,9 @@ function App() {
         </button>
         <button onClick={() => setMarkNotes(markNotes === 'sign' ? 'inline' : 'sign')}>{markNotes === 'sign' ? 'My notes as signs' : 'My notes in full'}</button>
         <button onClick={() => setSelectBy(selectBy === 'word' ? 'verse' : 'word')}>{selectBy === 'word' ? 'Selecting words' : 'Selecting verses'}</button>
+        <button onClick={() => setLexicon({ entries: 'numbers', numbers: 'none', none: 'entries' }[lexicon] as typeof lexicon)}>
+          {{ entries: 'Lexicon on double tap', numbers: "Strong's numbers", none: 'No lexicon' }[lexicon]}
+        </button>
         {editions.map(({ id, title, work }) => (
           <label key={id}>
             <input type="checkbox" checked={along.includes(id)} onChange={() => toggle(id)} /> {passages.length > 1 ? `${title} · ${work}` : work}
@@ -320,6 +331,8 @@ function App() {
         parallel={parallel}
         notes={notes}
         markNotes={markNotes}
+        lexicon={lexicon}
+        lexiconBooks={originals}
         selectBy={selectBy}
         // While the pen is up, the words being selected look as they will marked.
         selectionStyle={penLook}
@@ -427,7 +440,10 @@ function App() {
         Literature and Logos Bible Software, CC BY 4.0; the Quran from <a href="https://tanzil.net">Tanzil</a> (CC BY 3.0) with{' '}
         <a href="https://github.com/cpfair/quran-tajweed">quran-tajweed</a>'s rules (CC BY 4.0). Recited by Mishary Rashid Alafasy and Maher Al-Muaiqly, from{' '}
         <a href="https://everyayah.com">EveryAyah</a>; their words timed by <a href="https://github.com/cpfair/quran-align">quran-align</a>, ©
-        2016 Collin Fair, and <a href="https://huggingface.co/datasets/quranlab/quran-audio">QuranLab</a>, CC BY 4.0.
+        2016 Collin Fair, and <a href="https://huggingface.co/datasets/quranlab/quran-audio">QuranLab</a>, CC BY 4.0. Lexicon entries from{' '}
+        <a href="https://github.com/STEPBible/STEPBible-Data">STEPBible.org</a>'s brief lexicons by Tyndale House, Cambridge (CC BY 4.0), with
+        Abbott-Smith's Greek definitions and Strong's Hebrew ones from <a href="https://github.com/openscriptures/strongs">Open Scriptures</a>{' '}
+        (CC BY-SA).
       </footer>
     </main>
   );

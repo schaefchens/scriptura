@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osis xmlns="http://www.bibletechnologies.net/2003/OSIS/namespace">
+  <osisText xml:lang="he" osisIDWork="OSHB">
+    <div type="book" osisID="Test">
+      <chapter osisID="Test.1">
+        <verse osisID="Test.1.1">
+          <w lemma="c/1961" n="0.1.0" morph="HC/Vqw3ms" id="32xeN">וַֽ/יְהִי֙</w>
+          <w lemma="1697" morph="HNcmsc" id="32Nvk">דְּבַר</w><seg type="x-maqqef">־</seg><w lemma="3068" n="0.1" morph="HNp" id="32TyA">יְהוָ֔ה</w>
+          <w lemma="413" morph="HR" id="32vuQ">אֶל</w><seg type="x-maqqef">־</seg><w lemma="3124" morph="HNp" id="32TSc">יוֹנָ֥ה</w>
+          <w lemma="1121 a" morph="HNcmsc" id="32k5P">בֶן</w><seg type="x-maqqef">־</seg><w lemma="573" n="0.0" morph="HNp" id="32nPh">אֲמִתַּ֖י</w>
+          <w lemma="l/559" n="0" morph="HR/Vqc" id="32LN3">לֵ/אמֹֽר</w><seg type="x-sof-pasuq">׃</seg>
+        </verse>
+        <verse osisID="Test.1.2">
+          <w lemma="l/5329" morph="HRd/Vprmsa" id="1917A">לַ/מְנַצֵּ֥חַ</w>
+          <w type="x-ketiv" lemma="l/3038" morph="HR/Np" id="19Q4z">ל/ידיתון</w><note type="variant"><catchWord>ל/ידיתון</catchWord><rdg type="x-qere"><w lemma="l/3038" n="1" morph="HR/Np" id="19FYp">לִֽ/ידוּת֗וּן</w></rdg></note>
+          <w lemma="4210" morph="HNcmsa" id="198m1">מִזְמ֥וֹר</w>
+          <w lemma="l/1732" n="0" morph="HR/Np" id="198mf">לְ/דָוִֽד</w><seg type="x-sof-pasuq">׃</seg>
+        </verse>
+      </chapter>
+    </div>
+  </osisText>
+</osis>

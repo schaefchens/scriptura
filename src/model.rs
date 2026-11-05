@@ -2,6 +2,8 @@
 //! the shapes below, with camelCase names. The import tool, `bindings/js/import.mjs`, writes books
 //! from USFM, OSIS and Tanzil's text, and recordings from recitations whose words were timed.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// A book of a scripture in one edition: a book of the Bible in one translation, or a surah.
@@ -66,6 +68,122 @@ pub struct Verse {
     /// The edition's notes on the verse, each where it stands in the verse's text.
     #[serde(default)]
     pub notes: Vec<Note>,
+    /// The words its source tags, each where it stands in the text with its number in a lexicon –
+    /// Strong's, as editions tag their words – and its grammar, where the source gives it.
+    #[serde(default)]
+    pub tags: Vec<WordTag>,
+}
+
+/// A word as its source tags it: where it starts in the verse's text, in UTF-16 code units, and its
+/// parts, which follow one another from there – a Hebrew word's prefixes, its stem and its suffix,
+/// or the word whole. A word of the core may hold more than one, as two Hebrew words joined by a
+/// maqaf do, and a tagged word may be less than one, as "Yahweh" is of "Yahweh’s". As JSON, an
+/// array: where it starts, then its parts – `[4, [6, "H3068"]]`, `[0, [3, null, "HC"], [6, "H1961",
+/// "HVqw3ms"]]` – as books tag most of their words.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WordTag {
+    pub at: u32,
+    pub parts: Vec<WordPart>,
+}
+
+impl WordTag {
+    /// Where it ends in the verse's text, in UTF-16 code units.
+    pub fn end(&self) -> u32 {
+        self.at + self.parts.iter().map(|part| part.length).sum::<u32>()
+    }
+}
+
+/// A part of a tagged word: how long it is, in UTF-16 code units; its entry in a lexicon, by
+/// number, such as H1961 – none for a part the source gives none, as a Hebrew prefix or suffix –
+/// and its grammar, by a code a lexicon spells out, such as HVqw3ms. As JSON, an array of the three,
+/// those at its end left out where there are none.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WordPart {
+    pub length: u32,
+    pub number: Option<String>,
+    pub grammar: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for WordTag {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Tag;
+        impl<'de> serde::de::Visitor<'de> for Tag {
+            type Value = WordTag;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a tag: where it starts, then its parts")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<WordTag, A::Error> {
+                let at = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                let mut parts = Vec::new();
+                while let Some(part) = seq.next_element()? {
+                    parts.push(part);
+                }
+                Ok(WordTag { at, parts })
+            }
+        }
+        deserializer.deserialize_seq(Tag)
+    }
+}
+
+impl<'de> Deserialize<'de> for WordPart {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Part;
+        impl<'de> serde::de::Visitor<'de> for Part {
+            type Value = WordPart;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a part of a tag: its length, number and grammar")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<WordPart, A::Error> {
+                let length = seq.next_element()?.ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                let number = seq.next_element::<Option<String>>()?.flatten();
+                let grammar = seq.next_element::<Option<String>>()?.flatten();
+                Ok(WordPart { length, number, grammar })
+            }
+        }
+        deserializer.deserialize_seq(Part)
+    }
+}
+
+/// A lexicon that words' numbers lead to: its entries, and its grammar codes spelled out.
+#[derive(Deserialize, Debug)]
+pub struct Lexicon {
+    /// Unique among the lexicons of a library.
+    pub id: String,
+    /// Its name, and where it comes from, as its license may ask to show.
+    pub title: String,
+    /// The language its glosses and definitions are written in, and its direction: "ltr", the
+    /// default, or "rtl".
+    pub language: String,
+    #[serde(default = "left_to_right")]
+    pub direction: String,
+    pub entries: Vec<Entry>,
+    /// Grammar codes, as words' parts give them, each spelled out: HVqw3ms as "Verb, Qal,
+    /// consecutive imperfect, third person, masculine, singular".
+    #[serde(default)]
+    pub grammar: HashMap<String, String>,
+}
+
+fn left_to_right() -> String {
+    "ltr".into()
+}
+
+/// An entry of a lexicon: its number, such as H1961 or G0976, the word it is about – as the lexicon
+/// writes it, in its language – how that is read, what it means in a word or a few, and its
+/// definition, in runs as notes have them, which may refer to verses.
+#[derive(Deserialize, Debug, Clone)]
+pub struct Entry {
+    pub number: String,
+    pub lemma: String,
+    pub language: String,
+    #[serde(default)]
+    pub transliteration: Option<String>,
+    pub gloss: String,
+    #[serde(default)]
+    pub definition: Vec<NoteRun>,
 }
 
 /// A note on a verse, as the edition has it: a footnote, an endnote or a cross reference. The

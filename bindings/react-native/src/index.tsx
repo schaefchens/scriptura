@@ -1,6 +1,7 @@
 import type {
   BookInfo,
   LaidOut,
+  LexiconInfo,
   MarkInfo,
   MarkTap,
   MoveStep,
@@ -29,8 +30,9 @@ export type BooksSource = { uri: string } | { asset: string } | { json: string }
 /**
  * What a screen reader finds in sight: a chapter's heading, or a verse, by where it stands, never
  * its text; its language; and where it is in the reader, in points. A note's mark in a verse is
- * one too, with its mark and kind; so is the sign of a mark's note, with the mark's id. A verse
- * with marks on it is announced as marked.
+ * one too, with its mark and kind; so is the sign of a mark's note, with the mark's id, and a word's
+ * number, of the kind "entry". A verse with marks on it is announced as marked; one whose words
+ * open lexicon entries has the action that opens the entry of its word reached (`entries`).
  */
 export type AccessibilityElement = {
   passage: number;
@@ -38,7 +40,8 @@ export type AccessibilityElement = {
   chapter: number;
   verse?: number;
   note?: string;
-  kind?: 'footnote' | 'endnote' | 'crossReference' | 'mark';
+  kind?: 'footnote' | 'endnote' | 'crossReference' | 'mark' | 'entry';
+  entries?: boolean;
   mark?: string;
   marked?: boolean;
   language: string;
@@ -66,6 +69,8 @@ export type ReaderHandle = {
   turn(forward: boolean): Promise<void>;
   /** The same as a tap at that point of the reader, in points: for tests without a finger. */
   tapAt(x: number, y: number): Promise<void>;
+  /** The same as a double tap at that point, which opens the lexicon entry of a word that has one: for tests without a finger. */
+  doubleTapAt(x: number, y: number): Promise<void>;
   /**
    * Selects words or verses, as a long press and a drag would – from a word, or a verse's first, to
    * a word, or a verse's last – or nothing. Reported through onSelectionChange like any selection.
@@ -154,6 +159,10 @@ type ScripturaModule = {
   marks(): MarkInfo[];
   removeMarks(ids: string[]): Promise<void>;
   clearMarks(): Promise<void>;
+  addLexicons(source: BooksSource): Promise<string[]>;
+  lexicons(): LexiconInfo[];
+  removeLexicons(ids: string[]): Promise<void>;
+  clearLexicons(): Promise<void>;
   speechVoices(): Promise<Voice[]>;
 };
 
@@ -199,6 +208,21 @@ export const removeMarks = (ids: string[]) => scriptura.removeMarks(ids);
 
 /** Removes every mark, as when an app locks. */
 export const clearMarks = () => scriptura.clearMarks();
+
+/**
+ * Adds lexicons – a JSON array, as the import tool writes them – each replacing one of the same id,
+ * and returns their ids: from a file or an asset, so their text needn't pass through JS, or from JS.
+ * Words tagged with their numbers open their entries, in readers that let them (`lexicon`).
+ */
+export const addLexicons = (source: BooksSource) => scriptura.addLexicons(source);
+
+/** The lexicons added: what they are and how many entries each has. */
+export const lexicons = () => scriptura.lexicons();
+
+export const removeLexicons = (ids: string[]) => scriptura.removeLexicons(ids);
+
+/** Removes every lexicon, as when an app locks. */
+export const clearLexicons = () => scriptura.clearLexicons();
 
 /** The voices on the device that can read aloud. */
 export const speechVoices = () => scriptura.speechVoices();

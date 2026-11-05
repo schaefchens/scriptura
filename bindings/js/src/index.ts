@@ -89,13 +89,19 @@ export type MarkInfo = {
 
 /**
  * A run of a note's text: its role, if it has one – "origin" (the verse the note is on, as it names it), "quotation", "emphasis",
- * "label"; "number" and "preview" for the verses the note refers to, which follow its runs after a line break where the library
- * holds their book – its language, where it isn't the book's, and the verses it refers to.
+ * "strong", "label"; "number" and "preview" for the verses the note refers to, which follow its runs after a line break where the library
+ * holds their book – its language, where it isn't the book's, and the verses it refers to. A word's lexicon entry opens as runs too.
  */
 export type NoteRun = { text: string; role?: string | null; language?: string | null; target?: Target | null };
 
 /** Verses a note refers to: by their book's USFM code, chapter, and verse – to `to` – or the whole chapter. */
 export type Target = { book: string; chapter: number; verse?: number | null; to?: number | null };
+
+/**
+ * A lexicon the numbers of tagged words lead to – Strong's, as editions tag their words – as a list shows it: what it is, and how
+ * many entries it has. Its title names it and where it comes from, as its license may ask to show.
+ */
+export type LexiconInfo = { id: string; title: string; language: string; entries: number };
 
 /** One step through the words. */
 export type MoveStep = 'word+1' | 'word-1' | 'word+10' | 'word-10' | 'verse+1' | 'verse-1';
@@ -204,6 +210,15 @@ export type ReaderOptions = {
    * verses as the pointer lifts.
    */
   selectBy?: 'word' | 'verse';
+  /**
+   * What the numbers of tagged words do, where a lexicon added holds their entries – Strong's, as editions tag their words: a double
+   * tap on such a word opens its entry where the word stands, with each part's grammar where the source gives it ('entries', the
+   * default); or that, and each number stands in the text after its word, a small mark that opens the entry too ('numbers'); or
+   * neither ('none'). Numbers are no words: the places, reading aloud and recordings stay as they are.
+   */
+  lexicon?: 'entries' | 'numbers' | 'none';
+  /** The books, by id, whose words' numbers do so – the originals, say, where a translation's tagging is rough; every book's without. */
+  lexiconBooks?: string[];
   /** Chapters in running text open with a drop cap: the first letter of the text set large over two lines, the first verse without its number. On by default. */
   dropCaps?: boolean;
   /**

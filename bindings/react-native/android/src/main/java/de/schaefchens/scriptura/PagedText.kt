@@ -39,7 +39,8 @@ import kotlin.math.roundToInt
 
 /**
  * A heading or a verse for screen readers: where it is in the text, its language, where it stands
- * in the scripture – a heading in the chapter it opens – and its first word.
+ * in the scripture – a heading in the chapter it opens – its first word, and whether any of its words
+ * opens a lexicon entry.
  */
 data class Readable(
   val start: Int,
@@ -50,6 +51,7 @@ data class Readable(
   val chapter: Int,
   val verse: Int?,
   val firstWord: Int,
+  val entries: Boolean = false,
 )
 
 /**
@@ -70,11 +72,11 @@ data class Mark(
   val index: Int,
   val id: String? = null,
 ) {
-  /** What it is called: "Footnote 1", "Cross reference a" – the sign of a mark's note, "Note". */
+  /** What it is called: "Footnote 1", "Cross reference a" – the sign of a mark's note, "Note"; a word's number, "Lexicon entry 1961". */
   val label get() = if (kind == SIGN_KIND) NOTE else "${KINDS[kind] ?: NOTE} $text"
 
   companion object {
-    val KINDS = mapOf("footnote" to "Footnote", "endnote" to "Endnote", "crossReference" to "Cross reference")
+    val KINDS = mapOf("footnote" to "Footnote", "endnote" to "Endnote", "crossReference" to "Cross reference", "entry" to "Lexicon entry")
 
     /** The kind of the sign of a host's mark's note, and what it is called. */
     const val SIGN_KIND = "mark"
@@ -131,8 +133,14 @@ class TextFormat(
  * page.
  */
 class PagedText(context: Context) : View(context) {
-  /** A tap: the offset of the character there, or none where no text is. */
-  var onTap: ((Int?) -> Unit)? = null
+  /** A tap: the offset of the character there, or none where no text is; and the point, in this view's pixels. */
+  var onTap: ((Int?, Float, Float) -> Unit)? = null
+
+  /** The second tap of a double tap, as [onTap] has it; the first came as a tap. */
+  var onDoubleTap: ((Int?, Float, Float) -> Unit)? = null
+
+  /** A screen reader's request for the lexicon entry of a word of a verse. */
+  var onAccessibilityEntry: ((Readable) -> Unit)? = null
 
   /** A screen reader's tap on a note's mark, by the note's index. */
   var onMarkTap: ((Int) -> Unit)? = null
@@ -358,7 +366,13 @@ class PagedText(context: Context) : View(context) {
     }
 
     override fun onSingleTapUp(event: MotionEvent): Boolean {
-      onTap?.invoke(offsetAt(event.x, event.y))
+      onTap?.invoke(offsetAt(event.x, event.y), event.x, event.y)
+      return true
+    }
+
+    // A second tap soon after the first, near it: its up comes as no single tap.
+    override fun onDoubleTap(event: MotionEvent): Boolean {
+      onDoubleTap?.invoke(offsetAt(event.x, event.y), event.x, event.y)
       return true
     }
 
@@ -939,7 +953,7 @@ class PagedText(context: Context) : View(context) {
         else -> mapOf(
           "passage" to piece.readable.passage, "book" to piece.readable.book, "chapter" to piece.readable.chapter, "verse" to piece.readable.verse,
           "language" to piece.readable.language, "frame" to frame,
-        ) + if (isMarked(piece)) mapOf("marked" to true) else emptyMap()
+        ) + (if (isMarked(piece)) mapOf("marked" to true) else emptyMap()) + (if (piece.readable.entries) mapOf("entries" to true) else emptyMap())
       }
     }
   }
@@ -1190,6 +1204,7 @@ class PagedText(context: Context) : View(context) {
       spoken?.takeIf { it.first in piece.start until piece.end }?.let { node.stateDescription = text.subSequence(it.first, it.last + 1) }
       for ((action, label, _) in MOVES) node.addAction(AccessibilityActionCompat(action, label))
       if (piece.readable.verse != null) for ((action, label, _) in SELECTIONS) node.addAction(AccessibilityActionCompat(action, label))
+      if (piece.readable.entries) node.addAction(AccessibilityActionCompat(R.id.scriptura_lexicon_entry, ENTRY))
     }
 
     override fun onPerformActionForVirtualView(id: Int, action: Int, arguments: Bundle?): Boolean {
@@ -1197,6 +1212,10 @@ class PagedText(context: Context) : View(context) {
       if (piece.mark != null) {
         if (action != AccessibilityNodeInfoCompat.ACTION_CLICK) return false
         onMarkTap?.invoke(piece.mark.index)
+        return true
+      }
+      if (action == R.id.scriptura_lexicon_entry && piece.readable.entries) {
+        onAccessibilityEntry?.invoke(piece.readable)
         return true
       }
       SELECTIONS.firstOrNull { it.first == action }?.let { (_, _, extend) ->
@@ -1236,6 +1255,9 @@ class PagedText(context: Context) : View(context) {
 
     /** What screen readers say before a marked verse. */
     const val MARKED = "Marked. "
+
+    /** The action that opens the lexicon entry of the word reached in a verse, or of its first word with one. */
+    const val ENTRY = "Lexicon entry"
 
     /**
      * Where a finger choosing words takes the text on, in dp from an edge: near the top or bottom of a

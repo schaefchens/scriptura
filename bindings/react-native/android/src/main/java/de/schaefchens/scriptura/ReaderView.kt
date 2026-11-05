@@ -31,12 +31,14 @@ import kotlin.math.ceil
 import kotlin.math.roundToInt
 import de.schaefchens.scriptura.core.Block
 import de.schaefchens.scriptura.core.DropCap
+import de.schaefchens.scriptura.core.LexiconUse
 import de.schaefchens.scriptura.core.MarkEnd
 import de.schaefchens.scriptura.core.MarkNotes
 import de.schaefchens.scriptura.core.NoteMark
 import de.schaefchens.scriptura.core.NoteRun
 import de.schaefchens.scriptura.core.Notes
 import de.schaefchens.scriptura.core.PlacedMark
+import de.schaefchens.scriptura.core.ReaderOptions
 import de.schaefchens.scriptura.core.Reference
 import de.schaefchens.scriptura.core.Target
 import de.schaefchens.scriptura.core.books
@@ -45,6 +47,7 @@ import de.schaefchens.scriptura.core.Word
 import de.schaefchens.scriptura.core.WordPosition
 import de.schaefchens.scriptura.core.marks as libraryMarks
 import de.schaefchens.scriptura.core.readerBlocks
+import de.schaefchens.scriptura.core.readerEntry
 import de.schaefchens.scriptura.core.readerMarks
 import java.util.WeakHashMap
 
@@ -57,7 +60,8 @@ import java.util.WeakHashMap
  * marks each word as it is said, keeping it in sight – unless it was scrolled away from it by hand.
  * The host's marks are drawn over their words, the signs of their notes standing in the text as notes'
  * marks; words or verses are selected by a long press and a drag, or by TalkBack, and reported by where
- * they stand.
+ * they stand. A double tap on a word tagged with a number in a lexicon opens its entry where it stands,
+ * as a note opens; the numbers can stand in the text too, each a mark that opens its word's entry.
  */
 class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
   // Without it, React Native ignores the pages' requests for a new layout.
@@ -84,6 +88,14 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
 
   /** The notes of the host's marks in the text: "sign", a sign where each mark ends, which opens the note, or "inline", the note shown in full there. */
   var markNotes = "sign"
+
+  /**
+   * What tagged words' numbers do, where a lexicon holds their entries: "entries", a double tap on such a word opens its entry;
+   * "numbers", that, and each number stands in the text after its word, a mark that opens the entry too; or "none". In the books of
+   * [lexiconBooks], by id – every book's without.
+   */
+  var lexicon = "entries"
+  var lexiconBooks: List<String>? = null
 
   /** How the selection is drawn: as a mark of this look would be – a pen's, marking as it goes – or, none given, in the selection's own color. See [SelectionStyle]. */
   var selectionStyle: SelectionStyle? = null
@@ -170,9 +182,12 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     override fun handleOnBackPressed() = closeNote()
   }
 
-  /** The notes' marks in the text, in its order, and the note open – a note's or a host's mark's – if one is. */
+  /** The notes' marks in the text, in its order – words' numbers among them – and the note open – a note's, a host's mark's or a word's entry – if one is. */
   private var marks: List<ReaderNote> = emptyList()
   private var opened: ReaderNote? = null
+
+  /** The word the last tap reached: a second tap on it, a double tap, opens its lexicon entry. */
+  private var tappedWord: Int? = null
   private var shownParagraphs: List<Paragraph> = emptyList()
   private var roleColors: Map<String, Int> = emptyMap()
   private var textColor = Color.BLACK
@@ -190,7 +205,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   private var verses: List<ReaderVerse> = emptyList()
 
   /** What the paragraphs were asked of the core with, so their marks can be asked for anew as they change. */
-  private var shownRequest: BlocksRequest? = null
+  private var shownRequest: Pair<List<Reference>, ReaderOptions>? = null
 
   /**
    * The words selected – by a long press and a drag, by TalkBack or by JS – from the first to the last,
@@ -209,7 +224,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
 
   init {
     pages.onTap = ::selectWord
+    pages.onDoubleTap = ::doubleTapWord
     pages.onMarkTap = { index -> marks.getOrNull(index)?.let(::openNote) }
+    pages.onAccessibilityEntry = ::openEntryIn
     pages.onSelectStart = ::beginSelection
     pages.onSelectMove = ::extendSelection
     pages.onSelectEnd = ::endSelection
@@ -297,9 +314,11 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     this.roleColors = roleColors
     val shownNotes = when (notes) { "none" -> Notes.NONE; "inline" -> Notes.INLINE; else -> Notes.MARKS }
     val shownMarkNotes = if (markNotes == "inline") MarkNotes.INLINE else MarkNotes.SIGN
-    val request = BlocksRequest(references, fontSize, versePerLine, companions, shownNotes, dropCaps, shownMarkNotes)
-    shownRequest = request
-    val blocks = with(request) { readerBlocks(references, fontSize, versePerLine, companions, notes, dropCaps, markNotes) }
+    val shownLexicon = when (lexicon) { "none" -> LexiconUse.NONE; "numbers" -> LexiconUse.NUMBERS; else -> LexiconUse.ENTRIES }
+    val options = ReaderOptions(fontSize, versePerLine, companions, shownNotes, dropCaps, shownMarkNotes, shownLexicon, lexiconBooks)
+    shownRequest = references to options
+    tappedWord = null
+    val blocks = readerBlocks(references, options)
     val paragraphs = blocks.map { Paragraph(it, roleColors, fontSize(it)) }
     shownParagraphs = paragraphs
     // The passages read along with other books, in rows.
@@ -585,23 +604,33 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     WordPosition(place.passage.toUInt(), place.book, place.chapter.toUInt(), place.verse.toUInt(), place.index.toUInt())
 
   /** Selects the word at a point in this view's pixels, or opens the note whose mark is there, as a tap there would. */
-  fun tap(x: Float, y: Float) = selectWord(pages.offsetAt(x - pages.left, y - pages.top))
+  fun tap(x: Float, y: Float) = (x - pages.left to y - pages.top).let { (atX, atY) -> selectWord(pages.offsetAt(atX, atY), atX, atY) }
+
+  /** A double tap at a point in this view's pixels: a tap, then a second one, which opens the lexicon entry of the word the first reached. */
+  fun doubleTap(x: Float, y: Float) {
+    tap(x, y)
+    val (atX, atY) = x - pages.left to y - pages.top
+    doubleTapWord(pages.offsetAt(atX, atY), atX, atY)
+  }
 
   /** The headings, verses and notes' marks a screen reader finds in sight, by where they stand, never their text. */
   fun accessibilityElementsInSight() = pages.accessibilityElementsInSight()
 
   /**
-   * A tap at a character: on a note's mark – the sign of a mark's note too – it opens the note, or
-   * closes it, if it is the one open; elsewhere, it selects the word, and names the host's marks on it
-   * to JS. The first tap after a selection only ends it.
+   * A tap at a character – at a point in the pages' pixels: on a note's mark – the sign of a mark's note
+   * too, and a word's number, where the finger is on it – it opens the note, or closes it, if it is the
+   * one open; elsewhere, it selects the word, and names the host's marks on it to JS. The first tap
+   * after a selection only ends it.
    */
-  private fun selectWord(offset: Int?) {
+  private fun selectWord(offset: Int?, x: Float, y: Float) {
+    tappedWord = null
     if (selected != null) {
       closeNote()
       return setSelected(null)
     }
     if (offset == null) return closeNote()
-    val note = marks.firstOrNull { offset in it.start..it.end }
+    // A word's number follows its word straight away: only a finger on its digits takes it, not one at the word's end.
+    val note = marks.firstOrNull { offset in it.start..it.end && (it.kind != ENTRY_KIND || isOn(it, x, y)) }
     if (note != null) {
       if (isOpen(note)) closeNote() else openNote(note)
       return
@@ -609,6 +638,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     closeNote()
     val index = wordAt(offset) ?: return
     select(index)
+    tappedWord = index
     val word = words[index]
     val ids = placedMarks.filter { it.start <= word.start && word.end <= it.end }.map { it.id }.distinct()
     if (ids.isEmpty()) return
@@ -616,20 +646,69 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     onMarkTap(mapOf("ids" to ids, "passage" to place.passage, "book" to place.book, "chapter" to place.chapter, "verse" to place.verse, "word" to place.index))
   }
 
+  /** Whether a point in the pages' pixels is on a mark's glyphs – a little beside them too, as they are small. */
+  private fun isOn(note: ReaderNote, x: Float, y: Float): Boolean {
+    val rect = pages.rectOf(note.start, note.end) ?: return false
+    val slack = (3 * resources.displayMetrics.density).roundToInt()
+    rect.inset(-slack, 0)
+    return rect.contains(x.roundToInt(), y.roundToInt())
+  }
+
+  /**
+   * The second tap of a double tap: on the word the first reached, if it opens a lexicon entry, it opens
+   * it; anywhere else it is a tap like any.
+   */
+  private fun doubleTapWord(offset: Int?, x: Float, y: Float) {
+    val index = offset?.let(::wordAt)
+    if (index != null && index == tappedWord && words[index].entry) {
+      tappedWord = null
+      return openEntry(index)
+    }
+    selectWord(offset, x, y)
+  }
+
+  /** Opens a word's lexicon entry where the word stands, as a note opens at its mark. */
+  private fun openEntry(index: Int) {
+    val word = words[index]
+    val place = word.place
+    val language = shownParagraphs.getOrNull(word.paragraph)?.language ?: ""
+    openNote(ReaderNote(place.passage, place.book, language, word.start, word.end, word.paragraph, place.chapter, place.verse, emptyList(), ENTRY_KIND, "", null, place.index))
+  }
+
+  /** TalkBack's request for a verse's entry: of the word reached, if it is in the verse and has one, or else of the verse's first word with one. */
+  private fun openEntryIn(readable: Readable) {
+    val inVerse = { index: Int ->
+      words.getOrNull(index)?.place?.let { it.passage == readable.passage && it.book == readable.book && it.chapter == readable.chapter && it.verse == readable.verse } == true
+    }
+    val reached = current?.takeIf { inVerse(it) && words[it].entry }
+    val index = reached ?: generateSequence(readable.firstWord) { it + 1 }.takeWhile(inVerse).firstOrNull { words[it].entry } ?: return
+    openEntry(index)
+  }
+
   private fun isOpen(note: ReaderNote) = opened?.let { it.kind == note.kind && it.mark == note.mark && it.start == note.start } == true
 
   /**
    * Opens a note where its mark stands – below its line, or above it – in its paragraph's font: see
-   * [NoteView]. The note open before closes.
+   * [NoteView]. A word's entry – by its number's mark, or by a double tap at the word – opens in its
+   * lexicon's language and direction, in the reader's font for that language. The note open before closes.
    */
   private fun openNote(note: ReaderNote) {
     val anchor = pages.rectOf(note.start, note.end) ?: return
     anchor.offset(pages.left, pages.top)
     val paragraph = shownParagraphs.getOrNull(note.paragraph) ?: return
-    val typeface = familyOf(paragraph)?.let(::typeface) ?: baseTypeface
     val size = maxOf(pixels(paragraph.fontSize) * 0.7f, pixels(14.0))
-    opened = note
-    noteView.show(noteText(note), typeface, size, textColor, backgroundColor, anchor, Rect(0, 0, width, height), pixels(margin).roundToInt(), paragraph.rightToLeft)
+    val bounds = Rect(0, 0, width, height)
+    if (note.kind == ENTRY_KIND) {
+      val word = note.word ?: return
+      val entry = readerEntry(note.book, note.chapter.toUInt(), note.verse.toUInt(), word.toUInt()) ?: return
+      val typeface = fonts[entry.language]?.let(::typeface) ?: baseTypeface
+      opened = note
+      noteView.show(noteText(note, entry.runs), typeface, size, textColor, backgroundColor, anchor, bounds, pixels(margin).roundToInt(), entry.direction == "rtl", oneDirection = true)
+    } else {
+      val typeface = familyOf(paragraph)?.let(::typeface) ?: baseTypeface
+      opened = note
+      noteView.show(noteText(note, note.runs), typeface, size, textColor, backgroundColor, anchor, bounds, pixels(margin).roundToInt(), paragraph.rightToLeft)
+    }
     backCloses.isEnabled = true
     requestLayout()
   }
@@ -642,16 +721,16 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   }
 
   /**
-   * A note's runs as text with spans: the verse it names in the "origin" color, quotations and
-   * emphasis in italics, words in other languages in their fonts and locales, and each reference a
-   * link that follows it.
+   * A note's runs – or a word's entry's – as text with spans: the verse it names in the "origin" color,
+   * quotations and emphasis in italics, what is strong in bold, words in other languages in their fonts
+   * and locales, and each reference a link that follows it.
    */
-  private fun noteText(note: ReaderNote): CharSequence {
+  private fun noteText(note: ReaderNote, runs: List<NoteRun>): CharSequence {
     val builder = SpannableStringBuilder()
     val linkColor = roleColors["note"] ?: textColor
     val originColor = roleColors["origin"] ?: ColorUtils.setAlphaComponent(textColor, 153)
     val flags = Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
-    for (run in note.runs) {
+    for (run in runs) {
       if (run.text == "\n") {
         builder.append("\n")
         continue
@@ -663,6 +742,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
         "origin" -> builder.setSpan(ForegroundColorSpan(originColor), start, end, flags)
         "number" -> builder.setSpan(ForegroundColorSpan(roleColors["number"] ?: originColor), start, end, flags)
         "quotation", "emphasis" -> builder.setSpan(StyleSpan(Typeface.ITALIC), start, end, flags)
+        "strong" -> builder.setSpan(StyleSpan(Typeface.BOLD), start, end, flags)
       }
       run.language?.let { language ->
         builder.setSpan(LocaleSpan(Locale.forLanguageTag(language)), start, end, flags)
@@ -791,8 +871,8 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
    * anew, the reader staying at its word and the words selected.
    */
   private fun refreshMarks() {
-    val request = shownRequest ?: return
-    val placed = with(request) { readerMarks(references, fontSize, versePerLine, companions, notes, dropCaps, markNotes) }
+    val (references, options) = shownRequest ?: return
+    val placed = readerMarks(references, options)
     val signsChanged = placed.size != shownParagraphs.size ||
       placed.zip(shownParagraphs).any { (marks, paragraph) -> marks.signs != paragraph.notes.filter { it.kind == Mark.SIGN_KIND } }
     if (signsChanged) return render()
@@ -1054,11 +1134,12 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     runCatching { Typeface.createFromAsset(context.assets, "fonts/$family.ttf") }.getOrDefault(Typeface.DEFAULT)
   }
 
-  /** A word of the reader's text: where it stands in the scripture, and where it is in the text – in which paragraph. */
+  /** A word of the reader's text: where it stands in the scripture, where it is in the text – in which paragraph – and whether it opens a lexicon entry. */
   private class ReaderWord(passage: Int, book: String, word: Word, textStart: Int, val paragraph: Int) {
     val place = WordPlace(passage, book, word.chapter.toInt(), word.verse.toInt(), word.index.toInt())
     val start = textStart + word.start.toInt()
     val end = textStart + word.end.toInt()
+    val entry = word.entry
 
     fun isInVerseOf(other: ReaderWord) = isInBookOf(other) && with(other.place) { chapter == place.chapter && verse == place.verse }
 
@@ -1066,9 +1147,11 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   }
 
   /**
-   * A note's mark in the reader's text – an edition's, or the sign of a host's mark's note, of the kind
-   * "mark" – where it is, in which paragraph, on which verse of which book, the note's runs, its kind
-   * and mark, and for a sign, the host's mark's id.
+   * A note's mark in the reader's text – an edition's, the sign of a host's mark's note, of the kind
+   * "mark", or a word's number, of the kind "entry" – where it is, in which paragraph, on which verse of
+   * which book, the note's runs, its kind and mark, for a sign the host's mark's id, and for a number
+   * the word, by its index in the verse, whose entry it opens. A word's entry opened by a double tap
+   * stands where the word does.
    */
   private class ReaderNote(
     val passage: Int,
@@ -1083,10 +1166,11 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     val kind: String,
     val mark: String,
     val id: String?,
+    val word: Int? = null,
   ) {
     constructor(passage: Int, book: String, language: String, note: NoteMark, textStart: Int, paragraph: Int) : this(
       passage, book, language, textStart + note.start.toInt(), textStart + note.end.toInt(), paragraph,
-      note.chapter.toInt(), note.verse.toInt(), note.runs, note.kind, note.mark, note.id,
+      note.chapter.toInt(), note.verse.toInt(), note.runs, note.kind, note.mark, note.id, note.word?.toInt(),
     )
   }
 
@@ -1095,17 +1179,6 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
 
   /** A verse of the reader's text: where it is, its number included, and its words – none, for a verse without. */
   private class ReaderVerse(val start: Int, val end: Int, val words: IntRange?)
-
-  /** What the paragraphs were asked of the core with. */
-  private data class BlocksRequest(
-    val references: List<Reference>,
-    val fontSize: Double,
-    val versePerLine: Boolean,
-    val companions: List<String>,
-    val notes: Notes,
-    val dropCaps: Boolean,
-    val markNotes: MarkNotes,
-  )
 
   /** Where a word stands: in which passage, in which book – the passage's, or one read along with it – and where in the scripture. */
   data class WordPlace(val passage: Int, val book: String, val chapter: Int, val verse: Int, val index: Int)
@@ -1186,14 +1259,17 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
       }
     }
 
-    /** What screen readers read of it, its text running from [start] to [end]: the heading, or each verse. */
+    /** What screen readers read of it, its text running from [start] to [end]: the heading, or each verse, and whether any of its words opens an entry. */
     fun readables(start: Int, end: Int, firstWord: Int): List<Readable> {
       if (kind == "heading") return listOf(Readable(start, end, language, passage, book, 0, null, firstWord))
       // Verses and words both run in the text's order: each verse's first word is found walking on.
       var word = 0
       return verses.map { verse ->
         while (word < words.size && words[word].start < verse.start) word++
-        Readable(start + verse.start.toInt(), start + verse.end.toInt(), language, passage, book, verse.chapter.toInt(), verse.verse.toInt(), firstWord + word)
+        var last = word
+        while (last < words.size && words[last].start < verse.end) last++
+        val entries = (word until last).any { words[it].entry }
+        Readable(start + verse.start.toInt(), start + verse.end.toInt(), language, passage, book, verse.chapter.toInt(), verse.verse.toInt(), firstWord + word, entries)
       }
     }
   }
@@ -1272,6 +1348,12 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
 
     /** On the main thread, after the host added or removed marks: every reader draws them anew, its layout kept. */
     fun marksChanged() = shown.toList().forEach { it.refreshMarks() }
+
+    /** On the main thread, after the host added or removed lexicons: every reader lays its text out anew – its words open entries or not – at the word it was at, reading on. */
+    fun lexiconsChanged() = shown.toList().forEach { it.render() }
+
+    /** The kind of a note's mark that is a word's number, which opens the word's lexicon entry. */
+    private const val ENTRY_KIND = "entry"
 
     /** The colors marks name, as the light palette has them: for an app that gives the reader no palette. */
     private val MARK_FILLS = mapOf("yellow" to 0xFFFFEDB6.toInt(), "green" to 0xFFB9EABB.toInt(), "blue" to 0xFFB8DFFF.toInt(), "pink" to 0xFFFFD4E2.toInt())

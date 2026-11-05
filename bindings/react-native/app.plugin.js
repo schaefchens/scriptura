@@ -3,7 +3,8 @@
 //
 //   "plugins": [["@schaefchens/scriptura-react-native", { "books": ["./texts/books.json"], "recordings": ["./recordings"] }]]
 //
-// and in the app, addBooks({ asset: 'books.json' }). They go into a folder named scriptura-books: just
+// and in the app, addBooks({ asset: 'books.json' }) – lexicons and marks bundled so come the same way,
+// addLexicons({ asset: 'lexicons.json' }). They go into a folder named scriptura-books: just
 // scriptura would, on a case-insensitive file system, be the executable of an app called Scriptura.
 // Recordings come as folders, with their audio, into scriptura-recordings: addRecordings({ asset:
 // 'recordings.json' }) finds the audio there.

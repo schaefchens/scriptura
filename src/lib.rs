@@ -6,17 +6,25 @@
 //! or from recordings of their chapters: see [`Speech`].
 //!
 //! The library holds no texts of its own: a host adds books as JSON (see [`Book`]), recordings
-//! (see [`Recording`]), and its marks on the books' words (see [`Mark`]), which readers draw.
+//! (see [`Recording`]), its marks on the books' words (see [`Mark`]), which readers draw, and
+//! lexicons (see [`Lexicon`]) that the numbers of tagged words lead to: a word's entry opens where
+//! it stands, and the numbers can stand in the text.
 
+mod lexicon;
 mod model;
 mod reader;
 mod speech;
 
 use serde::de::Error as _;
 
-pub use model::{Book, Chapter, Mark, MarkEnd, Note, NoteRun, RecordedVerse, Recording, Target, Verse, VerseNumbers};
+pub use lexicon::WordEntry;
+pub use model::{
+    Book, Chapter, Entry, Lexicon, Mark, MarkEnd, Note, NoteRun, RecordedVerse, Recording, Target, Verse, VerseNumbers,
+    WordPart, WordTag,
+};
 pub use reader::{
-    Block, DropCap, MARK_SIGN_KIND, NoteMark, ParagraphMarks, PlacedMark, Segment, VerseRange, WORD_DEFINITION, Word,
+    Block, DropCap, ENTRY_KIND, MARK_SIGN_KIND, NoteMark, ParagraphMarks, PlacedMark, Segment, VerseRange,
+    WORD_DEFINITION, Word,
 };
 pub use speech::{Part, Place, Speech, Take, TimedWord, Utterance};
 
@@ -45,6 +53,35 @@ pub struct Options {
     pub drop_caps: bool,
     /// How the notes of the host's marks show in the text.
     pub mark_notes: MarkNotes,
+    /// What the numbers of tagged words do: see [`LexiconUse`].
+    pub lexicon: LexiconUse,
+    /// The books, by id, whose words' numbers do so; with none named, every book's.
+    pub lexicon_books: Option<Vec<String>>,
+}
+
+/// What the numbers of tagged words do, where the library's lexicons hold their entries: nothing; a
+/// word opens its entry – a reader opens it on a double tap (see [`Word::entry`]); or that, and each
+/// number stands in the text after its word, as a note's mark of the kind [`ENTRY_KIND`], which
+/// opens the entry too.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LexiconUse {
+    None,
+    #[default]
+    Entries,
+    Numbers,
+}
+
+impl Options {
+    /// Whether a book's words open their entries.
+    pub(crate) fn entries_in(&self, book: &str) -> bool {
+        self.lexicon != LexiconUse::None
+            && self.lexicon_books.as_ref().is_none_or(|books| books.iter().any(|id| id == book))
+    }
+
+    /// Whether a book's words' numbers stand in its text.
+    pub(crate) fn numbers_in(&self, book: &str) -> bool {
+        self.lexicon == LexiconUse::Numbers && self.entries_in(book)
+    }
 }
 
 /// How many verses a note shows of the ones it refers to, and how long they may be, in UTF-16 units.
@@ -93,6 +130,7 @@ pub struct Library {
     books: Vec<Book>,
     recordings: Vec<Recording>,
     marks: Vec<Mark>,
+    lexicons: lexicon::Lexicons,
 }
 
 impl Library {
@@ -189,6 +227,32 @@ impl Library {
 
     pub fn marks(&self) -> &[Mark] {
         &self.marks
+    }
+
+    /// Adds the lexicons of a JSON array, each replacing one of the same id, and returns their ids.
+    pub fn add_lexicons(&mut self, json: &[u8]) -> Result<Vec<String>, serde_json::Error> {
+        Ok(self.lexicons.add(serde_json::from_slice(json)?))
+    }
+
+    pub fn remove_lexicons(&mut self, ids: &[String]) {
+        self.lexicons.remove(ids);
+    }
+
+    pub fn clear_lexicons(&mut self) {
+        self.lexicons.clear();
+    }
+
+    pub fn lexicons(&self) -> impl Iterator<Item = &Lexicon> {
+        self.lexicons.all()
+    }
+
+    /// A word's entry, by where the word stands, to open where it stands: see [`WordEntry`]. None
+    /// where the lexicons hold nothing of it.
+    pub fn entry(&self, book: &str, chapter: u32, verse: u32, word: u32) -> Option<WordEntry> {
+        let book = self.book(book)?;
+        let chapter = book.chapters.iter().find(|candidate| candidate.number == chapter)?;
+        let verse = chapter.verses.iter().find(|candidate| candidate.number == verse)?;
+        self.lexicons.of(verse, &book.language, word)
     }
 
     /// Why a recording isn't played for the book it reads, if it isn't: the library holds no such
@@ -471,6 +535,8 @@ mod tests {
             notes: Notes::Marks,
             drop_caps: true,
             mark_notes: MarkNotes::Sign,
+            lexicon: LexiconUse::Entries,
+            lexicon_books: None,
         };
         assert!(Library::new().blocks(&[reference], &options).is_empty());
     }

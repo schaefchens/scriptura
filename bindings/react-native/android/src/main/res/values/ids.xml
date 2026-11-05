@@ -7,4 +7,5 @@
   <item name="scriptura_previous_verse" type="id" />
   <item name="scriptura_select_verse" type="id" />
   <item name="scriptura_extend_selection" type="id" />
+  <item name="scriptura_lexicon_entry" type="id" />
 </resources>

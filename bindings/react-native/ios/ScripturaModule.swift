@@ -143,6 +143,29 @@ public class ScripturaModule: Module {
       Self.marksChanged()
     }
 
+    // Lexicons the numbers of tagged words lead to, read here too: readers lay their text out anew, at
+    // the word they are at, as the words that open entries change. JS learns what they are, not their
+    // entries.
+    AsyncFunction("addLexicons") { (source: BooksSource) throws -> [String] in
+      let ids = try addLexicons(json: try Self.data(of: source))
+      Self.lexiconsChanged()
+      return ids
+    }
+
+    Function("lexicons") {
+      lexicons().map { ["id": $0.id, "title": $0.title, "language": $0.language, "entries": $0.entries] }
+    }
+
+    AsyncFunction("removeLexicons") { (ids: [String]) in
+      removeLexicons(ids: ids)
+      Self.lexiconsChanged()
+    }
+
+    AsyncFunction("clearLexicons") {
+      clearLexicons()
+      Self.lexiconsChanged()
+    }
+
     // The voices that can read aloud: their identifiers, names and languages.
     AsyncFunction("speechVoices") {
       ReadAloud.voiceList()
@@ -202,6 +225,12 @@ public class ScripturaModule: Module {
       Prop("selectBy", "word") { (view: ReaderView, selectBy: String) in
         view.selectBy = selectBy
       }
+      Prop("lexicon", "entries") { (view: ReaderView, lexicon: String) in
+        view.lexicon = lexicon
+      }
+      Prop("lexiconBooks") { (view: ReaderView, books: [String]?) in
+        view.lexiconBooks = books
+      }
       Prop("dropCapFont") { (view: ReaderView, dropCapFont: String?) in
         view.dropCapFont = dropCapFont
       }
@@ -249,6 +278,14 @@ public class ScripturaModule: Module {
       // The same as a tap at that point, so the hit test can be tried without a finger.
       AsyncFunction("tapAt") { (view: ReaderView, x: Double, y: Double) in
         view.tap(at: CGPoint(x: x, y: y))
+      }
+      // The same as a double tap there, which opens the lexicon entry of a word that has one: the second
+      // tap a moment after the first, as a finger's comes, once the first's word is drawn.
+      AsyncFunction("doubleTapAt") { (view: ReaderView, x: Double, y: Double) in
+        view.tap(at: CGPoint(x: x, y: y))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+          view.tap(at: CGPoint(x: x, y: y))
+        }
       }
       // Words or verses selected, as a long press and a drag would select them; or nothing.
       AsyncFunction("select") { (view: ReaderView, selection: SelectionRecord?) in
@@ -304,6 +341,12 @@ public class ScripturaModule: Module {
   private static func recordingsChanged() {
     DispatchQueue.main.async {
       NotificationCenter.default.post(name: ReaderView.recordingsChanged, object: nil)
+    }
+  }
+
+  private static func lexiconsChanged() {
+    DispatchQueue.main.async {
+      NotificationCenter.default.post(name: ReaderView.lexiconsChanged, object: nil)
     }
   }
 

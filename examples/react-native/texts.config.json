@@ -1,5 +1,8 @@
 {
   "books": "texts/books.json",
+  "lexicons": {
+    "file": "texts/lexicons.json"
+  },
   "fonts": "fonts",
   "extraFonts": [
     {

@@ -1,0 +1,17 @@
+Rows of STEPBible's TBESH without their definitions, which are Online Bible's (CC BY 4.0, Tyndale House, Cambridge; STEPBible.org)
+H1121a	H1121A =	H1121A	בֵּן	ben	H:N-M	son: child
+H1121a	H1121G = a Meaning of	H1121A	בֵּן	ben	H:N-M	son: descendant/people
+H1121a	H1121H = a Meaning of	H1121A	בֵּן	ben	H:N-M	son: young animal
+H1121a	H1121I = a Meaning of	H1121A	בֵּן	ben	H:N-M	son: type of
+H1121a	H1121J = a Meaning of	H1121A	בֵּן	ben	H:N-M	son
+H1121a	H1121K = a Meaning of	H1121A	בֵּן	ben	H:N-M	son: warrior
+H1121a	H1121L = a Meaning of	H1121A	בֵּן	ben	H:N-M	son: aged
+H1961	H1961 =	H1961	הָיָה	ha.yah	H:V	to be
+H3038	H3038G =	H3038G	יְדוּתוּן	ye.du.tun	N:N-M-P	Jeduthun
+H3038	H3038H =	H3038H	יְדוּתוּן	ye.du.tun	N:N-M-P	Jeduthun
+H3068	H3068G =	H3068G	יְהֹוָה	ye.ho.vah	N:N--T	LORD
+H3068	H3068H = a Name of	H3389	יְהֹוָה	ye.ho.vah	N:N--T	The Lord
+H3068	H3068I = a Part of	H3389	יְהֹוָה	ye.ho.vah	N:N--T	(Jerusalem of) the Lord
+H5329	H5329 =	H5329	נָצַח	na.tsach	H:V	to conduct
+H7225	H7225G =	H7225G	רֵאשִׁית	re.shit	H:N-F	first: beginning
+H7225	H7225H = a Meaning of	H7225G	רֵאשִׁית	re.shit	H:N-F	first: best

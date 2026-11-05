@@ -12,9 +12,9 @@
 | quran-1, quran-2 | Tanzil Uthmani 1.0.2 | [tanzil.net](http://tanzil.net) | CC BY 3.0, below |
 | quran-1, quran-2: tajweed rules | quran-tajweed | [cpfair/quran-tajweed](https://github.com/cpfair/quran-tajweed) | CC BY 4.0 |
 
-The World English Bible's verses keep the edition's notes: Jonah 1:1 and 2:2 each carry a footnote, as marks the reader opens.
+The World English Bible's verses keep the edition's notes: Jonah 1:1 and 2:2 each carry a footnote, as marks the reader opens. The Bibles' verses but the Arabic keep their Strong's numbers as tags, the Hebrew's with their grammar codes; `lexicons.json` holds the entries of those numbers, as the import makes them from STEPBible's TBESH and TBESG (CC BY 4.0, Tyndale House, Cambridge; STEPBible.org) with Abbott-Smith's Greek definitions and Strong's Hebrew ones (Open Scriptures, CC BY-SA) – each definition cut after its first paragraph of 120 characters or more.
 
-`99-TSTnotes.usfm` is a book made up to test the import's notes (`npm test -w bindings/js`): footnotes, an endnote, cross references, a note in a heading, paragraphs and a Hebrew word within a note.
+`99-TSTnotes.usfm` is a book made up to test the import's notes (`npm test -w bindings/js`): footnotes, an endnote, cross references, a note in a heading, paragraphs and a Hebrew word within a note, and two words with Strong's numbers. `TSTtags.xml` holds two verses of the Open Scriptures Hebrew Bible (CC BY 4.0), Jonah 1:1 and Psalm 39:1 – a word written one way and read another – as a book of their own, for the import's tags; `lexicon/` rows of TBESH (without their definitions, which are Online Bible's), TBESG and Strong's Hebrew Dictionary, for its lexicon.
 
 `recordings.json` holds recordings of Al-Fatiha in two voices and of the start of Al-Baqarah, their timings made up: the last counts three words in verse 255, which has fifty.
 

@@ -38,6 +38,15 @@ struct MarkInfo<'a> {
     note: bool,
 }
 
+/// A lexicon as a list shows it: what it is and how many entries it has.
+#[derive(Serialize)]
+struct LexiconInfo<'a> {
+    id: &'a str,
+    title: &'a str,
+    language: &'a str,
+    entries: usize,
+}
+
 /// A book as a list of books shows it: what it is, not what it says.
 #[derive(Serialize)]
 struct BookInfo<'a> {
@@ -71,6 +80,14 @@ struct Options {
     drop_caps: bool,
     #[serde(default = "sign")]
     mark_notes: String,
+    #[serde(default = "entries")]
+    lexicon: String,
+    #[serde(default)]
+    lexicon_books: Option<Vec<String>>,
+}
+
+fn entries() -> String {
+    "entries".into()
 }
 
 fn sign() -> String {
@@ -182,6 +199,43 @@ impl Library {
         serde_json::to_string(&marks).expect("marks serialize")
     }
 
+    /// Adds the lexicons of a JSON array, each replacing one of the same id, and returns their ids.
+    #[wasm_bindgen(js_name = addLexicons)]
+    pub fn add_lexicons(&mut self, json: &[u8]) -> Result<Vec<String>, JsError> {
+        Ok(self.0.add_lexicons(json)?)
+    }
+
+    #[wasm_bindgen(js_name = removeLexicons)]
+    pub fn remove_lexicons(&mut self, ids: Vec<String>) {
+        self.0.remove_lexicons(&ids);
+    }
+
+    #[wasm_bindgen(js_name = clearLexicons)]
+    pub fn clear_lexicons(&mut self) {
+        self.0.clear_lexicons();
+    }
+
+    /// The lexicons as JSON: id, title, language and the number of entries of each.
+    #[wasm_bindgen(js_name = lexiconsJson)]
+    pub fn lexicons_json(&self) -> String {
+        let lexicons: Vec<_> = (self.0.lexicons())
+            .map(|lexicon| LexiconInfo {
+                id: &lexicon.id,
+                title: &lexicon.title,
+                language: &lexicon.language,
+                entries: lexicon.entries.len(),
+            })
+            .collect();
+        serde_json::to_string(&lexicons).expect("lexicons serialize")
+    }
+
+    /// A word's entry, by where the word stands, in JSON – its lexicon's language and direction, and
+    /// its runs – or none, where the lexicons hold nothing of it.
+    #[wasm_bindgen(js_name = entryJson)]
+    pub fn entry_json(&self, book: &str, chapter: u32, verse: u32, word: u32) -> Option<String> {
+        self.0.entry(book, chapter, verse, word).map(|entry| serde_json::to_string(&entry).expect("entries serialize"))
+    }
+
     /// The books as JSON: id, code, title, work, language and direction of each.
     #[wasm_bindgen(js_name = booksJson)]
     pub fn books_json(&self) -> String {
@@ -201,11 +255,12 @@ impl Library {
     /// The passages – a JSON array of references – as paragraphs, in JSON, the marks over their
     /// words. `options` is JSON too: fontSize, versePerLine and companions, how the notes show
     /// (notes: "marks", "inline" or "none"; marks by default), whether drop caps are wanted
-    /// (dropCaps: by default they are), and how the marks' notes show (markNotes: "sign" or "inline";
-    /// a sign by default).
+    /// (dropCaps: by default they are), how the marks' notes show (markNotes: "sign" or "inline";
+    /// a sign by default), and what the words' numbers do (lexicon: "entries", "numbers" or "none";
+    /// entries by default) in which books (lexiconBooks; every book's by default).
     #[wasm_bindgen(js_name = blocksJson)]
     pub fn blocks_json(&self, references: &str, options: &str) -> Result<String, JsError> {
-        let Options { font_size, verse_per_line, companions, notes, drop_caps, mark_notes } =
+        let Options { font_size, verse_per_line, companions, notes, drop_caps, mark_notes, lexicon, lexicon_books } =
             serde_json::from_str(options)?;
         let notes = match notes.as_str() {
             "none" => scriptura::Notes::None,
@@ -213,7 +268,21 @@ impl Library {
             _ => scriptura::Notes::Marks,
         };
         let mark_notes = if mark_notes == "inline" { scriptura::MarkNotes::Inline } else { scriptura::MarkNotes::Sign };
-        let options = scriptura::Options { font_size, verse_per_line, companions, notes, drop_caps, mark_notes };
+        let lexicon = match lexicon.as_str() {
+            "none" => scriptura::LexiconUse::None,
+            "numbers" => scriptura::LexiconUse::Numbers,
+            _ => scriptura::LexiconUse::Entries,
+        };
+        let options = scriptura::Options {
+            font_size,
+            verse_per_line,
+            companions,
+            notes,
+            drop_caps,
+            mark_notes,
+            lexicon,
+            lexicon_books,
+        };
         Ok(serde_json::to_string(&self.0.blocks(&parse_references(references)?, &options))?)
     }
 

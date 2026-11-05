@@ -29,7 +29,8 @@
   "files": [
     "src",
     "dist",
-    "import.mjs"
+    "import.mjs",
+    "lexicon.mjs"
   ],
   "publishConfig": {
     "access": "public"

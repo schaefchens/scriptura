@@ -36,6 +36,23 @@ pub enum MarksError {
     Invalid(String),
 }
 
+/// Lexicons that couldn't be read, with why: they aren't a JSON array of lexicons.
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+#[uniffi(flat_error)]
+pub enum LexiconsError {
+    #[error("{0}")]
+    Invalid(String),
+}
+
+/// A lexicon as JS may see it: what it is and how many entries it has, not what they say.
+#[derive(uniffi::Record)]
+pub struct LexiconInfo {
+    pub id: String,
+    pub title: String,
+    pub language: String,
+    pub entries: u32,
+}
+
 /// A book as JS may see it: what it is, not what it says. Editions of the same book share its code.
 #[derive(uniffi::Record)]
 pub struct BookInfo {
@@ -147,6 +164,7 @@ pub struct NoteMark {
     pub mark: String,
     pub runs: Vec<NoteRun>,
     pub id: Option<String>,
+    pub word: Option<u32>,
 }
 
 /// A run of a note's text: see `scriptura::NoteRun`.
@@ -182,6 +200,15 @@ pub enum MarkNotes {
     Inline,
 }
 
+/// What the numbers of tagged words do: nothing, open their entries, or that and stand in the text:
+/// see `scriptura::LexiconUse`.
+#[derive(uniffi::Enum)]
+pub enum LexiconUse {
+    None,
+    Entries,
+    Numbers,
+}
+
 /// What opens a chapter, set large: see `scriptura::DropCap`.
 #[derive(uniffi::Record)]
 pub struct DropCap {
@@ -204,6 +231,8 @@ pub struct Word {
     pub index: u32,
     pub start: u32,
     pub end: u32,
+    /// Whether it opens an entry, which `reader_entry` gives.
+    pub entry: bool,
 }
 
 /// Where a word stands: see `scriptura::Place`.
@@ -403,20 +432,72 @@ pub fn marks() -> Vec<MarkInfo> {
     library.marks().iter().map(info).collect()
 }
 
-/// The passages as paragraphs, read along with `companions`, with the notes as asked for and drop
-/// caps if asked for, and the host's marks over their words, their notes as `mark_notes` asks: see
-/// `scriptura::Library::blocks`.
+/// Adds the lexicons of a JSON array, each replacing one of the same id, and returns their ids.
 #[uniffi::export]
-pub fn reader_blocks(
-    references: Vec<Reference>,
-    font_size: f64,
-    verse_per_line: bool,
-    companions: Vec<String>,
-    notes: Notes,
-    drop_caps: bool,
-    mark_notes: MarkNotes,
-) -> Vec<Block> {
-    let options = core_options(font_size, verse_per_line, companions, notes, drop_caps, mark_notes);
+pub fn add_lexicons(json: Vec<u8>) -> Result<Vec<String>, LexiconsError> {
+    LIBRARY.write().unwrap().add_lexicons(&json).map_err(|error| LexiconsError::Invalid(error.to_string()))
+}
+
+#[uniffi::export]
+pub fn remove_lexicons(ids: Vec<String>) {
+    LIBRARY.write().unwrap().remove_lexicons(&ids);
+}
+
+#[uniffi::export]
+pub fn clear_lexicons() {
+    LIBRARY.write().unwrap().clear_lexicons();
+}
+
+#[uniffi::export]
+pub fn lexicons() -> Vec<LexiconInfo> {
+    let library = LIBRARY.read().unwrap();
+    let info = |lexicon: &scriptura::Lexicon| LexiconInfo {
+        id: lexicon.id.clone(),
+        title: lexicon.title.clone(),
+        language: lexicon.language.clone(),
+        entries: lexicon.entries.len() as u32,
+    };
+    library.lexicons().map(info).collect()
+}
+
+/// A word's entry, to open as a note where the word stands: in its lexicon's language and direction,
+/// its runs. See `scriptura::WordEntry`.
+#[derive(uniffi::Record)]
+pub struct WordEntry {
+    pub language: String,
+    pub direction: String,
+    pub runs: Vec<NoteRun>,
+}
+
+/// A word's entry, by where the word stands: see `scriptura::Library::entry`. None where the
+/// lexicons hold nothing of it.
+#[uniffi::export]
+pub fn reader_entry(book: String, chapter: u32, verse: u32, word: u32) -> Option<WordEntry> {
+    let library = LIBRARY.read().unwrap();
+    let entry = library.entry(&book, chapter, verse, word)?;
+    let runs = entry.runs.into_iter().map(NoteRun::from).collect();
+    Some(WordEntry { language: entry.language, direction: entry.direction, runs })
+}
+
+/// What a reader shows of its passages, besides the passages themselves: see `scriptura::Options`.
+#[derive(uniffi::Record)]
+pub struct ReaderOptions {
+    pub font_size: f64,
+    pub verse_per_line: bool,
+    pub companions: Vec<String>,
+    pub notes: Notes,
+    pub drop_caps: bool,
+    pub mark_notes: MarkNotes,
+    pub lexicon: LexiconUse,
+    pub lexicon_books: Option<Vec<String>>,
+}
+
+/// The passages as paragraphs, read along with companions, with the notes as asked for and drop
+/// caps if asked for, the host's marks over their words, their notes as asked, and the words'
+/// numbers as asked: see `scriptura::Library::blocks`.
+#[uniffi::export]
+pub fn reader_blocks(references: Vec<Reference>, options: ReaderOptions) -> Vec<Block> {
+    let options = core_options(options);
     LIBRARY.read().unwrap().blocks(&core_references(references), &options).into_iter().map(Block::from).collect()
 }
 
@@ -424,16 +505,8 @@ pub fn reader_blocks(
 /// `reader_blocks` gives them with the same arguments: for a reader to draw them anew as they
 /// change – its layout kept, unless the signs changed, which stand in the text.
 #[uniffi::export]
-pub fn reader_marks(
-    references: Vec<Reference>,
-    font_size: f64,
-    verse_per_line: bool,
-    companions: Vec<String>,
-    notes: Notes,
-    drop_caps: bool,
-    mark_notes: MarkNotes,
-) -> Vec<ParagraphMarks> {
-    let options = core_options(font_size, verse_per_line, companions, notes, drop_caps, mark_notes);
+pub fn reader_marks(references: Vec<Reference>, options: ReaderOptions) -> Vec<ParagraphMarks> {
+    let options = core_options(options);
     let placed = LIBRARY.read().unwrap().marks_in(&core_references(references), &options);
     let paragraph = |scriptura::ParagraphMarks { marks, signs }: scriptura::ParagraphMarks| ParagraphMarks {
         marks: marks.into_iter().map(PlacedMark::from).collect(),
@@ -442,14 +515,9 @@ pub fn reader_marks(
     placed.into_iter().map(paragraph).collect()
 }
 
-fn core_options(
-    font_size: f64,
-    verse_per_line: bool,
-    companions: Vec<String>,
-    notes: Notes,
-    drop_caps: bool,
-    mark_notes: MarkNotes,
-) -> scriptura::Options {
+fn core_options(options: ReaderOptions) -> scriptura::Options {
+    let ReaderOptions { font_size, verse_per_line, companions, notes, drop_caps, mark_notes, lexicon, lexicon_books } =
+        options;
     let notes = match notes {
         Notes::None => scriptura::Notes::None,
         Notes::Marks => scriptura::Notes::Marks,
@@ -459,7 +527,12 @@ fn core_options(
         MarkNotes::Sign => scriptura::MarkNotes::Sign,
         MarkNotes::Inline => scriptura::MarkNotes::Inline,
     };
-    scriptura::Options { font_size, verse_per_line, companions, notes, drop_caps, mark_notes }
+    let lexicon = match lexicon {
+        LexiconUse::None => scriptura::LexiconUse::None,
+        LexiconUse::Entries => scriptura::LexiconUse::Entries,
+        LexiconUse::Numbers => scriptura::LexiconUse::Numbers,
+    };
+    scriptura::Options { font_size, verse_per_line, companions, notes, drop_caps, mark_notes, lexicon, lexicon_books }
 }
 
 fn core_references(references: Vec<Reference>) -> Vec<scriptura::Reference> {
@@ -513,6 +586,7 @@ impl From<scriptura::NoteMark> for NoteMark {
             mark: note.mark,
             runs: note.runs.into_iter().map(NoteRun::from).collect(),
             id: note.id,
+            word: note.word,
         }
     }
 }
@@ -531,7 +605,7 @@ impl From<scriptura::NoteRun> for NoteRun {
 }
 
 impl From<scriptura::Word> for Word {
-    fn from(scriptura::Word { chapter, verse, index, start, end }: scriptura::Word) -> Self {
-        Word { chapter, verse, index, start, end }
+    fn from(scriptura::Word { chapter, verse, index, start, end, entry }: scriptura::Word) -> Self {
+        Word { chapter, verse, index, start, end, entry }
     }
 }

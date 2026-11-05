@@ -12,7 +12,8 @@ import UIKit
 /// a cross reference's verses it jumps to, or tells JS of. Chapters open with a drop cap. The host's
 /// marks are drawn over their words, the signs of their notes standing in the text as the notes'
 /// marks do; words or verses are selected by a long press and a drag, or by VoiceOver, and reported by
-/// where they stand.
+/// where they stand. A double tap on a word tagged with a number in a lexicon opens its entry where it
+/// stands, and the numbers can stand in the text, small marks that open it too.
 class ReaderView: ExpoView {
   /// Posted as the host adds or removes books: every reader shows what the library now holds.
   static let booksChanged = Notification.Name("ScripturaBooksChanged")
@@ -21,6 +22,9 @@ class ReaderView: ExpoView {
   /// Posted as the host adds or removes marks: every reader draws what the library now holds, its
   /// layout kept.
   static let marksChanged = Notification.Name("ScripturaMarksChanged")
+  /// Posted as the host adds or removes lexicons: every reader lays its text out anew, at its word, as
+  /// the words that open entries change.
+  static let lexiconsChanged = Notification.Name("ScripturaLexiconsChanged")
 
   var passages: [PassageRecord] = []
   var fontSize = 28.0
@@ -52,6 +56,11 @@ class ReaderView: ExpoView {
   /// How a long press and a drag select: "word", word by word, or "verse", by whole verses – and so
   /// does JS's select().
   var selectBy = "word"
+  /// What the numbers of tagged words do, where a lexicon holds their entries: "entries", a double tap
+  /// on a word opens its entry; "numbers", that, and each number stands in the text after its word; or
+  /// "none". Only in `lexiconBooks`, by id, where given.
+  var lexicon = "entries"
+  var lexiconBooks: [String]?
   var dropCaps = true
   var dropCapFont: String?
   /// A voice per language for reading aloud, by identifier; otherwise the device's for it.
@@ -100,6 +109,7 @@ class ReaderView: ExpoView {
   /// change.
   private var shownNotes: Notes = .marks
   private var shownMarkNotes: MarkNotes = .sign
+  private var shownLexicon: LexiconUse = .entries
   /// Where the selection showed as last reported to JS, so that only changes are.
   private var reportedFrame = ""
   /// The verse in sight as last reported to JS, so that only changes are.
@@ -121,6 +131,8 @@ class ReaderView: ExpoView {
   private var pendingNote: (note: ReaderNote, from: Any?)?
   private var openLinks: [Target] = []
   private var openedFrom: Any?
+  /// The last tap on a word: which, and when – a second on it soon after opens its lexicon entry.
+  private var lastTap: (word: Int, time: CFTimeInterval)?
   private let readAloud = ReadAloud()
   /// Whether the word the voice comes to is brought into sight: not after a scroll by hand away
   /// from it, until it is in sight again.
@@ -186,6 +198,10 @@ class ReaderView: ExpoView {
       center.addObserver(forName: Self.marksChanged, object: nil, queue: .main) { [weak self] _ in
         self?.refreshMarks()
       },
+      center.addObserver(forName: Self.lexiconsChanged, object: nil, queue: .main) { [weak self] _ in
+        // Reading aloud goes on: no word is spoken otherwise.
+        self?.render()
+      },
       center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
         guard let self, nowPlaying == nil, readAloud.state == "speaking" else { return }
         pause()
@@ -241,11 +257,10 @@ class ReaderView: ExpoView {
       readAloud.stop()
     }
     shownReferences = references
-    let shownNotes: Notes = notes == "none" ? .none : notes == "inline" ? .inline : .marks
-    self.shownNotes = shownNotes
+    shownNotes = notes == "none" ? .none : notes == "inline" ? .inline : .marks
     shownMarkNotes = markNotes == "inline" ? .inline : .sign
-    let blocks = readerBlocks(references: references, fontSize: fontSize, versePerLine: versePerLine, companions: companions, notes: shownNotes,
-                              dropCaps: dropCaps, markNotes: shownMarkNotes)
+    shownLexicon = lexicon == "none" ? .none : lexicon == "numbers" ? .numbers : .entries
+    let blocks = readerBlocks(references: references, options: shownOptions())
     let paragraphs = blocks.map { Paragraph($0, colors: colors, fontSize: fontSize(for: $0)) }
     // The passages read along with other books, in rows.
     let along = Set(paragraphs.filter { $0.column > 0 }.map(\.passage))
@@ -284,13 +299,13 @@ class ReaderView: ExpoView {
       let firstMark = marks.count
       marks += paragraph.notes.map { note in
         ReaderNote(paragraph: index, range: NSRange(location: start + Int(note.start), length: Int(note.end - note.start)), runs: note.runs,
-                   label: Self.name(of: note), kind: note.kind, mark: note.mark, id: note.id, chapter: note.chapter, verse: note.verse)
+                   label: Self.name(of: note), kind: note.kind, mark: note.mark, id: note.id, chapter: note.chapter, verse: note.verse, word: note.word)
       }
       readables += paragraph.readables(at: range, firstWord: words.count, firstMark: firstMark)
       let firstWord = words.count
       words += paragraph.words.map { word in
         ReaderWord(place: WordPlace(passage: paragraph.passage, book: paragraph.book, chapter: word.chapter, verse: word.verse, index: word.index),
-                   range: NSRange(location: start + Int(word.start), length: Int(word.end - word.start)), paragraph: index)
+                   range: NSRange(location: start + Int(word.start), length: Int(word.end - word.start)), paragraph: index, entry: word.entry)
       }
       verses += paragraph.verses.map { verse in
         let inVerse = paragraph.words.indices.filter { verse.start <= paragraph.words[$0].start && paragraph.words[$0].start < verse.end }
@@ -423,13 +438,19 @@ class ReaderView: ExpoView {
     hex.compactMapValues { UIColor(hex: $0) }
   }
 
+  /// How the core is asked for the paragraphs, as last shown: their notes, the marks' notes, and what the
+  /// words' numbers do, in which books.
+  private func shownOptions() -> ReaderOptions {
+    ReaderOptions(fontSize: fontSize, versePerLine: versePerLine, companions: companions, notes: shownNotes, dropCaps: dropCaps,
+                  markNotes: shownMarkNotes, lexicon: shownLexicon, lexiconBooks: lexiconBooks)
+  }
+
   /// Draws the host's marks anew as they change: the same paragraphs, their marks asked for again,
   /// the layout kept – unless the signs of their notes changed, which stand in the text: then the
   /// text is laid out anew, the reader staying at its word, the selection kept.
   private func refreshMarks() {
     guard !paragraphs.isEmpty else { return }
-    let placed = readerMarks(references: shownReferences, fontSize: fontSize, versePerLine: versePerLine, companions: companions, notes: shownNotes,
-                             dropCaps: dropCaps, markNotes: shownMarkNotes)
+    let placed = readerMarks(references: shownReferences, options: shownOptions())
     let signed = placed.count == paragraphs.count && zip(placed, paragraphs).allSatisfy { $0.signs == $1.notes.filter { $0.kind == Self.signKind } }
     guard signed else { return render() }
     placedMarks = placedMarks(from: placed.map(\.marks))
@@ -932,11 +953,48 @@ class ReaderView: ExpoView {
   }
 
   /// A note as VoiceOver names it: "Footnote 1", "Cross reference a" – the sign of a host's mark's
-  /// note as "Note".
+  /// note as "Note", a word's number as "Lexicon entry 1961".
   fileprivate static func name(of note: NoteMark) -> String {
     guard note.kind != signKind else { return "Note" }
-    let kind = ["footnote": "Footnote", "endnote": "Endnote", "crossReference": "Cross reference"][note.kind] ?? "Note"
+    let kind = ["footnote": "Footnote", "endnote": "Endnote", "crossReference": "Cross reference", entryKind: entryName][note.kind] ?? "Note"
     return "\(kind) \(note.mark)"
+  }
+
+  /// The kind of a note's mark that is a word's number, and what an entry is called where it opens.
+  fileprivate static let entryKind = "entry"
+  fileprivate static let entryName = "Lexicon entry"
+
+  /// The words of a verse VoiceOver is on, by their indices in the reader's words; none for a heading.
+  private func verseWords(of readable: Readable) -> ClosedRange<Int>? {
+    readable.verse == nil ? nil : verses.first { $0.range == readable.range }?.words
+  }
+
+  /// Whether a verse VoiceOver is on has words that open lexicon entries.
+  fileprivate func hasEntries(_ readable: Readable) -> Bool {
+    verseWords(of: readable).map { $0.contains { words[$0].entry } } ?? false
+  }
+
+  /// VoiceOver's action opening a lexicon entry from a verse: of the word the reader marked, if it is in
+  /// that verse and has one, or else of the verse's first word that has one.
+  fileprivate func entryActions(for readable: Readable, from element: Any) -> [UIAccessibilityCustomAction] {
+    guard let inVerse = verseWords(of: readable), inVerse.contains(where: { words[$0].entry }) else { return [] }
+    return [
+      UIAccessibilityCustomAction(name: Self.entryName) { [weak self] _ in
+        guard let self else { return false }
+        let words = self.words
+        let index = current.flatMap { inVerse.contains($0) && words[$0].entry ? $0 : nil } ?? inVerse.first { words[$0].entry }
+        guard let index else { return false }
+        openEntry(index, from: element)
+        return true
+      },
+    ]
+  }
+
+  /// Opens a word's lexicon entry where the word stands, as a double tap on it does.
+  private func openEntry(_ index: Int, from element: Any? = nil) {
+    let word = words[index]
+    openNote(ReaderNote(paragraph: word.paragraph, range: word.range, runs: [], label: Self.entryName, kind: Self.entryKind, mark: "", id: nil,
+                        chapter: word.place.chapter, verse: word.place.verse, word: word.place.index), from: element)
   }
 
   /// The headings and verses VoiceOver finds in sight, and the notes' marks – the signs of the host's
@@ -958,6 +1016,9 @@ class ReaderView: ExpoView {
       found["verse"] = element.readable.verse
       if isMarked(element.readable) {
         found["marked"] = true
+      }
+      if hasEntries(element.readable) {
+        found["entries"] = true
       }
       return found
     }
@@ -993,7 +1054,15 @@ class ReaderView: ExpoView {
     }
     let paragraph = paragraphs[mark.paragraph]
     var links: [Target] = []
-    let text = noteText(mark.runs, in: paragraph, links: &links)
+    let size = max(14, paragraph.fontSize * 0.7)
+    let text: NSAttributedString
+    if mark.kind == Self.entryKind {
+      // A word's entry, from the core: in its lexicon's language and direction, in the reader's font for it.
+      guard let word = mark.word, let entry = readerEntry(book: paragraph.book, chapter: mark.chapter, verse: mark.verse, word: word) else { return }
+      text = noteText(entry.runs, family: fonts[entry.language], size: size, rightToLeft: entry.direction == "rtl", links: &links)
+    } else {
+      text = noteText(mark.runs, family: paragraph.fontFamily ?? fonts[paragraph.language], size: size, rightToLeft: paragraph.rightToLeft, links: &links)
+    }
     openNote = mark
     openLinks = links
     openedFrom = element
@@ -1021,14 +1090,14 @@ class ReaderView: ExpoView {
     openedFrom = nil
   }
 
-  /// A note's runs as text in the paragraph's font, a little smaller: the verse it names in its
-  /// color, quotations and emphasis in italics, words in other languages in their fonts, and the
-  /// verses it refers to as links, numbered in `links`.
-  private func noteText(_ runs: [NoteRun], in paragraph: Paragraph, links: inout [Target]) -> NSAttributedString {
-    let size = max(14, paragraph.fontSize * 0.7)
-    let font = font(family: paragraph.fontFamily ?? fonts[paragraph.language], size: size)
+  /// A note's runs as text in a font – a note's, its paragraph's, a little smaller; an entry's, the
+  /// reader's for its lexicon's language – in its direction: the verse it names in its color,
+  /// quotations and emphasis in italics, strong words in bold, words in other languages in their fonts,
+  /// and the verses it refers to as links, numbered in `links`.
+  private func noteText(_ runs: [NoteRun], family: String?, size: Double, rightToLeft: Bool, links: inout [Target]) -> NSAttributedString {
+    let font = font(family: family, size: size)
     let style = NSMutableParagraphStyle()
-    style.baseWritingDirection = paragraph.rightToLeft ? .rightToLeft : .leftToRight
+    style.baseWritingDirection = rightToLeft ? .rightToLeft : .leftToRight
     style.alignment = .natural
     let text = NSMutableAttributedString()
     // The verses a note refers to stand in paragraphs of their own, each in the direction of its
@@ -1057,6 +1126,15 @@ class ReaderView: ExpoView {
       if let language = run.language {
         attributes[.font] = self.font(family: fonts[language], size: size)
         attributes[.accessibilitySpeechLanguage] = language
+      }
+      if run.role == "strong", let runFont = attributes[.font] as? UIFont {
+        // The font's own bold, if it has one; else its strokes drawn thicker.
+        if let bold = runFont.fontDescriptor.withSymbolicTraits(.traitBold), UIFont(descriptor: bold, size: size).familyName == runFont.familyName {
+          attributes[.font] = UIFont(descriptor: bold, size: size)
+        } else {
+          attributes[.strokeWidth] = -3.0
+          attributes[.strokeColor] = attributes[.foregroundColor]
+        }
       }
       if let target = run.target {
         attributes[.link] = URL(string: "scriptura://reference/\(links.count)")!
@@ -1170,19 +1248,35 @@ class ReaderView: ExpoView {
     pages.characterIndex(at: pages.convert(point, from: self)).map(selectWord(atCharacter:))
   }
 
-  /// A tap on a note's mark opens the note, or closes it if it is the one open; a tap on a word
-  /// selects it, and names the marks on it to JS. The first tap after a selection only ends it.
+  /// How soon after a tap on a word a second one opens its lexicon entry, in seconds.
+  private static let doubleTap = 0.35
+
+  /// A tap on a note's mark opens the note, or closes it if it is the one open – a word's number, its
+  /// entry; a tap on a word selects it, and names the marks on it to JS, and a second soon after opens
+  /// its lexicon entry. The first tap after a selection only ends it.
   private func selectWord(atCharacter offset: Int) {
     if selected != nil {
       closeNote()
       return setSelected(nil)
     }
-    if let note = marks.first(where: { $0.range.location <= offset && offset <= NSMaxRange($0.range) }) {
+    // Where a word's number starts, the word ends: a tap there is the word's.
+    let onMark = { (mark: ReaderNote) in
+      mark.range.location <= offset && offset <= NSMaxRange(mark.range)
+        && !(mark.kind == Self.entryKind && offset == mark.range.location && self.word(atCharacter: offset) != nil)
+    }
+    if let note = marks.first(where: onMark) {
       openNote?.range == note.range ? closeNote() : openNote(note)
       return
     }
     closeNote()
     guard let index = word(atCharacter: offset) else { return }
+    // A second tap on the word soon after the first opens its entry, if it has one; the first reached it at once.
+    let now = CACurrentMediaTime()
+    let again = lastTap.map { $0.word == index && now - $0.time < Self.doubleTap } ?? false
+    lastTap = again ? nil : (index, now)
+    if again, words[index].entry {
+      return openEntry(index)
+    }
     select(index)
     let word = words[index]
     let ids = placedMarks.filter { $0.range.location <= word.range.location && NSMaxRange(word.range) <= NSMaxRange($0.range) }.map(\.id)
@@ -1301,6 +1395,8 @@ private struct ReaderNote {
   let id: String?
   let chapter: UInt32
   let verse: UInt32
+  /// For a word's number, or its entry opened at it: the word, by its index in the verse.
+  let word: UInt32?
 }
 
 /// A host's mark in the reader's text: in which paragraph, where in the text – its words – and how it
@@ -1342,12 +1438,13 @@ private struct Selected {
   }
 }
 
-/// A word of the reader's text: where it stands in the scripture, where it is in the text, and in
-/// which paragraph.
+/// A word of the reader's text: where it stands in the scripture, where it is in the text, in which
+/// paragraph, and whether it opens a lexicon entry.
 private struct ReaderWord {
   let place: WordPlace
   let range: NSRange
   let paragraph: Int
+  let entry: Bool
 
   func isInVerse(of other: ReaderWord) -> Bool {
     let (place, other) = (place, other.place)
@@ -1519,7 +1616,7 @@ private final class ReadableElement: UIAccessibilityElement {
     get {
       guard let reader else { return [] }
       return reader.moveActions(from: readable.firstWord) + reader.noteActions(for: readable.marks.map(\.index), from: self)
-        + reader.selectionActions(for: readable)
+        + reader.entryActions(for: readable, from: self) + reader.selectionActions(for: readable)
     }
     set {}
   }

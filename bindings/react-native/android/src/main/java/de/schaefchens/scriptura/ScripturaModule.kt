@@ -3,19 +3,24 @@ package de.schaefchens.scriptura
 import android.graphics.Color
 import android.net.Uri
 import de.schaefchens.scriptura.core.BooksException
+import de.schaefchens.scriptura.core.LexiconsException
 import de.schaefchens.scriptura.core.MarkEnd
 import de.schaefchens.scriptura.core.MarksException
 import de.schaefchens.scriptura.core.RecordingsException
 import de.schaefchens.scriptura.core.addBooks
+import de.schaefchens.scriptura.core.addLexicons
 import de.schaefchens.scriptura.core.addMarks
 import de.schaefchens.scriptura.core.addRecordings
 import de.schaefchens.scriptura.core.books
 import de.schaefchens.scriptura.core.clearBooks
+import de.schaefchens.scriptura.core.clearLexicons
 import de.schaefchens.scriptura.core.clearMarks
 import de.schaefchens.scriptura.core.clearRecordings
+import de.schaefchens.scriptura.core.lexicons
 import de.schaefchens.scriptura.core.marks
 import de.schaefchens.scriptura.core.recordings
 import de.schaefchens.scriptura.core.removeBooks
+import de.schaefchens.scriptura.core.removeLexicons
 import de.schaefchens.scriptura.core.removeMarks
 import de.schaefchens.scriptura.core.removeRecordings
 import expo.modules.kotlin.Promise
@@ -180,6 +185,32 @@ class ScripturaModule : Module() {
       ReaderView.marksChanged()
     }.runOnQueue(Queues.MAIN)
 
+    // Lexicons that tagged words' numbers lead to, read here too: readers lay their text out anew, as their words now open entries or
+    // not, and reading aloud goes on. JS learns what they are, not what they say.
+    AsyncFunction("addLexicons") { source: BooksSource ->
+      val ids = try {
+        addLexicons(bytesOf(source))
+      } catch (error: LexiconsException) {
+        throw CodedException("ERR_SCRIPTURA_LEXICONS", error.message, error)
+      }
+      ReaderView.lexiconsChanged()
+      ids
+    }.runOnQueue(Queues.MAIN)
+
+    Function("lexicons") {
+      lexicons().map { mapOf("id" to it.id, "title" to it.title, "language" to it.language, "entries" to it.entries.toInt()) }
+    }
+
+    AsyncFunction("removeLexicons") { ids: List<String> ->
+      removeLexicons(ids)
+      ReaderView.lexiconsChanged()
+    }.runOnQueue(Queues.MAIN)
+
+    AsyncFunction("clearLexicons") {
+      clearLexicons()
+      ReaderView.lexiconsChanged()
+    }.runOnQueue(Queues.MAIN)
+
     // The voices that can read aloud: their names and languages.
     AsyncFunction("speechVoices") { promise: Promise ->
       val context = appContext.reactContext ?: return@AsyncFunction promise.resolve(emptyList<Any>())
@@ -240,6 +271,12 @@ class ScripturaModule : Module() {
       Prop("selectBy") { view: ReaderView, selectBy: String? ->
         view.selectBy = selectBy ?: "word"
       }
+      Prop("lexicon") { view: ReaderView, lexicon: String? ->
+        view.lexicon = lexicon ?: "entries"
+      }
+      Prop("lexiconBooks") { view: ReaderView, books: List<String>? ->
+        view.lexiconBooks = books
+      }
       Prop("dropCapFont") { view: ReaderView, dropCapFont: String? ->
         view.dropCapFont = dropCapFont
       }
@@ -288,6 +325,11 @@ class ScripturaModule : Module() {
         val density = view.resources.displayMetrics.density
         view.tap((x * density).toFloat(), (y * density).toFloat())
       }
+      // The same as a double tap there: the second tap on a word the first reached opens its lexicon entry, if it has one.
+      AsyncFunction("doubleTapAt") { view: ReaderView, x: Double, y: Double ->
+        val density = view.resources.displayMetrics.density
+        view.doubleTap((x * density).toFloat(), (y * density).toFloat())
+      }.runOnQueue(Queues.MAIN)
       // Words or verses selected, as a long press and a drag would select them; or nothing.
       AsyncFunction("select") { view: ReaderView, selection: SelectionRecord? ->
         view.selectWords(selection)

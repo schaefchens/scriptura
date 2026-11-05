@@ -1,5 +1,6 @@
 import {
   addBooks,
+  addLexicons,
   addMarks,
   addRecordings,
   type BookInfo,
@@ -66,6 +67,9 @@ export default function App() {
   // The app's own notes: a sign where each mark ends, or shown in full there.
   const [markNotes, setMarkNotes] = useState<'sign' | 'inline'>('sign');
   const [selectBy, setSelectBy] = useState<'word' | 'verse'>('word');
+  // A double tap on a word of the Hebrew or the Greek opens its lexicon entry; the numbers can stand in the text too. The
+  // translations' tagging is rough – the World English Bible's "the" stands for "all" thousands of times – so theirs stay closed.
+  const [lexicon, setLexicon] = useState<'entries' | 'numbers' | 'none'>('entries');
   // A cross reference to a book the library doesn't hold; and a verse to jump to once its book shows.
   const [missing, setMissing] = useState<string>();
   const pending = useRef<WordPosition>(undefined);
@@ -140,6 +144,7 @@ export default function App() {
       setLibrary(books());
       setBook((current) => current || books()[0]?.id || '');
     });
+    addLexicons({ asset: 'lexicons.json' });
     addRecordings({ asset: 'recordings.json' }).then(() => {
       const names = new Map(recordings().map(({ voice, name }) => [voice, name ?? voice]));
       setVoiceNames(names);
@@ -148,6 +153,7 @@ export default function App() {
   }, []);
 
   const selected = library.find(({ id }) => id === book);
+  const originals = useMemo(() => library.filter(({ language }) => language === 'he' || language === 'el').map(({ id }) => id), [library]);
   // Other editions of the book, which can be read along with it.
   const editions = library.filter(({ id, code }) => code && code === selected?.code && id !== book);
   const along = companions.filter((id) => editions.some((edition) => edition.id === id));
@@ -281,6 +287,7 @@ export default function App() {
           {button({ off: 'No drop caps', on: 'Drop caps', ornate: 'Ornate drop caps' }[dropCaps], () => setDropCaps({ off: 'on', on: 'ornate', ornate: 'off' }[dropCaps] as typeof dropCaps))}
           {button(markNotes === 'sign' ? 'My notes as signs' : 'My notes in full', () => setMarkNotes(markNotes === 'sign' ? 'inline' : 'sign'))}
           {button(selectBy === 'word' ? 'Selecting words' : 'Selecting verses', () => setSelectBy(selectBy === 'word' ? 'verse' : 'word'))}
+          {button({ entries: 'Lexicon on double tap', numbers: "Strong's numbers", none: 'No lexicon' }[lexicon], () => setLexicon({ entries: 'numbers', numbers: 'none', none: 'entries' }[lexicon] as typeof lexicon))}
           {editions.map(({ id, work }) => button(work, () => toggle(id), along.includes(id)))}
           {along.length > 0 && button(parallel === 'inline' ? 'Side by side' : 'Inline', () => setParallel(parallel === 'inline' ? 'columns' : 'inline'))}
           {along.length > 0 && button('Speak along', () => setSpeakAlong(!speakAlong), speakAlong)}
@@ -321,6 +328,8 @@ export default function App() {
           parallel={parallel}
           notes={notes}
           markNotes={markNotes}
+          lexicon={lexicon}
+          lexiconBooks={originals}
           selectBy={selectBy}
           // While the pen is up, the words being selected look as they will marked.
           selectionStyle={penLook}
@@ -429,7 +438,9 @@ export default function App() {
           World English Bible, Luther 1912 and Smith & Van Dyck, public domain; the Westminster Leningrad Codex from the Open
           Scriptures Hebrew Bible; the SBLGNT, © 2010 Society of Biblical Literature and Logos Bible Software, CC BY 4.0; the Quran
           from Tanzil (tanzil.net, CC BY 3.0) with quran-tajweed's rules (CC BY 4.0). Recited by Mishary Rashid Alafasy and Maher Al-Muaiqly, from
-          EveryAyah (everyayah.com); their words timed by quran-align, © 2016 Collin Fair, and QuranLab, CC BY 4.0.
+          EveryAyah (everyayah.com); their words timed by quran-align, © 2016 Collin Fair, and QuranLab, CC BY 4.0. Lexicon entries
+          from STEPBible.org's brief lexicons by Tyndale House, Cambridge (CC BY 4.0), with Abbott-Smith's Greek definitions and Strong's
+          Hebrew ones from Open Scriptures (CC BY-SA).
         </Text>
       </SafeAreaView>
     </SafeAreaProvider>
