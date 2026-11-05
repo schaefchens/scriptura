@@ -131,7 +131,7 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
     silence()
     if sessionActive {
       sessionActive = false
-      try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+      AudioSessionOwner.deactivate()
     }
     if !wasStopped {
       change("stopped", skipped.isEmpty ? [:] : ["unvoiced": skipped.sorted()])
@@ -294,8 +294,7 @@ final class ReadAloud: NSObject, AVSpeechSynthesizerDelegate {
   }
 
   private func activateSession() {
-    try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
-    try? AVAudioSession.sharedInstance().setActive(true)
+    AudioSessionOwner.activate()
     sessionActive = true
   }
 

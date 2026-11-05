@@ -93,8 +93,7 @@ final class PlayRecording: NSObject {
   /// Goes on where it paused.
   func resume(from time: Double? = nil) {
     guard take != nil else { return }
-    try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
-    try? AVAudioSession.sharedInstance().setActive(true)
+    AudioSessionOwner.activate()
     startedAt = time ?? player.currentTime().seconds
     player.playImmediately(atRate: Float(min(max(rate, 0.5), 2)))
     if link == nil {

@@ -182,6 +182,7 @@ type ScripturaModule = {
   clearLexicons(): Promise<void>;
   versesWith(number: string, books: string[]): NumberedVerse[];
   speechVoices(): Promise<Voice[]>;
+  setAudioSession(owner: 'readers' | 'app'): void;
 };
 
 const scriptura = requireNativeModule<ScripturaModule>('Scriptura');
@@ -250,3 +251,10 @@ export const versesWith = (number: string, books: string[]) => scriptura.versesW
 
 /** The voices on the device that can read aloud. */
 export const speechVoices = () => scriptura.speechVoices();
+
+/**
+ * Whose iOS audio session is: the readers' (the default) – they set it for speech as they read and
+ * give it back as they stop – or the app's, which then keeps the one it set, such as one that
+ * listens while the readers speak. Android's apps share the audio by focus: nothing changes there.
+ */
+export const setAudioSession = (owner: 'readers' | 'app') => scriptura.setAudioSession(owner);

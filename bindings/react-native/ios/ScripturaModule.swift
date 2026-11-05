@@ -1,3 +1,4 @@
+import AVFAudio
 import ExpoModulesCore
 import UIKit
 
@@ -68,6 +69,23 @@ struct ReaderColors: Record {
   @Field var marks: [String: UIColor] = [:]
   @Field var markLines: [String: UIColor] = [:]
   @Field var roles: [String: UIColor] = [:]
+}
+
+/// Whether the app keeps the audio session: readers then neither change it nor give it back.
+enum AudioSessionOwner {
+  static var app = false
+
+  /// The session for speech, unless the app keeps its own.
+  static func activate() {
+    let session = AVAudioSession.sharedInstance()
+    if !app { try? session.setCategory(.playback, mode: .spokenAudio) }
+    try? session.setActive(true)
+  }
+
+  /// The session given back, so that other apps' audio resumes – unless the app keeps it.
+  static func deactivate() {
+    if !app { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+  }
 }
 
 public class ScripturaModule: Module {
@@ -177,6 +195,12 @@ public class ScripturaModule: Module {
     // The voices that can read aloud: their identifiers, names and languages.
     AsyncFunction("speechVoices") {
       ReadAloud.voiceList()
+    }
+
+    // Whose the audio session is: the readers' – they set it for speech and give it back – or the
+    // app's, which keeps the one it set, such as one that listens while they read.
+    Function("setAudioSession") { (owner: String) in
+      AudioSessionOwner.app = owner == "app"
     }
 
     View(ReaderView.self) {

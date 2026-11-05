@@ -226,6 +226,9 @@ class ScripturaModule : Module() {
       ReadAloud.voiceList(context, promise::resolve)
     }
 
+    // iOS's audio session has no counterpart here: Android's apps share the audio by focus.
+    Function("setAudioSession") { _: String -> }
+
     View(ReaderView::class) {
       Events(
         "onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap", "onSelectionFrame", "onVerseInSight",
