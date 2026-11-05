@@ -23,6 +23,7 @@ import de.schaefchens.scriptura.core.removeBooks
 import de.schaefchens.scriptura.core.removeLexicons
 import de.schaefchens.scriptura.core.removeMarks
 import de.schaefchens.scriptura.core.removeRecordings
+import de.schaefchens.scriptura.core.versesWith
 import expo.modules.kotlin.Promise
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.functions.Queues
@@ -93,6 +94,7 @@ class ReaderColors : Record {
   @Field val text: Color? = null
   @Field val highlight: Color? = null
   @Field val selection: Color? = null
+  @Field val linked: Color? = null
   @Field val marks: Map<String, Color> = emptyMap()
   @Field val markLines: Map<String, Color> = emptyMap()
   @Field val roles: Map<String, Color> = emptyMap()
@@ -211,6 +213,13 @@ class ScripturaModule : Module() {
       ReaderView.lexiconsChanged()
     }.runOnQueue(Queues.MAIN)
 
+    // Every verse of the books with words of a number, by where they stand – never their text.
+    Function("versesWith") { number: String, books: List<String> ->
+      versesWith(number, books).map {
+        mapOf("book" to it.book, "chapter" to it.chapter.toInt(), "verse" to it.verse.toInt(), "words" to it.words.map(UInt::toInt))
+      }
+    }
+
     // The voices that can read aloud: their names and languages.
     AsyncFunction("speechVoices") { promise: Promise ->
       val context = appContext.reactContext ?: return@AsyncFunction promise.resolve(emptyList<Any>())
@@ -218,7 +227,10 @@ class ScripturaModule : Module() {
     }
 
     View(ReaderView::class) {
-      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap", "onSelectionFrame", "onVerseInSight")
+      Events(
+        "onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap", "onSelectionFrame", "onVerseInSight",
+        "onVersesWith",
+      )
 
       Prop("passages") { view: ReaderView, passages: List<PassageRecord>? ->
         view.passages = passages ?: emptyList()
@@ -276,6 +288,12 @@ class ScripturaModule : Module() {
       }
       Prop("lexiconBooks") { view: ReaderView, books: List<String>? ->
         view.lexiconBooks = books
+      }
+      Prop("linkedBooks") { view: ReaderView, books: List<String>? ->
+        view.linkedBooks = books ?: emptyList()
+      }
+      Prop("markedNumber") { view: ReaderView, number: String? ->
+        view.markedNumber = number
       }
       Prop("dropCapFont") { view: ReaderView, dropCapFont: String? ->
         view.dropCapFont = dropCapFont

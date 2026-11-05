@@ -5,6 +5,36 @@ use serde::Serialize;
 use crate::model::{Entry, Lexicon, NoteRun, Verse, WordTag};
 use crate::reader::words_of;
 
+/// A verse with words of a number, by where they stand – never by their text: its book, chapter
+/// and number, and the words, by their indices in the verse.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NumberedVerse {
+    pub book: String,
+    pub chapter: u32,
+    pub verse: u32,
+    pub words: Vec<u32>,
+}
+
+/// Whether two numbers are of one word: alike, or one of them without the letter that tells words of
+/// a number apart – H1121 is H1121a's, a son, as a translation tags it; H1121a isn't H1121b, Beno.
+pub(crate) fn same_number(a: &str, b: &str) -> bool {
+    let plain = |number: &str| number.trim_end_matches(|char: char| char.is_ascii_lowercase()).len();
+    a == b || (plain(a) == a.len() || plain(b) == b.len()) && a[..plain(a)] == b[..plain(b)]
+}
+
+/// The numbers of a verse's tags within a word – its range in the verse's text, in UTF-16 code units.
+pub(crate) fn numbers_within(verse: &Verse, (start, end): (u32, u32)) -> impl Iterator<Item = &str> {
+    tags_within(verse, start, end).flat_map(|tag| tag.parts.iter().filter_map(|part| part.number.as_deref()))
+}
+
+/// The indices of a verse's words with a number that is one of `numbers`' (see [`same_number`]).
+pub(crate) fn words_with<'a>(verse: &'a Verse, numbers: &'a [&str]) -> impl Iterator<Item = u32> + 'a {
+    (0..).zip(words_of(verse)).filter_map(move |(index, word)| {
+        let found = numbers_within(verse, word).any(|own| numbers.iter().any(|number| same_number(own, number)));
+        found.then_some(index)
+    })
+}
+
 /// A word's entry as a note opens it, at the word: in the language and direction of the lexicon it
 /// comes from, its runs – for each word its source tagged within it, each part's grammar where the
 /// source gives it, and each part's entry: the word as the lexicon writes it, in its language, how
@@ -72,9 +102,16 @@ impl Lexicons {
         })
     }
 
-    /// A word's entry – see [`WordEntry`] – the word in the book's `language`. None where the
-    /// lexicons hold neither an entry nor the grammar of any of its parts.
-    pub(crate) fn of(&self, verse: &Verse, language: &str, word: u32) -> Option<WordEntry> {
+    /// A word's entry – see [`WordEntry`] – the word in the book's `language`; after each part's
+    /// entry, a link to every verse with its number, where `verses` counts more than one. None where
+    /// the lexicons hold neither an entry nor the grammar of any of its parts.
+    pub(crate) fn of(
+        &self,
+        verse: &Verse,
+        language: &str,
+        word: u32,
+        verses: impl Fn(&str) -> usize,
+    ) -> Option<WordEntry> {
         let &(start, end) = words_of(verse).get(word as usize)?;
         let text: Vec<u16> = verse.runs.iter().flat_map(|(run, _)| run.encode_utf16()).collect();
         let mut runs = Vec::new();
@@ -98,6 +135,16 @@ impl Lexicons {
                 written.get_or_insert(lexicon);
                 line_break(&mut runs);
                 runs.extend(entry_runs(entry));
+                let number = part.number.as_deref().unwrap_or_default();
+                let count = verses(number);
+                if count > 1 {
+                    runs.push(run("\n", None, None));
+                    runs.push(NoteRun {
+                        text: format!("All {count} verses"),
+                        number: Some(number.into()),
+                        ..NoteRun::default()
+                    });
+                }
                 if !entry.definition.is_empty() {
                     runs.push(run("\n", None, None));
                     runs.extend(entry.definition.iter().cloned());
@@ -148,7 +195,12 @@ fn line_break(runs: &mut Vec<NoteRun>) {
 }
 
 fn run(text: &str, role: Option<&str>, language: Option<&str>) -> NoteRun {
-    NoteRun { text: text.into(), role: role.map(String::from), language: language.map(String::from), target: None }
+    NoteRun {
+        text: text.into(),
+        role: role.map(String::from),
+        language: language.map(String::from),
+        ..NoteRun::default()
+    }
 }
 
 #[cfg(test)]
@@ -156,7 +208,7 @@ mod tests {
     use std::sync::LazyLock;
 
     use super::*;
-    use crate::{Block, LexiconUse, Library, MarkNotes, Notes, Options, Reference};
+    use crate::{Block, LexiconUse, Library, MarkNotes, Notes, Options, Place, Reference};
 
     /// The fixtures' books, and the entries of the numbers their words are tagged with.
     static LIBRARY: LazyLock<Library> = LazyLock::new(|| {
@@ -176,6 +228,8 @@ mod tests {
             mark_notes: MarkNotes::Sign,
             lexicon,
             lexicon_books,
+            linked_books: Vec::new(),
+            marked_number: None,
         }
     }
 
@@ -217,7 +271,7 @@ mod tests {
     #[test]
     fn a_hebrew_word_opens_each_parts_grammar_and_its_entry() {
         // וַֽיְהִי֙, Jonah 1:1's first word: a conjunction, and a verb of the number H1961.
-        let entry = LIBRARY.entry("jonah-he", 1, 1, 0).unwrap();
+        let entry = LIBRARY.entry("jonah-he", 1, 1, 0, None).unwrap();
         // In the lexicon's language and direction, the Hebrew in its own.
         assert_eq!((entry.language.as_str(), entry.direction.as_str()), ("en", "ltr"));
         let runs = entry.runs;
@@ -241,25 +295,29 @@ mod tests {
         assert_eq!(runs[0].language.as_deref(), Some("he"));
         assert_eq!(runs[6].language.as_deref(), Some("he"));
         assert_eq!(runs[9].role.as_deref(), Some("strong"));
-        // Strong's definition follows.
-        assert!(runs[12].text.starts_with("to exist, i.e. be or become"));
+        // A link to every verse with the number follows; then Strong's definition.
+        assert_eq!(runs[12].number.as_deref(), Some("H1961"));
+        assert!(runs[12].text.starts_with("All ") && runs[12].text.ends_with(" verses"));
+        assert!(runs[14].text.starts_with("to exist, i.e. be or become"));
         // Two words joined by a maqaf are one word, and open both entries.
-        let joined = LIBRARY.entry("jonah-he", 1, 1, 1).unwrap().runs;
+        let joined = LIBRARY.entry("jonah-he", 1, 1, 1, None).unwrap().runs;
         assert!(["  H1697", "  H3068"].iter().all(|number| texts(&joined).contains(number)));
     }
 
     #[test]
     fn a_translations_word_opens_the_entry_of_the_word_it_renders() {
         // "Yahweh’s", of which the World English Bible tags "Yahweh".
-        let runs = LIBRARY.entry("jonah", 1, 1, 1).unwrap().runs;
+        let runs = LIBRARY.entry("jonah", 1, 1, 1, None).unwrap().runs;
         assert_eq!(texts(&runs[..5]), ["יְהֹוָה", " ye.ho.vah", " – ", "LORD", "  H3068"]);
         // "Amittai," it leaves untagged.
-        assert!(LIBRARY.entry("jonah", 1, 1, 9).is_none());
+        assert!(LIBRARY.entry("jonah", 1, 1, 9, None).is_none());
         // The Greek: no grammar, the entry at once.
-        let greek = LIBRARY.entry("matthew-el", 1, 1, 0).unwrap().runs;
+        let greek = LIBRARY.entry("matthew-el", 1, 1, 0, None).unwrap().runs;
         assert_eq!(texts(&greek[1..5]), [" biblos", " – ", "book", "  G976"]);
         assert_eq!(greek[0].language.as_deref(), Some("el"));
-        assert!(LIBRARY.entry("matthew-el", 1, 1, 99).is_none() && LIBRARY.entry("jonah", 9, 1, 0).is_none());
+        assert!(
+            LIBRARY.entry("matthew-el", 1, 1, 99, None).is_none() && LIBRARY.entry("jonah", 9, 1, 0, None).is_none()
+        );
     }
 
     #[test]
@@ -312,5 +370,86 @@ mod tests {
         assert!(text(&english).starts_with("1\u{a0}Now1961 Yahweh3068’s1 word1697 came1961"));
         let only_hebrew = options(LexiconUse::Numbers, Some(vec!["jonah-he".into()]));
         assert!(text(&verse(&LIBRARY, "jonah", 1, 1, &only_hebrew)).starts_with("1\u{a0}Now Yahweh’s1 word"));
+    }
+
+    fn place(passage: u32, book: &str, chapter: u32, verse: u32, word: u32) -> Place {
+        Place { passage, book: book.into(), chapter, verse, word }
+    }
+
+    /// The Hebrew Jonah read along with Luther 1912, whose words link, and the World English Bible, whose don't.
+    fn read_along() -> ([Reference; 1], Options) {
+        let reference = Reference { book: "jonah-he".into(), chapter: Some(2), from: None, to: None };
+        let options = Options {
+            companions: vec!["jonah-de".into(), "jonah".into()],
+            linked_books: vec!["jonah-de".into()],
+            ..options(LexiconUse::Entries, Some(vec!["jonah-he".into()]))
+        };
+        ([reference], options)
+    }
+
+    #[test]
+    fn a_word_links_to_the_words_of_its_number_in_the_verse_read_along() {
+        let (references, options) = read_along();
+        // יְהוָה֙ in Jonah 2:1, the verse Luther 1912 numbers 1:17 as the KJV does: "der HERR". The English isn't linked.
+        let found = LIBRARY.counterparts(&references, &options, &place(0, "jonah-he", 2, 1, 1));
+        assert_eq!(found, [place(0, "jonah-de", 1, 17, 2)]);
+        // And back: "HERR" to יְהוָה֙; "Jona" to both of the Hebrew's – אֶת־יוֹנָ֑ה, a maqaf word, and יוֹנָה֙.
+        assert_eq!(
+            LIBRARY.counterparts(&references, &options, &place(0, "jonah-de", 1, 17, 2)),
+            [place(0, "jonah-he", 2, 1, 1)]
+        );
+        let jona = LIBRARY.counterparts(&references, &options, &place(0, "jonah-de", 1, 17, 7));
+        assert_eq!(jona, [place(0, "jonah-he", 2, 1, 5), place(0, "jonah-he", 2, 1, 7)]);
+        // Read alone, or without the translation linked, nothing.
+        let alone = Options { companions: Vec::new(), ..options.clone() };
+        assert!(LIBRARY.counterparts(&references, &alone, &place(0, "jonah-he", 2, 1, 1)).is_empty());
+        let unlinked = Options { linked_books: Vec::new(), ..options };
+        assert!(LIBRARY.counterparts(&references, &unlinked, &place(0, "jonah-he", 2, 1, 1)).is_empty());
+    }
+
+    #[test]
+    fn every_verse_with_a_number_is_found_the_translations_adding_only_what_the_originals_lack() {
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let found = LIBRARY.verses_with("H3068", &ids(&["jonah-he", "jonah-de"]));
+        assert!(!found.is_empty() && found.iter().all(|verse| verse.book == "jonah-he"), "{found:?}");
+        assert!(found.iter().any(|verse| (verse.chapter, verse.verse, verse.words.as_slice()) == (2, 1, &[1][..])));
+        // Luther 1912 alone has them in its own verses.
+        let luther = LIBRARY.verses_with("H3068", &ids(&["jonah-de"]));
+        assert_eq!(luther[0], NumberedVerse { book: "jonah-de".into(), chapter: 1, verse: 17, words: vec![2] });
+        // The English Psalm 51:3 is the Hebrew's 51:5, which the library doesn't hold: it is added, with its words "I",
+        // "transgressions." and "sin".
+        let transgression = LIBRARY.verses_with("H6588", &ids(&["psalms-he", "psalms"]));
+        let places: Vec<_> =
+            transgression.iter().map(|verse| (verse.book.as_str(), verse.verse, verse.words.clone())).collect();
+        assert_eq!(places, [("psalms-he", 3, vec![6]), ("psalms", 3, vec![1, 4, 6])]);
+        // A number with the letter that tells words apart finds the plain one, and the other way round.
+        assert!(same_number("H1121a", "H1121") && same_number("H1121", "H1121a") && !same_number("H1121a", "H1121b"));
+        assert!(!same_number("H1121", "H11210"));
+        // The entry counts them: יְהוָה's in the Hebrew Jonah.
+        let count = LIBRARY.verses_with("H3068", &ids(&["jonah-he"])).len();
+        let runs = LIBRARY.entry("jonah-he", 2, 1, 1, Some(&ids(&["jonah-he"]))).unwrap().runs;
+        let link = runs.iter().find(|run| run.number.is_some()).unwrap();
+        assert_eq!((link.text.clone(), link.number.as_deref()), (format!("All {count} verses"), Some("H3068")));
+    }
+
+    #[test]
+    fn a_marked_number_marks_its_words_in_the_books_that_link() {
+        let (references, options) = read_along();
+        let marked = Options { marked_number: Some("H3068".into()), ..options };
+        let blocks = LIBRARY.blocks(&references, &marked);
+        let linked: Vec<_> = (blocks.iter())
+            .flat_map(|block| {
+                block
+                    .words
+                    .iter()
+                    .filter(|word| word.linked)
+                    .map(move |word| (block.book.as_str(), word.verse, word.index))
+            })
+            .collect();
+        // יְהוָה֙ in the Hebrew 2:1 and 2:3, "HERR" in Luther 1912; the English, which doesn't link, has none.
+        assert!(linked.contains(&("jonah-he", 1, 1)) && linked.contains(&("jonah-de", 17, 2)), "{linked:?}");
+        assert!(linked.iter().all(|(book, ..)| *book != "jonah"));
+        let unmarked = LIBRARY.blocks(&references, &Options { marked_number: None, ..read_along().1 });
+        assert!(unmarked.iter().all(|block| block.words.iter().all(|word| !word.linked)));
     }
 }

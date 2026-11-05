@@ -174,6 +174,8 @@ pub struct NoteRun {
     pub role: Option<String>,
     pub language: Option<String>,
     pub target: Option<Target>,
+    /// In a word's entry: a link to every verse with this number, which the reader tells JS of.
+    pub number: Option<String>,
 }
 
 /// A verse a note refers to, by its book's code: see `scriptura::Target`.
@@ -233,6 +235,8 @@ pub struct Word {
     pub end: u32,
     /// Whether it opens an entry, which `reader_entry` gives.
     pub entry: bool,
+    /// Whether it carries the number the options mark, drawn as words linked are.
+    pub linked: bool,
 }
 
 /// Where a word stands: see `scriptura::Place`.
@@ -469,14 +473,56 @@ pub struct WordEntry {
     pub runs: Vec<NoteRun>,
 }
 
-/// A word's entry, by where the word stands: see `scriptura::Library::entry`. None where the
-/// lexicons hold nothing of it.
+/// A word's entry, by where the word stands, its links counting the verses of `books` – or of every
+/// book – with each number: see `scriptura::Library::entry`. None where the lexicons hold nothing of it.
 #[uniffi::export]
-pub fn reader_entry(book: String, chapter: u32, verse: u32, word: u32) -> Option<WordEntry> {
+pub fn reader_entry(
+    book: String,
+    chapter: u32,
+    verse: u32,
+    word: u32,
+    books: Option<Vec<String>>,
+) -> Option<WordEntry> {
     let library = LIBRARY.read().unwrap();
-    let entry = library.entry(&book, chapter, verse, word)?;
+    let entry = library.entry(&book, chapter, verse, word, books.as_deref())?;
     let runs = entry.runs.into_iter().map(NoteRun::from).collect();
     Some(WordEntry { language: entry.language, direction: entry.direction, runs })
+}
+
+/// A verse with words of a number, by where they stand: see `scriptura::NumberedVerse`.
+#[derive(uniffi::Record)]
+pub struct NumberedVerse {
+    pub book: String,
+    pub chapter: u32,
+    pub verse: u32,
+    pub words: Vec<u32>,
+}
+
+/// Every verse of `books`, in the order given, with words of a number – a translation's only where
+/// the books before it lack the verse: see `scriptura::Library::verses_with`.
+#[uniffi::export]
+pub fn verses_with(number: String, books: Vec<String>) -> Vec<NumberedVerse> {
+    let library = LIBRARY.read().unwrap();
+    let verse =
+        |scriptura::NumberedVerse { book, chapter, verse, words }| NumberedVerse { book, chapter, verse, words };
+    library.verses_with(&number, &books).into_iter().map(verse).collect()
+}
+
+/// The words that carry a number of the word at `position` in the books its passage shows read
+/// along with, where both link: see `scriptura::Library::counterparts`.
+#[uniffi::export]
+pub fn reader_counterparts(
+    references: Vec<Reference>,
+    options: ReaderOptions,
+    position: WordPosition,
+) -> Vec<WordPosition> {
+    let WordPosition { passage, book, chapter, verse, word } = position;
+    let place = scriptura::Place { passage, book, chapter, verse, word };
+    let library = LIBRARY.read().unwrap();
+    let found = library.counterparts(&core_references(references), &core_options(options), &place);
+    let position =
+        |scriptura::Place { passage, book, chapter, verse, word }| WordPosition { passage, book, chapter, verse, word };
+    found.into_iter().map(position).collect()
 }
 
 /// What a reader shows of its passages, besides the passages themselves: see `scriptura::Options`.
@@ -490,6 +536,8 @@ pub struct ReaderOptions {
     pub mark_notes: MarkNotes,
     pub lexicon: LexiconUse,
     pub lexicon_books: Option<Vec<String>>,
+    pub linked_books: Vec<String>,
+    pub marked_number: Option<String>,
 }
 
 /// The passages as paragraphs, read along with companions, with the notes as asked for and drop
@@ -516,8 +564,18 @@ pub fn reader_marks(references: Vec<Reference>, options: ReaderOptions) -> Vec<P
 }
 
 fn core_options(options: ReaderOptions) -> scriptura::Options {
-    let ReaderOptions { font_size, verse_per_line, companions, notes, drop_caps, mark_notes, lexicon, lexicon_books } =
-        options;
+    let ReaderOptions {
+        font_size,
+        verse_per_line,
+        companions,
+        notes,
+        drop_caps,
+        mark_notes,
+        lexicon,
+        lexicon_books,
+        linked_books,
+        marked_number,
+    } = options;
     let notes = match notes {
         Notes::None => scriptura::Notes::None,
         Notes::Marks => scriptura::Notes::Marks,
@@ -532,7 +590,18 @@ fn core_options(options: ReaderOptions) -> scriptura::Options {
         LexiconUse::Entries => scriptura::LexiconUse::Entries,
         LexiconUse::Numbers => scriptura::LexiconUse::Numbers,
     };
-    scriptura::Options { font_size, verse_per_line, companions, notes, drop_caps, mark_notes, lexicon, lexicon_books }
+    scriptura::Options {
+        font_size,
+        verse_per_line,
+        companions,
+        notes,
+        drop_caps,
+        mark_notes,
+        lexicon,
+        lexicon_books,
+        linked_books,
+        marked_number,
+    }
 }
 
 fn core_references(references: Vec<Reference>) -> Vec<scriptura::Reference> {
@@ -598,14 +667,14 @@ impl From<scriptura::PlacedMark> for PlacedMark {
 }
 
 impl From<scriptura::NoteRun> for NoteRun {
-    fn from(scriptura::NoteRun { text, role, language, target }: scriptura::NoteRun) -> Self {
+    fn from(scriptura::NoteRun { text, role, language, target, number }: scriptura::NoteRun) -> Self {
         let target = target.map(|scriptura::Target { book, chapter, verse, to }| Target { book, chapter, verse, to });
-        NoteRun { text, role, language, target }
+        NoteRun { text, role, language, target, number }
     }
 }
 
 impl From<scriptura::Word> for Word {
-    fn from(scriptura::Word { chapter, verse, index, start, end, entry }: scriptura::Word) -> Self {
-        Word { chapter, verse, index, start, end, entry }
+    fn from(scriptura::Word { chapter, verse, index, start, end, entry, linked }: scriptura::Word) -> Self {
+        Word { chapter, verse, index, start, end, entry, linked }
     }
 }

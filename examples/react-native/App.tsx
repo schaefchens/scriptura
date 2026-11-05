@@ -11,6 +11,7 @@ import {
   cutOut,
   marksTouching,
   type MoveStep,
+  type NumberedVerse,
   palette,
   Reader,
   type ReaderHandle,
@@ -24,6 +25,8 @@ import {
   type SpeechChange,
   within,
   type VersePosition,
+  versesWith,
+  type VersesWith,
   type WordPosition,
 } from '@schaefchens/scriptura-react-native';
 import { type ComponentRef, useEffect, useMemo, useRef, useState } from 'react';
@@ -154,11 +157,19 @@ export default function App() {
 
   const selected = library.find(({ id }) => id === book);
   const originals = useMemo(() => library.filter(({ language }) => language === 'he' || language === 'el').map(({ id }) => id), [library]);
+  // Translations whose words link to the originals' by their numbers: Luther 1912's tagging is clean, the World English Bible's rough.
+  const linked = useMemo(() => library.filter(({ work }) => work === 'Luther 1912').map(({ id }) => id), [library]);
+  // Every verse with a word's number, from its entry: a reading list, the number's words marked, until "Back".
+  const [study, setStudy] = useState<{ number: string; verses: NumberedVerse[] } | null>(null);
+  const onVersesWith = ({ number }: VersesWith) => setStudy({ number, verses: versesWith(number, [...originals, ...linked]) });
   // Other editions of the book, which can be read along with it.
   const editions = library.filter(({ id, code }) => code && code === selected?.code && id !== book);
   const along = companions.filter((id) => editions.some((edition) => edition.id === id));
   const colors = useMemo(() => palette(dark ? 'dark' : 'light', 21), [dark]);
-  const passages = useMemo(() => [{ book }], [book]);
+  const passages = useMemo(
+    () => (study ? study.verses.map(({ book, chapter, verse }) => ({ book, chapter, from: verse, to: verse })) : [{ book }]),
+    [book, study],
+  );
   const title = (id: string) => library.find((candidate) => candidate.id === id)?.title;
   const toggle = (id: string) => setCompanions(along.includes(id) ? along.filter((other) => other !== id) : [...along, id]);
   // A chapter and verse of the book, such as 2:1, to jump to: its first word.
@@ -275,7 +286,8 @@ export default function App() {
     <SafeAreaProvider>
       <SafeAreaView style={[styles.screen, { backgroundColor: colors.background }]}>
         <ScrollView horizontal style={styles.bar} contentContainerStyle={styles.row}>
-          {library.map(({ id, title: name, work }) => button(`${name} · ${work}`, () => setBook(id), id === book))}
+          {study && button(`Back from ${study.number}, ${study.verses.length} verses`, () => setStudy(null), true)}
+          {library.map(({ id, title: name, work }) => button(`${name} · ${work}`, () => { setStudy(null); setBook(id); }, id === book))}
         </ScrollView>
         <View style={styles.row}>
           {button('A−', () => setSize(Math.max(12, size - 4)))}
@@ -330,6 +342,9 @@ export default function App() {
           markNotes={markNotes}
           lexicon={lexicon}
           lexiconBooks={originals}
+          linkedBooks={linked}
+          markedNumber={study?.number}
+          onVersesWith={onVersesWith}
           selectBy={selectBy}
           // While the pen is up, the words being selected look as they will marked.
           selectionStyle={penLook}

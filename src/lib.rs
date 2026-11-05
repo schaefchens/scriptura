@@ -17,7 +17,7 @@ mod speech;
 
 use serde::de::Error as _;
 
-pub use lexicon::WordEntry;
+pub use lexicon::{NumberedVerse, WordEntry};
 pub use model::{
     Book, Chapter, Entry, Lexicon, Mark, MarkEnd, Note, NoteRun, RecordedVerse, Recording, Target, Verse, VerseNumbers,
     WordPart, WordTag,
@@ -57,6 +57,12 @@ pub struct Options {
     pub lexicon: LexiconUse,
     /// The books, by id, whose words' numbers do so; with none named, every book's.
     pub lexicon_books: Option<Vec<String>>,
+    /// Books, by id, whose words link to those of the books above when read along, without opening
+    /// entries themselves – translations whose tagging can be trusted: see [`Library::counterparts`].
+    pub linked_books: Vec<String>,
+    /// A number whose words are marked, lightly, in the books that link: for a reading list of every
+    /// verse with a word. See [`Word::linked`].
+    pub marked_number: Option<String>,
 }
 
 /// What the numbers of tagged words do, where the library's lexicons hold their entries: nothing; a
@@ -81,6 +87,12 @@ impl Options {
     /// Whether a book's words' numbers stand in its text.
     pub(crate) fn numbers_in(&self, book: &str) -> bool {
         self.lexicon == LexiconUse::Numbers && self.entries_in(book)
+    }
+
+    /// Whether a book's words link to the others' by their numbers: those that open entries, and the
+    /// translations linked.
+    pub(crate) fn links_in(&self, book: &str) -> bool {
+        self.lexicon != LexiconUse::None && (self.entries_in(book) || self.linked_books.iter().any(|id| id == book))
     }
 }
 
@@ -246,13 +258,109 @@ impl Library {
         self.lexicons.all()
     }
 
-    /// A word's entry, by where the word stands, to open where it stands: see [`WordEntry`]. None
-    /// where the lexicons hold nothing of it.
-    pub fn entry(&self, book: &str, chapter: u32, verse: u32, word: u32) -> Option<WordEntry> {
+    /// A word's entry, by where the word stands, to open where it stands: see [`WordEntry`]. After
+    /// each part's entry, a link to every verse of `books` with its number, as [`Library::verses_with`]
+    /// finds them – of every book, without `books` – where there are more than one. None where the
+    /// lexicons hold nothing of it.
+    pub fn entry(
+        &self,
+        book: &str,
+        chapter: u32,
+        verse: u32,
+        word: u32,
+        books: Option<&[String]>,
+    ) -> Option<WordEntry> {
+        let all: Vec<String>;
+        let books = match books {
+            Some(books) => books,
+            None => {
+                all = self.books.iter().map(|book| book.id.clone()).collect();
+                &all
+            }
+        };
         let book = self.book(book)?;
         let chapter = book.chapters.iter().find(|candidate| candidate.number == chapter)?;
         let verse = chapter.verses.iter().find(|candidate| candidate.number == verse)?;
-        self.lexicons.of(verse, &book.language, word)
+        self.lexicons.of(verse, &book.language, word, |number| self.verses_with(number, books).len())
+    }
+
+    /// Every verse of `books` – by id, in the order given – with words of a number, and which of its
+    /// words, by where they stand. A verse that a book before it in the list holds too – an edition of
+    /// it, by code and the KJV's number – is left out: a translation adds the verses the originals
+    /// lack. See [`lexicon::same_number`] for which numbers are one word's.
+    pub fn verses_with(&self, number: &str, books: &[String]) -> Vec<NumberedVerse> {
+        let mut held: std::collections::HashSet<(&str, (u32, u32))> = std::collections::HashSet::new();
+        let mut found = Vec::new();
+        for book in books.iter().filter_map(|id| self.book(id)) {
+            let code = book.code.as_deref().unwrap_or(&book.id);
+            let mut own = Vec::new();
+            for chapter in &book.chapters {
+                for verse in &chapter.verses {
+                    let key = (code, reader::kjv(chapter, verse));
+                    own.push(key);
+                    if held.contains(&key) {
+                        continue;
+                    }
+                    // Its words only where a tag has the number, which few verses do.
+                    let tagged = verse.tags.iter().flat_map(|tag| &tag.parts).filter_map(|part| part.number.as_deref());
+                    if !tagged.into_iter().any(|own| lexicon::same_number(own, number)) {
+                        continue;
+                    }
+                    let words: Vec<u32> = lexicon::words_with(verse, &[number]).collect();
+                    if !words.is_empty() {
+                        found.push(NumberedVerse {
+                            book: book.id.clone(),
+                            chapter: chapter.number,
+                            verse: verse.number,
+                            words,
+                        });
+                    }
+                }
+            }
+            held.extend(own);
+        }
+        found
+    }
+
+    /// The words that carry a number of the word at `place` in the other books its passage shows read
+    /// along with – in the verses the KJV numbers alike – where both books link (see
+    /// [`Options::linked_books`]): a translation's words for a word of the original, the original's
+    /// for a translation's. None where nothing is read along, or the word has no number.
+    pub fn counterparts(&self, references: &[Reference], options: &Options, place: &Place) -> Vec<Place> {
+        let Some(reference) = references.get(place.passage as usize) else { return Vec::new() };
+        let (Some(own), Some(main)) = (self.book(&place.book), self.book(&reference.book)) else { return Vec::new() };
+        if !options.links_in(&own.id) {
+            return Vec::new();
+        }
+        let Some(chapter) = own.chapters.iter().find(|chapter| chapter.number == place.chapter) else {
+            return Vec::new();
+        };
+        let Some(verse) = chapter.verses.iter().find(|verse| verse.number == place.verse) else { return Vec::new() };
+        let Some(&word) = reader::words_of(verse).get(place.word as usize) else { return Vec::new() };
+        let numbers: Vec<&str> = lexicon::numbers_within(verse, word).collect();
+        let key = reader::kjv(chapter, verse);
+        // The passage's book and the editions of it read along, but the word's own.
+        let shown = std::iter::once(main.id.as_str())
+            .chain(options.companions.iter().map(String::as_str))
+            .filter_map(|id| self.book(id))
+            .filter(|book| {
+                book.id != own.id && book.code.is_some() && book.code == main.code && options.links_in(&book.id)
+            });
+        let mut places = Vec::new();
+        for book in shown {
+            for chapter in &book.chapters {
+                for verse in chapter.verses.iter().filter(|verse| reader::kjv(chapter, verse) == key) {
+                    places.extend(lexicon::words_with(verse, &numbers).map(|word| Place {
+                        passage: place.passage,
+                        book: book.id.clone(),
+                        chapter: chapter.number,
+                        verse: verse.number,
+                        word,
+                    }));
+                }
+            }
+        }
+        places
     }
 
     /// Why a recording isn't played for the book it reads, if it isn't: the library holds no such
@@ -313,15 +421,14 @@ impl Library {
         for run in &targets {
             let target = run.target.as_ref().expect("a target");
             let Some(preview) = self.preview(of, target) else { continue };
-            previews.push(NoteRun { text: "\n".into(), role: None, language: None, target: None });
+            previews.push(NoteRun { text: "\n".into(), ..NoteRun::default() });
             if targets.len() > 1 {
                 previews.push(NoteRun {
                     text: run.text.trim().to_string(),
                     role: Some("origin".into()),
-                    language: None,
-                    target: None,
+                    ..NoteRun::default()
                 });
-                previews.push(NoteRun { text: "\n".into(), role: None, language: None, target: None });
+                previews.push(NoteRun { text: "\n".into(), ..NoteRun::default() });
             }
             previews.extend(preview);
         }
@@ -354,14 +461,14 @@ impl Library {
                     text: number,
                     role: Some("number".into()),
                     language: Some(book.language.clone()),
-                    target: None,
+                    ..NoteRun::default()
                 });
             }
             runs.push(NoteRun {
                 text,
                 role: Some("preview".into()),
                 language: Some(book.language.clone()),
-                target: None,
+                ..NoteRun::default()
             });
             length += end;
             if cut {
@@ -373,7 +480,7 @@ impl Library {
                 text: " …".into(),
                 role: Some("preview".into()),
                 language: Some(book.language.clone()),
-                target: None,
+                ..NoteRun::default()
             });
         }
         (!runs.is_empty()).then_some(runs)
@@ -537,6 +644,8 @@ mod tests {
             mark_notes: MarkNotes::Sign,
             lexicon: LexiconUse::Entries,
             lexicon_books: None,
+            linked_books: Vec::new(),
+            marked_number: None,
         };
         assert!(Library::new().blocks(&[reference], &options).is_empty());
     }

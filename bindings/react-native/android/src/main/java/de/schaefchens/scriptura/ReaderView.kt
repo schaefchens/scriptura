@@ -47,6 +47,7 @@ import de.schaefchens.scriptura.core.Word
 import de.schaefchens.scriptura.core.WordPosition
 import de.schaefchens.scriptura.core.marks as libraryMarks
 import de.schaefchens.scriptura.core.readerBlocks
+import de.schaefchens.scriptura.core.readerCounterparts
 import de.schaefchens.scriptura.core.readerEntry
 import de.schaefchens.scriptura.core.readerMarks
 import java.util.WeakHashMap
@@ -97,6 +98,16 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
   var lexicon = "entries"
   var lexiconBooks: List<String>? = null
 
+  /**
+   * Translations, by id, whose words link to those of [lexiconBooks] by their numbers: read along, a word reached marks lightly the
+   * words of its numbers in the other books' verse. And a number whose words are marked so: for a reading list of every verse with a word.
+   */
+  var linkedBooks: List<String> = emptyList()
+  var markedNumber: String? = null
+
+  /** The words the word reached links to in the books read along, by where they stand. */
+  private var linkedNow: List<WordPlace> = emptyList()
+
   /** How the selection is drawn: as a mark of this look would be – a pen's, marking as it goes – or, none given, in the selection's own color. See [SelectionStyle]. */
   var selectionStyle: SelectionStyle? = null
     set(value) {
@@ -142,6 +153,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
    */
   private val onSelectionFrame by EventDispatcher()
   private val onVerseInSight by EventDispatcher()
+
+  /** A link in a word's entry followed to every verse with one of its numbers: the app shows them. */
+  private val onVersesWith by EventDispatcher()
   private var reportedFrame = ""
   private var moving = false
   private var rendering = false
@@ -295,6 +309,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     backgroundColor = background
     pages.highlightColor = colors.highlight?.let { ColorCompat.toArgb(it) } ?: HIGHLIGHT
     pages.selectionColor = ColorUtils.setAlphaComponent(colors.selection?.let { ColorCompat.toArgb(it) } ?: SELECTION, 102)
+    pages.linkedColor = colors.linked?.let { ColorCompat.toArgb(it) } ?: LINKED
     markFills = MARK_FILLS + colors.marks.mapValues { ColorCompat.toArgb(it.value) }
     markLines = MARK_LINES + colors.markLines.mapValues { ColorCompat.toArgb(it.value) }
     val references = passages.map { Reference(it.book, it.chapter?.toUInt(), it.from?.toUInt(), it.to?.toUInt()) }
@@ -309,13 +324,16 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     val selectedPlaces = if (staying) selected?.let { words[it.first].place to words[it.last].place } else null
     anchorWords = null
     if (!staying) readAloud.stop()
+    if (!staying) linkedNow = emptyList()
     shownReferences = references
     val roleColors = colors.roles.mapValues { ColorCompat.toArgb(it.value) }
     this.roleColors = roleColors
     val shownNotes = when (notes) { "none" -> Notes.NONE; "inline" -> Notes.INLINE; else -> Notes.MARKS }
     val shownMarkNotes = if (markNotes == "inline") MarkNotes.INLINE else MarkNotes.SIGN
     val shownLexicon = when (lexicon) { "none" -> LexiconUse.NONE; "numbers" -> LexiconUse.NUMBERS; else -> LexiconUse.ENTRIES }
-    val options = ReaderOptions(fontSize, versePerLine, companions, shownNotes, dropCaps, shownMarkNotes, shownLexicon, lexiconBooks)
+    val options = ReaderOptions(
+      fontSize, versePerLine, companions, shownNotes, dropCaps, shownMarkNotes, shownLexicon, lexiconBooks, linkedBooks, markedNumber,
+    )
     shownRequest = references to options
     tappedWord = null
     val blocks = readerBlocks(references, options)
@@ -425,6 +443,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     }
     placedMarks = placedMarksOf(paragraphs.map { it.marks })
     applyMarks()
+    applyLinked()
     reportSelection()
     // Other books read along or other recordings change what is read, and a new rate how: the voice goes on from the word it is at. A
     // recording takes a new rate as it plays.
@@ -700,7 +719,9 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     val bounds = Rect(0, 0, width, height)
     if (note.kind == ENTRY_KIND) {
       val word = note.word ?: return
-      val entry = readerEntry(note.book, note.chapter.toUInt(), note.verse.toUInt(), word.toUInt()) ?: return
+      // Its links count the verses of the books that open entries and those linked – of every book, where all open entries.
+      val books = lexiconBooks?.let { it + linkedBooks }
+      val entry = readerEntry(note.book, note.chapter.toUInt(), note.verse.toUInt(), word.toUInt(), books) ?: return
       val typeface = fonts[entry.language]?.let(::typeface) ?: baseTypeface
       opened = note
       noteView.show(noteText(note, entry.runs), typeface, size, textColor, backgroundColor, anchor, bounds, pixels(margin).roundToInt(), entry.direction == "rtl", oneDirection = true)
@@ -748,9 +769,11 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
         builder.setSpan(LocaleSpan(Locale.forLanguageTag(language)), start, end, flags)
         fonts[language]?.let { builder.setSpan(TypefaceSpan(typeface(it)), start, end, flags) }
       }
-      run.target?.let { target ->
+      val follow: (() -> Unit)? = run.target?.let { target -> { followReference(target, note) } }
+        ?: run.number?.takeIf { note.word != null }?.let { number -> { versesWith(number, note) } }
+      follow?.let {
         val link = object : ClickableSpan() {
-          override fun onClick(widget: View) = followReference(target, note)
+          override fun onClick(widget: View) = it()
 
           override fun updateDrawState(ds: TextPaint) {
             ds.color = linkColor
@@ -761,6 +784,13 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
       }
     }
     return builder
+  }
+
+  /** Follows a link in a word's entry to every verse with one of its numbers: the entry closes, and JS shows them. */
+  private fun versesWith(number: String, note: ReaderNote) {
+    closeNote()
+    val from = mapOf("passage" to note.passage, "book" to note.book, "chapter" to note.chapter, "verse" to note.verse, "word" to (note.word ?: 0))
+    onVersesWith(mapOf("number" to number, "from" to from))
   }
 
   /**
@@ -789,11 +819,20 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     onReference(event as Map<String, Any>)
   }
 
-  /** Marks a word reached by a tap, a move or a jump. While reading aloud, the voice goes on from it. */
+  /**
+   * Marks a word reached by a tap, a move or a jump – and, read along, the words it links to in the other books. While reading aloud,
+   * the voice goes on from it.
+   */
   private fun select(index: Int) {
     closeNote()
     following = true
     mark(index)
+    linkedNow = shownRequest?.takeIf { companions.isNotEmpty() }?.let { (references, options) ->
+      readerCounterparts(references, options, position(words[index].place)).map {
+        WordPlace(it.passage.toInt(), it.book, it.chapter.toInt(), it.verse.toInt(), it.word.toInt())
+      }
+    }.orEmpty()
+    applyLinked()
     pages.speak(words[index].start, words[index].end)
     if (readAloud.state == "speaking") play()
   }
@@ -853,6 +892,13 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
       if (verses[middle].start <= offset) low = middle + 1 else high = middle
     }
     return verses.getOrNull(low - 1)?.takeIf { offset < it.end }
+  }
+
+  /** Draws, lightly, the words of the number marked and those the word reached links to. */
+  private fun applyLinked() {
+    val stretches = words.filter { it.linked }.map { it.start..it.end } +
+      linkedNow.mapNotNull { indices[it] }.map { words[it].start..words[it].end }
+    pages.link(stretches)
   }
 
   /** The host's marks as the core placed them in the paragraphs, where they stand in the text, their colors by the names they give. */
@@ -1140,6 +1186,7 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     val start = textStart + word.start.toInt()
     val end = textStart + word.end.toInt()
     val entry = word.entry
+    val linked = word.linked
 
     fun isInVerseOf(other: ReaderWord) = isInBookOf(other) && with(other.place) { chapter == place.chapter && verse == place.verse }
 
@@ -1369,5 +1416,8 @@ class ReaderView(context: Context, appContext: AppContext) : ExpoView(context, a
     private const val LEFT_TO_RIGHT_MARK = "\u200E"
     private const val RIGHT_TO_LEFT_MARK = "\u200F"
     private const val HIGHLIGHT = 0xFFFFE082.toInt()
+
+    /** Behind words linked, where the colors give none: the palette's lavender, on white. */
+    private const val LINKED = 0xFFE3DAF3.toInt()
   }
 }

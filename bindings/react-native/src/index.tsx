@@ -5,6 +5,7 @@ import type {
   MarkInfo,
   MarkTap,
   MoveStep,
+  NumberedVerse,
   ReaderOptions,
   RecordingInfo,
   ReferenceTarget,
@@ -12,6 +13,7 @@ import type {
   SelectionFrame,
   SpeechChange,
   VersePosition,
+  VersesWith,
   Voice,
   WordPosition,
 } from '@schaefchens/scriptura';
@@ -106,13 +108,15 @@ export type ReaderProps = ReaderOptions & {
    * scrolled or turned, brought somewhere, or laid out anew. For an app's index of books and chapters, or a place to come back to.
    */
   onVerseInSight?: (verse: VersePosition) => void;
+  /** A link in a word's entry followed to every verse with one of its numbers: for the app to show them, as versesWith() finds them. */
+  onVersesWith?: (link: VersesWith) => void;
   ref?: Ref<ReaderHandle>;
   style?: StyleProp<ViewStyle>;
 };
 
 type NativeProps = Omit<
   ReaderProps,
-  'onWordChange' | 'onLaidOut' | 'onSpeechChange' | 'onReference' | 'onSelectionChange' | 'onMarkTap' | 'onSelectionFrame' | 'onVerseInSight'
+  'onWordChange' | 'onLaidOut' | 'onSpeechChange' | 'onReference' | 'onSelectionChange' | 'onMarkTap' | 'onSelectionFrame' | 'onVerseInSight' | 'onVersesWith'
 > & {
   onWordChange?: (event: NativeSyntheticEvent<WordPosition>) => void;
   onLaidOut?: (event: NativeSyntheticEvent<LaidOut>) => void;
@@ -122,6 +126,7 @@ type NativeProps = Omit<
   onMarkTap?: (event: NativeSyntheticEvent<MarkTap>) => void;
   onSelectionFrame?: (event: NativeSyntheticEvent<{ frame?: SelectionFrame | null }>) => void;
   onVerseInSight?: (event: NativeSyntheticEvent<VersePosition>) => void;
+  onVersesWith?: (event: NativeSyntheticEvent<VersesWith>) => void;
 };
 
 const NativeReader = requireNativeView<NativeProps>('Scriptura');
@@ -130,7 +135,18 @@ const NativeReader = requireNativeView<NativeProps>('Scriptura');
  * Scripture in pages or one endless scroll, laid out with the platform's own text stack: TextKit 2
  * on iOS, Android's text layout. It gets the passages' text itself, from the books added.
  */
-export function Reader({ onWordChange, onLaidOut, onSpeechChange, onReference, onSelectionChange, onMarkTap, onSelectionFrame, onVerseInSight, ...props }: ReaderProps) {
+export function Reader({
+  onWordChange,
+  onLaidOut,
+  onSpeechChange,
+  onReference,
+  onSelectionChange,
+  onMarkTap,
+  onSelectionFrame,
+  onVerseInSight,
+  onVersesWith,
+  ...props
+}: ReaderProps) {
   return (
     <NativeReader
       {...props}
@@ -142,6 +158,7 @@ export function Reader({ onWordChange, onLaidOut, onSpeechChange, onReference, o
       onMarkTap={onMarkTap && (({ nativeEvent }) => onMarkTap(nativeEvent))}
       onSelectionFrame={onSelectionFrame && (({ nativeEvent }) => onSelectionFrame(nativeEvent.frame ?? null))}
       onVerseInSight={onVerseInSight && (({ nativeEvent }) => onVerseInSight(nativeEvent))}
+      onVersesWith={onVersesWith && (({ nativeEvent }) => onVersesWith(nativeEvent))}
     />
   );
 }
@@ -163,6 +180,7 @@ type ScripturaModule = {
   lexicons(): LexiconInfo[];
   removeLexicons(ids: string[]): Promise<void>;
   clearLexicons(): Promise<void>;
+  versesWith(number: string, books: string[]): NumberedVerse[];
   speechVoices(): Promise<Voice[]>;
 };
 
@@ -223,6 +241,12 @@ export const removeLexicons = (ids: string[]) => scriptura.removeLexicons(ids);
 
 /** Removes every lexicon, as when an app locks. */
 export const clearLexicons = () => scriptura.clearLexicons();
+
+/**
+ * Every verse of `books` – in the order given – with words of a number, and which of its words: by where they stand, never their
+ * text. A verse that a book before it holds too, an edition of it, is left out: a translation adds the verses the originals lack.
+ */
+export const versesWith = (number: string, books: string[]) => scriptura.versesWith(number, books);
 
 /** The voices on the device that can read aloud. */
 export const speechVoices = () => scriptura.speechVoices();

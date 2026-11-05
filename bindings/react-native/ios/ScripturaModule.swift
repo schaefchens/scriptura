@@ -57,12 +57,14 @@ struct SelectionRecord: Record {
 
 /// The reader's colors. Text takes the color of its role, if it has one: a verse number, a heading,
 /// a tajweed rule. A mark names its colors: its fill is looked up in `marks`, its underline's color
-/// in `markLines`; a name neither has is a color itself. The selection is drawn in `selection`.
+/// in `markLines`; a name neither has is a color itself. The selection is drawn in `selection`, the
+/// words linked – those a word reached links to read along, and those of a number marked – in `linked`.
 struct ReaderColors: Record {
   @Field var background: UIColor = .white
   @Field var text: UIColor = .black
   @Field var highlight: UIColor = UIColor(red: 1, green: 0.88, blue: 0.51, alpha: 1)
   @Field var selection: UIColor = UIColor(red: 0x64 / 255, green: 0xB5 / 255, blue: 0xF6 / 255, alpha: 1)
+  @Field var linked: UIColor = UIColor(red: 0xE3 / 255, green: 0xDA / 255, blue: 0xF3 / 255, alpha: 1)
   @Field var marks: [String: UIColor] = [:]
   @Field var markLines: [String: UIColor] = [:]
   @Field var roles: [String: UIColor] = [:]
@@ -166,13 +168,22 @@ public class ScripturaModule: Module {
       Self.lexiconsChanged()
     }
 
+    // Every verse of `books`, in the order given, with words of a number – a translation's where the
+    // books before it lack the verse – by where they stand, never by their text.
+    Function("versesWith") { (number: String, books: [String]) in
+      versesWith(number: number, books: books).map { ["book": $0.book, "chapter": $0.chapter, "verse": $0.verse, "words": $0.words] }
+    }
+
     // The voices that can read aloud: their identifiers, names and languages.
     AsyncFunction("speechVoices") {
       ReadAloud.voiceList()
     }
 
     View(ReaderView.self) {
-      Events("onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap", "onSelectionFrame", "onVerseInSight")
+      Events(
+        "onWordChange", "onLaidOut", "onSpeechChange", "onReference", "onSelectionChange", "onMarkTap", "onSelectionFrame", "onVerseInSight",
+        "onVersesWith"
+      )
 
       Prop("passages") { (view: ReaderView, passages: [PassageRecord]?) in
         view.passages = passages ?? []
@@ -230,6 +241,12 @@ public class ScripturaModule: Module {
       }
       Prop("lexiconBooks") { (view: ReaderView, books: [String]?) in
         view.lexiconBooks = books
+      }
+      Prop("linkedBooks") { (view: ReaderView, books: [String]?) in
+        view.linkedBooks = books ?? []
+      }
+      Prop("markedNumber") { (view: ReaderView, number: String?) in
+        view.markedNumber = number
       }
       Prop("dropCapFont") { (view: ReaderView, dropCapFont: String?) in
         view.dropCapFont = dropCapFont

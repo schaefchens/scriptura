@@ -304,6 +304,22 @@ class PagedText(context: Context) : View(context) {
   /** A character to bring into sight once the layout reaches it. */
   private var pendingSight: Int? = null
   private val highlightPaint = Paint()
+
+  /** Words linked to the word reached in the books read along, and those of a number marked: drawn lightly, under the marks. */
+  private var linked: List<IntRange> = emptyList()
+  private val linkedPaint = Paint()
+  var linkedColor: Int
+    get() = linkedPaint.color
+    set(value) {
+      linkedPaint.color = value
+      invalidate()
+    }
+
+  /** Draws [stretches] – each from its first character to before its last – as words linked, or none. */
+  fun link(stretches: List<IntRange>) {
+    linked = stretches
+    invalidate()
+  }
   private val scroller = OverScroller(context)
   private var flung = false
   /** Whether a finger is on the text, and whether it moved it since it came down. */
@@ -539,8 +555,8 @@ class PagedText(context: Context) : View(context) {
 
   /**
    * Draws the lines of [place] on a page that starts [pageLeft] from the content's left – and the
-   * highlight, if it is in [highlighted]. Under the text, the marks' fills, the words selected, the
-   * highlight and the marks' lines.
+   * highlight, if it is in [highlighted]. Under the text, the words linked, the marks' fills, the
+   * words selected, the highlight and the marks' lines.
    */
   private fun draw(canvas: Canvas, place: Place, pageLeft: Int, highlighted: StaticLayout?, decorated: Boolean) {
     val layout = place.layout
@@ -552,6 +568,7 @@ class PagedText(context: Context) : View(context) {
     // and the marks above a line such as an Arabic one's would show here.
     canvas.clipRect(0, top, place.width, layout.getLineTop(place.endLine) - 1)
     if (decorated) {
+      for (range in linked) fill(canvas, layout, maxOf(range.first, from), minOf(range.last, to), linkedPaint)
       for (decoration in decorations) {
         markPaint.color = decoration.fill ?: continue
         fill(canvas, layout, maxOf(decoration.start, from), minOf(decoration.end, to), markPaint)

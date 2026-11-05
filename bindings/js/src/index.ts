@@ -92,7 +92,16 @@ export type MarkInfo = {
  * "strong", "label"; "number" and "preview" for the verses the note refers to, which follow its runs after a line break where the library
  * holds their book – its language, where it isn't the book's, and the verses it refers to. A word's lexicon entry opens as runs too.
  */
-export type NoteRun = { text: string; role?: string | null; language?: string | null; target?: Target | null };
+export type NoteRun = { text: string; role?: string | null; language?: string | null; target?: Target | null; number?: string | null };
+
+/**
+ * A link in a word's entry followed to every verse with one of its numbers: the number, such as H1697, and the word whose entry it
+ * was – for the app to show the verses, which versesWith() finds, as a reading list, the number marked (`markedNumber`).
+ */
+export type VersesWith = { number: string; from: WordPosition };
+
+/** A verse with words of a number, by where they stand – never their text: book, chapter, verse, and the words' indices in it. */
+export type NumberedVerse = { book: string; chapter: number; verse: number; words: number[] };
 
 /** Verses a note refers to: by their book's USFM code, chapter, and verse – to `to` – or the whole chapter. */
 export type Target = { book: string; chapter: number; verse?: number | null; to?: number | null };
@@ -157,6 +166,8 @@ export type ReaderColors = {
   text: string;
   highlight: string;
   selection?: string;
+  /** Behind the words a word reached links to, and those of a number marked. */
+  linked?: string;
   marks?: Record<string, string>;
   markLines?: Record<string, string>;
   roles: Record<string, string>;
@@ -219,6 +230,15 @@ export type ReaderOptions = {
   lexicon?: 'entries' | 'numbers' | 'none';
   /** The books, by id, whose words' numbers do so – the originals, say, where a translation's tagging is rough; every book's without. */
   lexiconBooks?: string[];
+  /**
+   * Translations, by id, whose words link to those of `lexiconBooks` by their numbers, without opening entries: read along, a word
+   * reached by a tap, a move or a jump marks lightly the words of its numbers in the verse of the other books – a translation's
+   * for the original's, the original's for a translation's – until another is reached. And an entry's link to every verse with a
+   * number counts theirs, where the originals lack a verse.
+   */
+  linkedBooks?: string[];
+  /** A number, such as H1697, whose words are marked lightly in the books that link: for a reading list of every verse with a word. */
+  markedNumber?: string;
   /** Chapters in running text open with a drop cap: the first letter of the text set large over two lines, the first verse without its number. On by default. */
   dropCaps?: boolean;
   /**

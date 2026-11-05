@@ -31,6 +31,8 @@ export const MARK_COLORS: Record<string, { fill: string; line: string }> = {
 const MARK_SHARE = 0.6;
 const DARK_MARK_SHARE = 0.14;
 const SELECTION = '#64B5F6';
+/** Behind the words a word reached links to, and those of a number marked: a lavender, none of the marks' colors. */
+const LINKED = '#B39DDB';
 /** A light background turns a little warm as the contrast is lowered, like paper. */
 const PAPER = { hue: 85, chroma: 0.03 };
 
@@ -44,6 +46,8 @@ export type Palette = {
   highlight: string;
   /** Behind the words selected. */
   selection: string;
+  /** Behind the words a word reached links to in the books read along, and those of a number marked. */
+  linked: string;
   /** The fills of marks by the names they give, pale enough to read on, and the colors of their underlines. */
   marks: Record<string, string>;
   markLines: Record<string, string>;
@@ -84,6 +88,7 @@ export function palette(theme: Theme, contrast: number, roles = ROLE_COLORS): Pa
     border: like('#000000', 0.3),
     highlight: like(HIGHLIGHT, dark ? DARK_HIGHLIGHT_SHARE : undefined),
     selection: like(SELECTION, dark ? DARK_HIGHLIGHT_SHARE : undefined),
+    linked: like(LINKED, dark ? DARK_MARK_SHARE : shareOf(LINKED) * MARK_SHARE),
     marks: Object.fromEntries(
       Object.entries(MARK_COLORS).map(([name, { fill }]) => [name, like(fill, dark ? DARK_MARK_SHARE : shareOf(fill) * MARK_SHARE)]),
     ),

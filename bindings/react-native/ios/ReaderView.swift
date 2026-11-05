@@ -61,6 +61,14 @@ class ReaderView: ExpoView {
   /// "none". Only in `lexiconBooks`, by id, where given.
   var lexicon = "entries"
   var lexiconBooks: [String]?
+  /// Translations, by id, whose words link to those of `lexiconBooks` by their numbers, without
+  /// opening entries: read along, a word reached marks lightly the words of its numbers in the verse of
+  /// the other books, until another is reached; and an entry's link to every verse with a number
+  /// counts theirs.
+  var linkedBooks: [String] = []
+  /// A number whose words are marked lightly in the books that link: for a reading list of every verse
+  /// with a word.
+  var markedNumber: String?
   var dropCaps = true
   var dropCapFont: String?
   /// A voice per language for reading aloud, by identifier; otherwise the device's for it.
@@ -88,6 +96,8 @@ class ReaderView: ExpoView {
   /// Where the selection shows, as it settles, for a panel of the app's own beside it; or nowhere.
   let onSelectionFrame = EventDispatcher()
   let onVerseInSight = EventDispatcher()
+  /// A link in a word's entry followed to every verse with one of its numbers: the app may show them.
+  let onVersesWith = EventDispatcher()
 
   private let pages = PagedText()
   private var words: [ReaderWord] = []
@@ -130,6 +140,10 @@ class ReaderView: ExpoView {
   private var openNote: ReaderNote?
   private var pendingNote: (note: ReaderNote, from: Any?)?
   private var openLinks: [Target] = []
+  /// The numbers an entry open links to every verse of.
+  private var openNumbers: [String] = []
+  /// The words the word reached links to in the books read along, by where they stand.
+  private var linkedNow: [WordPlace] = []
   private var openedFrom: Any?
   /// The last tap on a word: which, and when – a second on it soon after opens its lexicon entry.
   private var lastTap: (word: Int, time: CFTimeInterval)?
@@ -255,6 +269,7 @@ class ReaderView: ExpoView {
     anchorWords = nil
     if !staying {
       readAloud.stop()
+      linkedNow = []
     }
     shownReferences = references
     shownNotes = notes == "none" ? .none : notes == "inline" ? .inline : .marks
@@ -305,7 +320,8 @@ class ReaderView: ExpoView {
       let firstWord = words.count
       words += paragraph.words.map { word in
         ReaderWord(place: WordPlace(passage: paragraph.passage, book: paragraph.book, chapter: word.chapter, verse: word.verse, index: word.index),
-                   range: NSRange(location: start + Int(word.start), length: Int(word.end - word.start)), paragraph: index, entry: word.entry)
+                   range: NSRange(location: start + Int(word.start), length: Int(word.end - word.start)), paragraph: index, entry: word.entry,
+                   linked: word.linked)
       }
       verses += paragraph.verses.map { verse in
         let inVerse = paragraph.words.indices.filter { verse.start <= paragraph.words[$0].start && paragraph.words[$0].start < verse.end }
@@ -442,7 +458,8 @@ class ReaderView: ExpoView {
   /// words' numbers do, in which books.
   private func shownOptions() -> ReaderOptions {
     ReaderOptions(fontSize: fontSize, versePerLine: versePerLine, companions: companions, notes: shownNotes, dropCaps: dropCaps,
-                  markNotes: shownMarkNotes, lexicon: shownLexicon, lexiconBooks: lexiconBooks)
+                  markNotes: shownMarkNotes, lexicon: shownLexicon, lexiconBooks: lexiconBooks, linkedBooks: linkedBooks,
+                  markedNumber: markedNumber)
   }
 
   /// Draws the host's marks anew as they change: the same paragraphs, their marks asked for again,
@@ -459,11 +476,16 @@ class ReaderView: ExpoView {
 
   /// Draws the marks and the selection over the text: the selection in its color, or – given a
   /// selection style – over the marks as the words would look marked so; or, as a pen erases them, as
-  /// they will look: the mark cut around them, what is left of its look on them.
+  /// they will look: the mark cut around them, what is left of its look on them. Below them all, the
+  /// words linked, lightly: those of the number marked, and those the word reached links to.
   private func applyMarks() {
     var selection = selected.map(textRanges(of:)) ?? []
     let erased = erasedMark()
-    var decorations = placedMarks.flatMap { mark -> [PagedText.Decoration] in
+    let now = Set(linkedNow.compactMap { indices[$0] })
+    let linked = words.indices.filter { words[$0].linked || now.contains($0) }.map {
+      PagedText.Decoration(range: words[$0].range, fill: colors.linked, line: nil)
+    }
+    var decorations = linked + placedMarks.flatMap { mark -> [PagedText.Decoration] in
       let over = selection.first { NSIntersectionRange($0, mark.range).length > 0 }
       guard mark.id == erased, let over, let selected, let selectionStyle else {
         return [PagedText.Decoration(range: mark.range, fill: mark.fill, line: mark.line)]
@@ -1054,17 +1076,22 @@ class ReaderView: ExpoView {
     }
     let paragraph = paragraphs[mark.paragraph]
     var links: [Target] = []
+    var numbers: [String] = []
     let size = max(14, paragraph.fontSize * 0.7)
     let text: NSAttributedString
     if mark.kind == Self.entryKind {
       // A word's entry, from the core: in its lexicon's language and direction, in the reader's font for it.
-      guard let word = mark.word, let entry = readerEntry(book: paragraph.book, chapter: mark.chapter, verse: mark.verse, word: word) else { return }
-      text = noteText(entry.runs, family: fonts[entry.language], size: size, rightToLeft: entry.direction == "rtl", links: &links)
+      // Its links count the verses of the books that open entries, then of the translations linked.
+      let books = lexiconBooks.map { $0 + linkedBooks }
+      guard let word = mark.word, let entry = readerEntry(book: paragraph.book, chapter: mark.chapter, verse: mark.verse, word: word, books: books) else { return }
+      text = noteText(entry.runs, family: fonts[entry.language], size: size, rightToLeft: entry.direction == "rtl", links: &links, numbers: &numbers)
     } else {
-      text = noteText(mark.runs, family: paragraph.fontFamily ?? fonts[paragraph.language], size: size, rightToLeft: paragraph.rightToLeft, links: &links)
+      text = noteText(mark.runs, family: paragraph.fontFamily ?? fonts[paragraph.language], size: size, rightToLeft: paragraph.rightToLeft,
+                      links: &links, numbers: &numbers)
     }
     openNote = mark
     openLinks = links
+    openNumbers = numbers
     openedFrom = element
     let area = bounds.insetBy(dx: margin, dy: 12)
     noteView.show(text, at: convert(rect, from: pages), in: area, maxWidth: 360, maxHeight: (bounds.height * 0.45).rounded(),
@@ -1083,6 +1110,7 @@ class ReaderView: ExpoView {
     guard openNote != nil else { return }
     openNote = nil
     openLinks = []
+    openNumbers = []
     noteView.isHidden = true
     if UIAccessibility.isVoiceOverRunning {
       UIAccessibility.post(notification: .layoutChanged, argument: openedFrom ?? pages)
@@ -1093,8 +1121,9 @@ class ReaderView: ExpoView {
   /// A note's runs as text in a font – a note's, its paragraph's, a little smaller; an entry's, the
   /// reader's for its lexicon's language – in its direction: the verse it names in its color,
   /// quotations and emphasis in italics, strong words in bold, words in other languages in their fonts,
-  /// and the verses it refers to as links, numbered in `links`.
-  private func noteText(_ runs: [NoteRun], family: String?, size: Double, rightToLeft: Bool, links: inout [Target]) -> NSAttributedString {
+  /// the verses it refers to as links, numbered in `links`, and in an entry, its links to every verse
+  /// with a number, numbered in `numbers`.
+  private func noteText(_ runs: [NoteRun], family: String?, size: Double, rightToLeft: Bool, links: inout [Target], numbers: inout [String]) -> NSAttributedString {
     let font = font(family: family, size: size)
     let style = NSMutableParagraphStyle()
     style.baseWritingDirection = rightToLeft ? .rightToLeft : .leftToRight
@@ -1139,6 +1168,9 @@ class ReaderView: ExpoView {
       if let target = run.target {
         attributes[.link] = URL(string: "scriptura://reference/\(links.count)")!
         links.append(target)
+      } else if let number = run.number {
+        attributes[.link] = URL(string: "scriptura://verses/\(numbers.count)")!
+        numbers.append(number)
       }
       text.append(NSAttributedString(string: run.text, attributes: attributes))
     }
@@ -1146,8 +1178,16 @@ class ReaderView: ExpoView {
   }
 
   private func followLink(_ url: URL) {
-    guard url.host == "reference", let index = Int(url.lastPathComponent), index < openLinks.count, let open = openNote else { return }
-    followReference(openLinks[index], from: open)
+    guard let index = Int(url.lastPathComponent), let open = openNote else { return }
+    if url.host == "reference", index < openLinks.count {
+      followReference(openLinks[index], from: open)
+    } else if url.host == "verses", index < openNumbers.count, let word = open.word {
+      // Every verse with the number, for JS to show: from the word whose entry it is.
+      let number = openNumbers[index]
+      let paragraph = paragraphs[open.paragraph]
+      closeNote()
+      onVersesWith(["number": number, "from": ["passage": paragraph.passage, "book": paragraph.book, "chapter": open.chapter, "verse": open.verse, "word": word]])
+    }
   }
 
   /// Follows a reference: to the verses it names, if the reader shows them – in the same edition as
@@ -1286,11 +1326,24 @@ class ReaderView: ExpoView {
     }
   }
 
-  /// Marks a word reached by a tap, a move or a jump. While reading aloud, the voice goes on from it.
+  /// Marks a word reached by a tap, a move or a jump – and, read along, the words it links to in the
+  /// other books, lightly. While reading aloud, the voice goes on from it.
   private func select(_ index: Int) {
     closeNote()
     following = true
     mark(index)
+    let hadLinked = !linkedNow.isEmpty
+    linkedNow = []
+    if !companions.isEmpty {
+      let place = words[index].place
+      let position = WordPosition(passage: place.passage, book: place.book, chapter: place.chapter, verse: place.verse, word: place.index)
+      linkedNow = readerCounterparts(references: shownReferences, options: shownOptions(), position: position).map {
+        WordPlace(passage: $0.passage, book: $0.book, chapter: $0.chapter, verse: $0.verse, index: $0.word)
+      }
+    }
+    if hadLinked || !linkedNow.isEmpty {
+      applyMarks()
+    }
     if UIAccessibility.isVoiceOverRunning {
       // Without a note's mark within it.
       let range = words[index].range
@@ -1445,6 +1498,8 @@ private struct ReaderWord {
   let range: NSRange
   let paragraph: Int
   let entry: Bool
+  /// Whether it carries the number marked.
+  let linked: Bool
 
   func isInVerse(of other: ReaderWord) -> Bool {
     let (place, other) = (place, other.place)

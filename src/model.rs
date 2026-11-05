@@ -200,9 +200,11 @@ pub struct Note {
 }
 
 /// A run of a note's text, and what it is: its role, if it has one – "origin" (the verse the note
-/// is on, as the note names it), "quotation" (words of the text), "emphasis", "label" – its
-/// language, where it isn't the book's, and the verse it refers to, where it is a reference.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+/// is on, as the note names it), "quotation" (words of the text), "emphasis", "strong", "label" –
+/// its language, where it isn't the book's, and the verse it refers to, where it is a reference. In
+/// a word's entry, a run can lead to every verse with a number instead (`number`), which a reader
+/// tells its host of.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)]
 pub struct NoteRun {
     pub text: String,
     #[serde(default)]
@@ -211,6 +213,8 @@ pub struct NoteRun {
     pub language: Option<String>,
     #[serde(default)]
     pub target: Option<Target>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<String>,
 }
 
 /// A verse a note refers to: its book by USFM code, which the book's editions share, its chapter,

@@ -136,6 +136,8 @@ impl Speech {
             mark_notes: MarkNotes::Sign,
             lexicon: LexiconUse::None,
             lexicon_books: None,
+            linked_books: Vec::new(),
+            marked_number: None,
         };
         let blocks = library.blocks(references, &options);
         let mut recordings = Recordings { library, voices: recorded, chapters: HashMap::new(), chosen: Vec::new() };
@@ -265,6 +267,7 @@ impl Speech {
                 start,
                 end: offset,
                 entry: false,
+                linked: false,
             });
             utterance.text.push_str(&word.text);
             utterance.text.push_str(word.after);
@@ -517,6 +520,8 @@ mod tests {
                 mark_notes: MarkNotes::Sign,
                 lexicon: LexiconUse::Entries,
                 lexicon_books: None,
+                linked_books: Vec::new(),
+                marked_number: None,
             },
         );
         let spoken = all(speech(&[reference("jonah", Some(2), None, None)], &[], false, None), 4000);

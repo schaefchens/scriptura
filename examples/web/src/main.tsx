@@ -8,6 +8,7 @@ import {
   cutOut,
   marksTouching,
   type MoveStep,
+  type NumberedVerse,
   type Passage,
   palette,
   Reader,
@@ -20,6 +21,7 @@ import {
   type SpeechChange,
   within,
   type VersePosition,
+  type VersesWith,
   type WordPosition,
 } from '@schaefchens/scriptura-react';
 import { StrictMode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -49,6 +51,8 @@ const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 /** The books whose words open lexicon entries: the Hebrew and the Greek. The translations' tagging is rough – the World English Bible's "the" stands for "all" thousands of times. */
 const ORIGINALS = new Set(['he', 'el']);
+/** Translations whose words link to the originals' by their numbers: Luther 1912's tagging is clean, the World English Bible's rough. */
+const LINKED_WORKS = new Set(['Luther 1912']);
 
 const MOVES: [MoveStep, string][] = [
   ['verse-1', '◀ verse'],
@@ -87,6 +91,10 @@ function App() {
   // A double tap on a word of the Hebrew or the Greek opens its lexicon entry; the numbers can stand in the text too.
   const [lexicon, setLexicon] = useState<'entries' | 'numbers' | 'none'>('entries');
   const originals = useMemo(() => books.filter(({ language }) => ORIGINALS.has(language)).map(({ id }) => id), [books]);
+  const linked = useMemo(() => books.filter(({ work }) => LINKED_WORKS.has(work)).map(({ id }) => id), [books]);
+  // Every verse with a word's number, from its entry: a reading list, the number's words marked, until "Back".
+  const [study, setStudy] = useState<{ number: string; verses: NumberedVerse[] } | null>(null);
+  const onVersesWith = ({ number }: VersesWith) => setStudy({ number, verses: library.versesWith(number, [...originals, ...linked]) });
   // A cross reference to a book the library doesn't hold; and a verse to jump to once its book shows.
   const [missing, setMissing] = useState<string>();
   const pending = useRef<WordPosition>(undefined);
@@ -131,7 +139,15 @@ function App() {
     reader.current?.select({ passage: selection.passage, book: selection.book, ...span });
   }, [JSON.stringify(selection)]);
 
-  const passages = useMemo(() => (book === 'sign' ? SIGN_OF_JONAH : [{ book }]), [book]);
+  const passages = useMemo(
+    () =>
+      study
+        ? study.verses.map(({ book, chapter, verse }) => ({ book, chapter, from: verse, to: verse }))
+        : book === 'sign'
+          ? SIGN_OF_JONAH
+          : [{ book }],
+    [book, study],
+  );
   // Other editions of the passages' books, which can be read along with them.
   const codes = new Set(passages.map((passage) => books.find(({ id }) => id === passage.book)?.code));
   const editions = books.filter(({ id, code }) => code && codes.has(code) && !passages.some((passage) => passage.book === id));
@@ -250,7 +266,7 @@ function App() {
   return (
     <main style={{ background: colors.background, color: colors.text }}>
       <header>
-        <select value={book} onChange={(event) => setBook(event.target.value)}>
+        <select value={book} onChange={(event) => { setStudy(null); setBook(event.target.value); }}>
           <option value="sign">The sign of Jonah</option>
           {books.map(({ id, title, work }) => (
             <option key={id} value={id}>{`${title} · ${work}`}</option>
@@ -297,6 +313,7 @@ function App() {
           <button onClick={() => reader.current?.play()}>Read aloud</button>
         )}
         {speech.state !== 'stopped' && <button onClick={() => reader.current?.stop()}>Stop</button>}
+        {study && <button onClick={() => setStudy(null)}>Back from {study.number}, {study.verses.length} verses</button>}
         <button onClick={() => setPen(pen ? null : { ...lastStyle.current })}>{pen ? 'Pen on' : 'Pen'}</button>
         <button onClick={() => setRate(RATES[(RATES.indexOf(rate) + 1) % RATES.length])}>{rate}×</button>
         <select value={recited} onChange={(event) => setRecited(event.target.value)}>
@@ -333,6 +350,9 @@ function App() {
         markNotes={markNotes}
         lexicon={lexicon}
         lexiconBooks={originals}
+        linkedBooks={linked}
+        markedNumber={study?.number}
+        onVersesWith={onVersesWith}
         selectBy={selectBy}
         // While the pen is up, the words being selected look as they will marked.
         selectionStyle={penLook}

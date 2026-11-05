@@ -3,7 +3,7 @@ use std::ops::RangeFrom;
 
 use serde::Serialize;
 
-use crate::lexicon::{Lexicons, digits};
+use crate::lexicon::{Lexicons, digits, same_number};
 use crate::model::{Mark, Note, NoteRun, WordTag};
 use crate::{Book, Chapter, Library, MarkNotes, Notes, Options, Reference, Verse, VerseNumbers};
 
@@ -79,6 +79,10 @@ pub struct Word {
     /// [`Library::entry`]. A reader opens it on a double tap.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub entry: bool,
+    /// Whether it carries the number the options mark, lightly, as a reader draws the words a word
+    /// reached links to: see [`Options::marked_number`].
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub linked: bool,
 }
 
 /// A note's mark in a paragraph: on which verse, its range in the paragraph's text in UTF-16 code
@@ -304,7 +308,7 @@ impl<'a> Edition<'a> {
 }
 
 /// A verse's chapter and number as the KJV counts them.
-fn kjv(chapter: &Chapter, verse: &Verse) -> (u32, u32) {
+pub(crate) fn kjv(chapter: &Chapter, verse: &Verse) -> (u32, u32) {
     verse.kjv.unwrap_or((chapter.number, verse.number))
 }
 
@@ -380,6 +384,7 @@ fn paragraph<'a>(
 ) -> Block {
     let (size, notes) = (shown.options.font_size, shown.options.notes);
     let (entries, numbers) = (shown.options.entries_in(&book.id), shown.options.numbers_in(&book.id));
+    let marked = shown.options.marked_number.as_deref().filter(|_| shown.options.links_in(&book.id));
     let mut text = Text::default();
     let mut drop = None;
     for (chapter, verse) in verses {
@@ -421,8 +426,11 @@ fn paragraph<'a>(
         };
         for (index, &(start, end)) in (0..).zip(&words) {
             let entry = entries && shown.lexicons.has_entry(verse, (start, end));
+            let linked = marked.is_some_and(|number| {
+                crate::lexicon::numbers_within(verse, (start, end)).any(|own| same_number(own, number))
+            });
             let (start, end) = (offset + start + moved(start, true), offset + end + moved(end, false));
-            text.words.push(Word { chapter, verse: verse.number, index, start, end, entry });
+            text.words.push(Word { chapter, verse: verse.number, index, start, end, entry, linked });
         }
         if opens && let Some(&(first, _)) = words.first() {
             let (start, letter) = (offset + first + moved(first, true), initial(&verse_text, first));
@@ -886,6 +894,8 @@ mod tests {
             mark_notes: MarkNotes::Sign,
             lexicon: crate::LexiconUse::Entries,
             lexicon_books: None,
+            linked_books: Vec::new(),
+            marked_number: None,
         }
     }
 
@@ -1195,7 +1205,7 @@ mod tests {
         assert_eq!(jonah.notes.len(), 1);
         assert_eq!(
             jonah.notes[0].runs[0],
-            NoteRun { text: "1:1 ".into(), role: Some("origin".into()), language: None, target: None }
+            NoteRun { text: "1:1 ".into(), role: Some("origin".into()), ..NoteRun::default() }
         );
         assert_eq!(words(std::slice::from_ref(jonah))[1], "Yahweh’s");
     }

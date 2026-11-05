@@ -12,11 +12,12 @@ import type {
   SelectionFrame,
   SpeechChange,
   VersePosition,
+  VersesWith,
   WordPosition,
 } from '@schaefchens/scriptura';
 import { palette, within } from '@schaefchens/scriptura';
 
-import type { Block, Library, LibraryChange, NoteMark, PlacedMark, Target } from './library';
+import type { Block, BlockOptions, Library, LibraryChange, NoteMark, PlacedMark, Target } from './library';
 import { ReadAloud } from './readAloud';
 
 export type WebReaderOptions = ReaderOptions & {
@@ -46,6 +47,8 @@ export type WebReaderOptions = ReaderOptions & {
    * scrolled or turned, brought somewhere, or laid out anew. For an app's index of books and chapters, or a place to come back to.
    */
   onVerseInSight?: (verse: VersePosition) => void;
+  /** A link in a word's entry followed to every verse with one of its numbers: for the page to show them, as Library.versesWith() finds them. */
+  onVersesWith?: (link: VersesWith) => void;
 };
 
 export type WebReader = {
@@ -82,7 +85,7 @@ export type WebReader = {
 type Place = { passage: number; book: string; chapter: number; verse: number; index: number };
 
 /** A word of the text: where it stands, its paragraph, its range in the paragraph's text, and whether a double tap opens its lexicon entry. */
-type Word = { place: Place; block: number; start: number; end: number; entry: boolean };
+type Word = { place: Place; block: number; start: number; end: number; entry: boolean; linked: boolean };
 
 /** A piece of a paragraph's text in the page: its text node, and where it starts in the paragraph's text. */
 type Piece = { node: Text; start: number; length: number };
@@ -101,9 +104,11 @@ const PRESS = 450;
 const EDGE = 48;
 const SIDE = 32;
 const SIDE_REST = 500;
+/** Behind words linked, where the colors give none: the palette's lavender, on white. */
+const LINKED = '#E3DAF3';
 /** What screen readers read where a mark starts. */
 const MARKED = 'Marked. ';
-const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVoices' | 'nowPlaying' | 'dropCapFont' | 'selectionStyle' | 'lexiconBooks'>> = {
+const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVoices' | 'nowPlaying' | 'dropCapFont' | 'selectionStyle' | 'lexiconBooks' | 'markedNumber'>> = {
   fontSize: 28,
   paging: 'scroll',
   columns: 1,
@@ -118,6 +123,7 @@ const DEFAULTS: Required<Omit<ReaderOptions, 'passages' | 'colors' | 'recordedVo
   dropCaps: true,
   markNotes: 'sign',
   lexicon: 'entries',
+  linkedBooks: [],
   selectBy: 'word',
   voices: {},
   speakAlong: false,
@@ -188,6 +194,9 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   /** Fonts waited for, once each: until they come, others stand in and are measured instead. */
   const awaited = new Set<string>();
   const highlightName = `scriptura-word-${id}`;
+  const linkedName = `scriptura-linked-${id}`;
+  /** The words the word reached links to in the books read along, by where they stand. */
+  let linkedNow: WordPosition[] = [];
   /** A long press: the words it started on and those the pointer is on – each a range of words, a verse's for its number – where the pointer is, and since when it rests at a page's side. */
   let pressed: { anchor: [number, number]; focus: [number, number]; x: number; y: number; sideSince?: number } | undefined;
   let pressTimer: number | undefined;
@@ -224,16 +233,8 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     shownPassages = JSON.stringify(passages);
     closeNote();
 
-    blocks = library.blocks(passages, {
-      fontSize,
-      versePerLine,
-      companions,
-      notes: options.notes,
-      dropCaps: options.dropCaps,
-      markNotes: options.markNotes,
-      lexicon: options.lexicon,
-      lexiconBooks: options.lexiconBooks,
-    });
+    if (!staying) linkedNow = [];
+    blocks = library.blocks(passages, blockOptions());
     const families = [...blocks.map(familyOf), ...(options.dropCapFont ? [`"${options.dropCapFont}"`] : [])];
     const loading = [...new Set(families)].filter((family) => !fontsLoaded(family) && !awaited.has(family));
     if (loading.length > 0) {
@@ -263,7 +264,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       for (const word of block.words) {
         const { chapter, verse, index: wordIndex } = word;
         const place = { passage: block.passage, book: block.book, chapter, verse, index: wordIndex };
-        words.push({ place, block: index, start: word.start, end: word.end, entry: word.entry ?? false });
+        words.push({ place, block: index, start: word.start, end: word.end, entry: word.entry ?? false, linked: word.linked ?? false });
       }
     });
 
@@ -280,6 +281,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       highlight();
     }
     drawMarks();
+    drawLinked();
     // Other books read along or other recordings change what is read, and a new rate how: the voice goes on from the word it is at. A
     // recording takes a new rate as it plays.
     const read = JSON.stringify([companions, options.speakAlong, options.recordedVoices]);
@@ -472,14 +474,43 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     return { fontFamily: dropFamily, fontSize: `${dropSize}px`, lineHeight: `${2 * line}px`, blockSize: `${2 * line - 0.5}px`, top: `${shift}px` };
   }
 
+  /** The options passages are made into paragraphs with, as the reader's are. */
+  function blockOptions(): BlockOptions {
+    const { fontSize, versePerLine, companions, notes, dropCaps, markNotes, lexicon, lexiconBooks, linkedBooks, markedNumber } = options;
+    return { fontSize, versePerLine, companions, notes, dropCaps, markNotes, lexicon, lexiconBooks, linkedBooks, markedNumber };
+  }
+
+  /** The books whose verses an entry's links count: those that open entries, then the translations linked; every book, where all open entries. */
+  const entryBooks = () => (options.lexiconBooks ? [...options.lexiconBooks, ...(options.linkedBooks ?? [])] : undefined);
+
+  /**
+   * Marks, lightly, the words the word reached links to in the books read along, and the words of the number marked – below the
+   * marks and the word reached.
+   */
+  function drawLinked() {
+    if (!('highlights' in CSS)) return;
+    const ranges: Range[] = [];
+    const add = (index: number | undefined) => {
+      const word = index === undefined ? undefined : words[index];
+      const range = word && drawnRange(word.block, word.start, word.end);
+      if (range) ranges.push(range);
+    };
+    words.forEach((word, index) => word.linked && add(index));
+    for (const { passage, book, chapter, verse, word } of linkedNow) add(indices.get(key({ passage, book, chapter, verse, index: word })));
+    if (ranges.length === 0) return CSS.highlights.delete(linkedName);
+    const linked = new Highlight(...ranges);
+    linked.priority = -1;
+    CSS.highlights.set(linkedName, linked);
+  }
+
   /** A note as screen readers announce its mark: "Footnote 1", "Cross reference a" – the sign of a mark's note as "Note", a word's number as "Lexicon entry 1961". */
   const describe = (note: NoteMark) => (note.kind === 'mark' ? NOTE_NAMES.mark : `${NOTE_NAMES[note.kind] ?? 'Note'} ${note.mark}`);
 
   /**
    * What a note's mark opens: the note's runs, what it is called, and the verse it stands in – and for a word's entry, the language
-   * and direction of the lexicon it comes from, where a note has its paragraph's.
+   * and direction of the lexicon it comes from, where a note has its paragraph's, and the word it is of.
    */
-  type Opening = { runs: NoteRun[]; label: string; chapter: number; verse: number; language?: string; direction?: 'ltr' | 'rtl' };
+  type Opening = { runs: NoteRun[]; label: string; chapter: number; verse: number; language?: string; direction?: 'ltr' | 'rtl'; from?: WordPosition };
 
   /** What a mark opens: its note – or for a word's number, the word's entry, which the library gives. */
   function openingOf(mark: HTMLElement): [Block, Opening] | undefined {
@@ -488,8 +519,9 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     if (!note) return undefined;
     const opening = { runs: note.runs, label: describe(note), chapter: note.chapter, verse: note.verse };
     if (note.kind !== 'entry') return [block, opening];
-    const entry = options.library.entry(block.book, note.chapter, note.verse, note.word ?? 0);
-    return entry && [block, { ...opening, ...entry }];
+    const entry = options.library.entry(block.book, note.chapter, note.verse, note.word ?? 0, entryBooks());
+    const from = { passage: block.passage, book: block.book, chapter: note.chapter, verse: note.verse, word: note.word ?? 0 };
+    return entry && [block, { ...opening, ...entry, from }];
   }
 
   function openNote(mark: HTMLElement) {
@@ -501,11 +533,11 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   function openEntry(index: number) {
     const word = words[index];
     const { book, chapter, verse, index: at } = word.place;
-    const entry = options.library.entry(book, chapter, verse, at);
+    const entry = options.library.entry(book, chapter, verse, at, entryBooks());
     if (!entry) return;
     const range = rangeBetween(word.block, word.start, word.end);
     const rect = range.getClientRects()[0] ?? range.getBoundingClientRect();
-    showNote([blocks[word.block], { ...entry, label: NOTE_NAMES.entry, chapter, verse }], word.block, rect);
+    showNote([blocks[word.block], { ...entry, label: NOTE_NAMES.entry, chapter, verse, from: positionOf(word.place) }], word.block, rect);
   }
 
   /**
@@ -547,13 +579,23 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
         dialog.append(paragraph);
         continue;
       }
-      const piece = document.createElement(run.target ? 'button' : 'span');
-      if (run.target) {
-        const target = run.target;
+      const linksTo = run.target ?? (run.number && note.from ? run.number : undefined);
+      const piece = document.createElement(linksTo ? 'button' : 'span');
+      if (linksTo) {
         (piece as HTMLButtonElement).type = 'button';
         piece.className = 'scriptura-reference';
         piece.style.color = colors.roles.note ?? '';
+      }
+      if (run.target) {
+        const target = run.target;
         piece.addEventListener('click', () => followReference(target, note, block));
+      } else if (run.number && note.from) {
+        // Every verse with the number, for the page to show.
+        const [number, from] = [run.number, note.from];
+        piece.addEventListener('click', () => {
+          closeNote();
+          options.onVersesWith?.({ number, from });
+        });
       }
       if (run.role === 'origin') piece.style.color = colors.roles.origin ?? '';
       if (run.role === 'number') piece.style.color = colors.roles.number ?? '';
@@ -936,6 +978,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
   function styleHighlights() {
     const look = selectionLook();
     highlightStyle.textContent = `::highlight(${highlightName}) { background-color: ${options.colors.highlight}; }
+      ::highlight(${linkedName}) { background-color: ${options.colors.linked ?? LINKED}; }
       .scriptura-${id} ::selection { ${look} }
       ::highlight(${pressedName}) { ${look} }`;
   }
@@ -1152,6 +1195,9 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
     closeNote();
     following = true;
     mark(index);
+    // Read along, the words it links to in the other books.
+    linkedNow = options.companions.length > 0 ? options.library.counterparts(options.passages, blockOptions(), positionOf(words[index].place)) : [];
+    drawLinked();
     live.textContent = rangeOf(words[index]).toString();
     if (readAloud.state === 'speaking') play();
   }
@@ -1637,6 +1683,7 @@ export function createReader(element: HTMLElement, initial: WebReaderOptions): W
       readAloud.stop();
       resizes.disconnect();
       CSS.highlights?.delete(highlightName);
+      CSS.highlights?.delete(linkedName);
       CSS.highlights?.delete(pressedName);
       clearTimeout(pressTimer);
       if (edgeFrame !== undefined) cancelAnimationFrame(edgeFrame);

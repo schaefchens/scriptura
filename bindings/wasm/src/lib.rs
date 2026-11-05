@@ -84,6 +84,10 @@ struct Options {
     lexicon: String,
     #[serde(default)]
     lexicon_books: Option<Vec<String>>,
+    #[serde(default)]
+    linked_books: Vec<String>,
+    #[serde(default)]
+    marked_number: Option<String>,
 }
 
 fn entries() -> String {
@@ -230,10 +234,36 @@ impl Library {
     }
 
     /// A word's entry, by where the word stands, in JSON – its lexicon's language and direction, and
-    /// its runs – or none, where the lexicons hold nothing of it.
+    /// its runs, whose links count the verses of `books`, or of every book, with each number – or
+    /// none, where the lexicons hold nothing of it.
     #[wasm_bindgen(js_name = entryJson)]
-    pub fn entry_json(&self, book: &str, chapter: u32, verse: u32, word: u32) -> Option<String> {
-        self.0.entry(book, chapter, verse, word).map(|entry| serde_json::to_string(&entry).expect("entries serialize"))
+    pub fn entry_json(
+        &self,
+        book: &str,
+        chapter: u32,
+        verse: u32,
+        word: u32,
+        books: Option<Vec<String>>,
+    ) -> Option<String> {
+        let entry = self.0.entry(book, chapter, verse, word, books.as_deref())?;
+        Some(serde_json::to_string(&entry).expect("entries serialize"))
+    }
+
+    /// Every verse of `books`, in the order given, with words of a number, in JSON: book, chapter,
+    /// verse and the words' indices of each – a translation's only where the books before it lack it.
+    #[wasm_bindgen(js_name = versesWithJson)]
+    pub fn verses_with_json(&self, number: &str, books: Vec<String>) -> String {
+        serde_json::to_string(&self.0.verses_with(number, &books)).expect("verses serialize")
+    }
+
+    /// The words that carry a number of the word at `from` – a word's place, in JSON – in the books
+    /// its passage shows read along with, where both link, as places in JSON. The passages and
+    /// options as `blocksJson` takes them.
+    #[wasm_bindgen(js_name = counterpartsJson)]
+    pub fn counterparts_json(&self, references: &str, options: &str, from: &str) -> Result<String, JsError> {
+        let options = core_options(options)?;
+        let from: scriptura::Place = serde_json::from_str(from)?;
+        Ok(serde_json::to_string(&self.0.counterparts(&parse_references(references)?, &options, &from))?)
     }
 
     /// The books as JSON: id, code, title, work, language and direction of each.
@@ -256,33 +286,12 @@ impl Library {
     /// words. `options` is JSON too: fontSize, versePerLine and companions, how the notes show
     /// (notes: "marks", "inline" or "none"; marks by default), whether drop caps are wanted
     /// (dropCaps: by default they are), how the marks' notes show (markNotes: "sign" or "inline";
-    /// a sign by default), and what the words' numbers do (lexicon: "entries", "numbers" or "none";
-    /// entries by default) in which books (lexiconBooks; every book's by default).
+    /// a sign by default), what the words' numbers do (lexicon: "entries", "numbers" or "none";
+    /// entries by default) in which books (lexiconBooks; every book's by default), the translations
+    /// whose words link to them (linkedBooks), and a number whose words are marked (markedNumber).
     #[wasm_bindgen(js_name = blocksJson)]
     pub fn blocks_json(&self, references: &str, options: &str) -> Result<String, JsError> {
-        let Options { font_size, verse_per_line, companions, notes, drop_caps, mark_notes, lexicon, lexicon_books } =
-            serde_json::from_str(options)?;
-        let notes = match notes.as_str() {
-            "none" => scriptura::Notes::None,
-            "inline" => scriptura::Notes::Inline,
-            _ => scriptura::Notes::Marks,
-        };
-        let mark_notes = if mark_notes == "inline" { scriptura::MarkNotes::Inline } else { scriptura::MarkNotes::Sign };
-        let lexicon = match lexicon.as_str() {
-            "none" => scriptura::LexiconUse::None,
-            "numbers" => scriptura::LexiconUse::Numbers,
-            _ => scriptura::LexiconUse::Entries,
-        };
-        let options = scriptura::Options {
-            font_size,
-            verse_per_line,
-            companions,
-            notes,
-            drop_caps,
-            mark_notes,
-            lexicon,
-            lexicon_books,
-        };
+        let options = core_options(options)?;
         Ok(serde_json::to_string(&self.0.blocks(&parse_references(references)?, &options))?)
     }
 
@@ -305,6 +314,45 @@ impl Speech {
     pub fn next_json(&mut self, limit: u32) -> Option<String> {
         self.0.next(limit as usize).map(|part| serde_json::to_string(&part).expect("parts serialize"))
     }
+}
+
+/// The options of `blocksJson`, from their JSON: see `Library::blocks_json`.
+fn core_options(options: &str) -> Result<scriptura::Options, serde_json::Error> {
+    let Options {
+        font_size,
+        verse_per_line,
+        companions,
+        notes,
+        drop_caps,
+        mark_notes,
+        lexicon,
+        lexicon_books,
+        linked_books,
+        marked_number,
+    } = serde_json::from_str(options)?;
+    let notes = match notes.as_str() {
+        "none" => scriptura::Notes::None,
+        "inline" => scriptura::Notes::Inline,
+        _ => scriptura::Notes::Marks,
+    };
+    let mark_notes = if mark_notes == "inline" { scriptura::MarkNotes::Inline } else { scriptura::MarkNotes::Sign };
+    let lexicon = match lexicon.as_str() {
+        "none" => scriptura::LexiconUse::None,
+        "numbers" => scriptura::LexiconUse::Numbers,
+        _ => scriptura::LexiconUse::Entries,
+    };
+    Ok(scriptura::Options {
+        font_size,
+        verse_per_line,
+        companions,
+        notes,
+        drop_caps,
+        mark_notes,
+        lexicon,
+        lexicon_books,
+        linked_books,
+        marked_number,
+    })
 }
 
 fn parse_references(json: &str) -> Result<Vec<scriptura::Reference>, serde_json::Error> {

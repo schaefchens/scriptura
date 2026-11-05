@@ -1,4 +1,4 @@
-import type { BookInfo, LexiconInfo, Mark, MarkInfo, NoteRun, Passage, ReaderOptions, RecordingInfo, Target, WordPosition } from '@schaefchens/scriptura';
+import type { BookInfo, LexiconInfo, Mark, MarkInfo, NoteRun, NumberedVerse, Passage, ReaderOptions, RecordingInfo, Target, WordPosition } from '@schaefchens/scriptura';
 
 import init, { Library as Core, type Speech as CoreSpeech } from './generated/scriptura_wasm.js';
 
@@ -21,7 +21,7 @@ export type Block = {
   /** Ranges in the block's text in UTF-16 code units, as JS counts them. */
   verses: { chapter: number; verse: number; start: number; end: number }[];
   /** Its words, and whether each opens a lexicon entry, as the options let it: see Library.entry. */
-  words: { chapter: number; verse: number; index: number; start: number; end: number; entry?: boolean }[];
+  words: { chapter: number; verse: number; index: number; start: number; end: number; entry?: boolean; linked?: boolean }[];
   /** The notes on its verses, each at its mark in the text, which opens it. See the core's NoteMark. */
   notes: NoteMark[];
   /** What opens the chapter, set large over the paragraph's first lines: in running text, where the passage reads the chapter from its start. */
@@ -107,6 +107,12 @@ export class Speech {
     this.core.free();
   }
 }
+
+/** What passages are made into paragraphs with: see Library.blocks. */
+export type BlockOptions = { fontSize: number } & Pick<
+  ReaderOptions,
+  'versePerLine' | 'companions' | 'notes' | 'dropCaps' | 'markNotes' | 'lexicon' | 'lexiconBooks' | 'linkedBooks' | 'markedNumber'
+>;
 
 let loading: Promise<unknown> | undefined;
 
@@ -251,10 +257,29 @@ export class Library {
     return JSON.parse(this.core.lexiconsJson());
   }
 
-  /** A word's entry, by where it stands: see WordEntry. None where the lexicons hold nothing of it. */
-  entry(book: string, chapter: number, verse: number, word: number): WordEntry | undefined {
-    const json = this.core.entryJson(book, chapter, verse, word);
+  /**
+   * A word's entry, by where it stands: see WordEntry. Its links to every verse with a number count those of `books`, as
+   * versesWith() finds them – of every book, without. None where the lexicons hold nothing of it.
+   */
+  entry(book: string, chapter: number, verse: number, word: number, books?: string[]): WordEntry | undefined {
+    const json = this.core.entryJson(book, chapter, verse, word, books);
     return json === undefined ? undefined : JSON.parse(json);
+  }
+
+  /**
+   * Every verse of `books` – in the order given – with words of a number, and which of its words: by where they stand. A verse that a
+   * book before it holds too, an edition of it, is left out: a translation adds the verses the originals lack.
+   */
+  versesWith(number: string, books: string[]): NumberedVerse[] {
+    return JSON.parse(this.core.versesWithJson(number, books));
+  }
+
+  /**
+   * The words that carry a number of the word at `from` in the books its passage shows read along with, where both link (see
+   * ReaderOptions.linkedBooks), by where they stand.
+   */
+  counterparts(passages: Passage[], options: BlockOptions, from: WordPosition): WordPosition[] {
+    return JSON.parse(this.core.counterpartsJson(JSON.stringify(passages), JSON.stringify(options), JSON.stringify(from)));
   }
 
   private changed(change: LibraryChange) {
@@ -267,10 +292,7 @@ export class Library {
   }
 
   /** The passages as paragraphs, read along with `companions`. */
-  blocks(
-    passages: Passage[],
-    options: { fontSize: number } & Pick<ReaderOptions, 'versePerLine' | 'companions' | 'notes' | 'dropCaps' | 'markNotes' | 'lexicon' | 'lexiconBooks'>,
-  ): Block[] {
+  blocks(passages: Passage[], options: BlockOptions): Block[] {
     return JSON.parse(this.core.blocksJson(JSON.stringify(passages), JSON.stringify(options)));
   }
 
