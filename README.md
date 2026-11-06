@@ -109,6 +109,7 @@ It also makes recordings of surahs: EveryAyah's recitations, a file per verse, j
 - **React Native:** `npm run build:native -w bindings/react-native` builds the core for iOS and Android; it needs rustup's iOS and Android targets, cargo-ndk, Xcode and ANDROID_HOME. Then, in examples/react-native, `npm run texts` and `npx expo run:ios` or `run:android`.
 - **Web:** `npm run build -w bindings/web` needs the wasm32 target and wasm-bindgen-cli 0.2.129. Then, in examples/web, `npm run texts` and `npm run dev`.
 - **TypeScript:** `npm run build` builds the web packages and the shared one into their dist folders, which apps from npm get; React Native, and the examples here, take the sources.
+- **Cleaning up:** `npm run clean` frees the disk of what builds and tests left; `-- --downloads` also removes the examples' texts, recordings and fonts, `-- --all` also `node_modules`, `-- --devices` Scriptura's own simulators and emulators, `-- -n` only lists.
 - package-lock.json holds Expo's packages as published by 2026-10-27 (`npm install --before`): those released the day after asked for an expo-constants not yet published, and ExpoModulesJSI didn't compile.
 
 ## What the tests show

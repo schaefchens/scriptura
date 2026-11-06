@@ -10,7 +10,8 @@
     "examples/web"
   ],
   "scripts": {
-    "build": "npm run build -w bindings/js -w bindings/web -w bindings/react"
+    "build": "npm run build -w bindings/js -w bindings/web -w bindings/react",
+    "clean": "sh tools/clean.sh"
   },
   "overrides": {
     "react": "19.3.0",
